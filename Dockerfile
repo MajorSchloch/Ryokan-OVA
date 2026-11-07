@@ -24,53 +24,10 @@ COPY templates/ templates/
 COPY static/ static/
 RUN touch src/main.rs && cargo build --release --locked
 
-# ffprobe stage. Source classification shells out to `ffprobe`
-# (services::source_ffprobe), and Debian's ffmpeg package would add
-# ~470 MB of codec libraries for it. This builds a ~4 MB static ffprobe
-# cut down to the fields that layer reads: demuxers for every extension
-# post-processing imports (mkv/webm, mp4/m4v, avi, wmv, flv, ts), the
-# codec parsers, and the video decoders, which fill in `pix_fmt` (the
-# bit-depth signal). Audio and subtitle codec names come from the
-# container, so no audio or subtitle decoders. zlib covers mkv tracks
-# compressed with it (older mkvmerge did that to subtitles by default).
-# -static so the binary needs nothing from the runtime image; it runs
-# once here so each native CI runner (amd64 and arm64) executes it.
-#
-# To update: bump FFMPEG_VERSION and set FFMPEG_SHA256 to the sha256 of
-# that release tarball, after checking its .asc signature against
-# FFmpeg's release key (https://ffmpeg.org/download.html#releases).
-# A new importable extension needs its demuxer added to the list.
-FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS ffprobe
-
-ARG FFMPEG_VERSION=9.0.2
-ARG FFMPEG_SHA256=8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    gcc \
-    libc6-dev \
-    make \
-    xz-utils \
-    zlib1g-dev
-
-WORKDIR /src
-RUN curl -fsSLo ffmpeg.tar.xz "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" \
-    && echo "${FFMPEG_SHA256}  ffmpeg.tar.xz" | sha256sum -c - \
-    && tar xf ffmpeg.tar.xz --strip-components=1
-RUN ./configure \
-        --disable-everything --disable-autodetect --disable-doc --disable-debug \
-        --disable-network --disable-programs --enable-ffprobe \
-        --disable-avdevice --disable-avfilter --disable-swscale --disable-swresample \
-        --disable-x86asm --enable-small --enable-zlib \
-        --enable-protocol=file \
-        --enable-demuxer=matroska,mov,avi,asf,flv,mpegts \
-        --enable-parser=h264,hevc,av1,mpegvideo,mpeg4video,vc1,aac,aac_latm,ac3,flac,dca,mlp,opus,mpegaudio,vp8,vp9 \
-        --enable-decoder=h264,hevc,av1,mpeg1video,mpeg2video,mpeg4,msmpeg4v3,wmv1,wmv2,wmv3,vc1,vp8,vp9 \
-        --extra-ldflags=-static \
-    && make -j"$(nproc)" ffprobe \
-    && strip ffprobe \
-    && ./ffprobe -hide_banner -version > /dev/null
+# Use the static ffprobe built by the matching upstream Ryokan release.
+# The pinned index supplies a native binary for both amd64 and arm64.
+# Its source and configure options are in the upstream v2.2.3 Dockerfile.
+FROM ghcr.io/johnthreekay/ryokan@sha256:94c03514007fd08d314bee8eeea541e35676140dd6b28a562f86ac4e570e8f5c AS upstream
 
 # Runtime stage
 FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
@@ -89,7 +46,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY --from=builder /app/target/release/ryokan /app/ryokan
-COPY --from=ffprobe /src/ffprobe /usr/local/bin/ffprobe
+COPY --from=upstream /usr/local/bin/ffprobe /usr/local/bin/ffprobe
+RUN /usr/local/bin/ffprobe -hide_banner -version > /dev/null
 COPY static/ /app/static/
 COPY LICENSE /app/LICENSE
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
