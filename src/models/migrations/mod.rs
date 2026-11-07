@@ -119,7 +119,8 @@ async fn reconcile_column_rename(db: &SqlitePool, table: &str, legacy: &str, new
 
 // SQLite stores this definition with a canonical CREATE TRIGGER prefix.
 // Restore accepts only the exact trigger installed by this migration.
-pub(crate) const REVIEWED_OFFSET_TRIGGER: &str = "series_clear_reviewed_offset
+pub(crate) const REVIEWED_OFFSET_TRIGGER: &str =
+    "CREATE TRIGGER IF NOT EXISTS series_clear_reviewed_offset
          AFTER UPDATE OF anilist_id ON series
          WHEN OLD.anilist_id IS NOT NEW.anilist_id AND OLD.cumulative_offset_reviewed = 1
          BEGIN
@@ -3144,11 +3145,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     }
     // A review belongs to one AniList entry. Reusing the local row for a
     // different entry invalidates both the review and its cached number.
-    sqlx::query(&format!(
-        "CREATE TRIGGER IF NOT EXISTS {REVIEWED_OFFSET_TRIGGER}"
-    ))
-    .execute(db)
-    .await?;
+    sqlx::query(REVIEWED_OFFSET_TRIGGER).execute(db).await?;
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_series_mal_id_lookup ON series (mal_id) WHERE mal_id IS NOT NULL",
     )
