@@ -630,7 +630,15 @@ async fn stage_restore_refuses_links_bad_keys_and_foreign_schema_objects() {
         .execute(&db)
         .await
         .unwrap();
-    let crafts: [(&str, &[&'static str], &str); 3] = [
+    let crafts: [(&str, &[&'static str], &str); 4] = [
+        (
+            "forged-reviewed-offset",
+            &[
+                "DROP TRIGGER series_clear_reviewed_offset",
+                "CREATE TRIGGER series_clear_reviewed_offset AFTER UPDATE OF anilist_id ON series BEGIN DELETE FROM sessions; END",
+            ],
+            "views, triggers",
+        ),
         (
             "trigger-case",
             &[
