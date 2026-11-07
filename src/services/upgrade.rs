@@ -445,6 +445,20 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                     }
                 };
 
+            if result
+                .release_mapping
+                .as_ref()
+                .is_some_and(|mapping| mapping.anilist_id != row.anilist_id)
+            {
+                logger::warn(
+                    &state.db,
+                    LogCategory::Grab,
+                    "Upgrade held: episode mapping belongs to another entry",
+                    &result.title,
+                )
+                .await;
+                continue;
+            }
             match client
                 .add_torrent_returning_id(&url, &result.info_hash)
                 .await
@@ -473,34 +487,58 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                         auto_search::SearchTarget::Episode(n) => vec![*n],
                         auto_search::SearchTarget::Single => vec![1],
                     };
-                    if result.is_batch {
+                    if let Some(replay) = &result.replay_episodes {
+                        ep_nums = replay.clone();
+                    } else if let Some(mapping) = &result.release_mapping {
+                        ep_nums = mapping.episodes();
+                    } else if result.is_batch {
                         let parsed = auto_search::parse_release_numbers(&result.title);
                         if !parsed.is_empty() {
                             ep_nums = parsed.into_iter().collect();
                             ep_nums.sort_unstable();
                         }
+                    }
+                    if result.is_batch {
                         // Mark every episode this batch will cover as
                         // satisfied so the rest of this series's loop
                         // doesn't re-find / re-grab the same pack.
                         covered_by_batch.extend(&ep_nums);
                     }
-                    let grab_id = crate::models::grabbed_torrents::record_grab(
+                    let recorded = crate::models::grabbed_torrents::source_replay::record(
                         &state.db,
                         &canonical_id,
                         &result.title,
                         row.id,
                         &ep_nums,
                         result.is_batch,
+                        result.release_mapping.as_ref(),
+                        None,
+                        crate::models::grabbed_torrents::source_replay::SourceRef {
+                            url: &url,
+                            guid: &result.source_guid,
+                            indexer_id: result.indexer_id,
+                            client_id: Some(dispatch_client_id),
+                            required_replay: result.replay_episodes.is_some(),
+                        },
                     )
-                    .await
-                    .ok()
-                    .flatten();
-                    // Misgrab guardrails: keep the URL so Restore can re-add a removed grab.
-                    if let Some(gid) = grab_id {
-                        let _ =
-                            crate::models::grabbed_torrents::set_source_url(&state.db, gid, &url)
-                                .await;
-                    }
+                    .await;
+                    let saved = match recorded {
+                        Ok(id) => id,
+                        Err(error) => {
+                            logger::error(
+                                &state.db,
+                                LogCategory::Grab,
+                                "Upgrade added, but its episode decision could not be saved",
+                                &error.to_string(),
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
+                    let grab_id = saved.as_ref().map(|s| s.id);
+                    let replayed = saved.as_ref().is_some_and(|s| s.replayed);
+                    let ep_nums = saved.map(|s| s.episodes).unwrap_or_default();
+
                     if let Some(gid) = grab_id {
                         let _ = crate::models::grabbed_torrents::set_download_client(
                             &state.db,
@@ -528,7 +566,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                         )
                         .await;
                     }
-                    for ep_num in &ep_nums {
+                    for ep_num in ep_nums.iter().filter(|_| !replayed) {
                         let _ = episode_tags::record_grab_with_match(
                             &state.db,
                             row.id,

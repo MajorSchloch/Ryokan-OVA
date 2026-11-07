@@ -200,6 +200,16 @@ pub struct SearchResult {
     /// existed. Scoring turns it into the "Title Match Confidence" line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub match_provenance: Option<crate::services::auto_search::MatchProvenance>,
+    /// Numbering chosen independently of the requested slot. Automatic
+    /// episodic grabs persist this decision before becoming importable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_mapping: Option<crate::services::release_numbering::ReleaseMapping>,
+    /// Stable indexer release ID, distinct from a client job ID or proxy URL.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source_guid: String,
+    /// Canonical coverage projected from a reviewed source-file decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_episodes: Option<Vec<i32>>,
 }
 
 impl SearchResult {

@@ -145,6 +145,84 @@ async fn blocklist(db: &sqlx::SqlitePool, series_id: i64, hash: &str, title: &st
 }
 
 #[tokio::test]
+async fn rss_numbering_conflicts_never_reach_the_download_client() {
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/feed"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(feed_body())
+                .insert_header("content-type", "application/rss+xml"),
+        )
+        .mount(&mock)
+        .await;
+    for provider_conflict in [false, true] {
+        let db = in_memory_pool().await;
+        ryokan::models::config::save_config(
+            &db,
+            &ryokan::models::config::Config {
+                rss_enabled: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let sid = seed_monitored_series(&db).await;
+        if provider_conflict {
+            ryokan::services::anibridge::seed_mapping_data_for_tests(&serde_json::json!({
+                "mal:99901": { "anilist:9101": { "1-12": "2-13" } }
+            }))
+            .await;
+            sqlx::query("UPDATE series SET mal_id = 99901 WHERE id = ?")
+                .bind(sid)
+                .execute(&db)
+                .await
+                .unwrap();
+        } else {
+            sqlx::query("UPDATE series SET cumulative_prior_episodes = 1 WHERE id = ?")
+                .bind(sid)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        direct_rss_feeds::insert(
+            &db,
+            DirectRssFeedForm {
+                name: "Numbering Feed",
+                url: &format!("{}/feed", mock.uri()),
+                enabled: true,
+                download_client_id: None,
+                request_timeout_secs: None,
+            },
+        )
+        .await
+        .unwrap();
+        let client = Arc::new(RecordingClient {
+            add_calls: Mutex::new(Vec::new()),
+        });
+        let state =
+            build_test_app_state(db.clone(), Some(client.clone() as Arc<dyn DownloadClient>));
+        let summary = sync_once(&state, "manual").await.unwrap();
+        assert_eq!(summary.items_seen, 3);
+        assert_eq!(summary.grabbed, 0);
+        assert!(client.add_calls().is_empty());
+        let decisions = rss::recent_decisions(&db, 10).await.unwrap();
+        assert_eq!(decisions.len(), 3);
+        assert!(
+            decisions
+                .iter()
+                .all(|d| d.decision == "rejected" && d.reason.starts_with("Episode mapping:")),
+            "{decisions:?}"
+        );
+        let grabs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM grabbed_torrents")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(grabs, 0);
+    }
+}
+
+#[tokio::test]
 async fn rss_sync_rejects_blocklisted_releases_by_hash_and_by_title() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
@@ -234,6 +312,13 @@ async fn rss_sync_rejects_blocklisted_releases_by_hash_and_by_title() {
     let pending = grabbed_torrents::get_all_pending(&db).await.unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].hash, CLEAN_HASH);
+    let saved = grabbed_torrents::get_release_mapping(&db, pending[0].id)
+        .await
+        .unwrap()
+        .expect("RSS must retain the numbering decision with the pending grab");
+    assert_eq!(saved.anilist_id, 9101);
+    assert_eq!(saved.episodes(), vec![3]);
+    assert_eq!(pending[0].episode_numbers, vec![3]);
     let failed: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM grabbed_torrents WHERE state = 'failed'")
             .fetch_one(&db)

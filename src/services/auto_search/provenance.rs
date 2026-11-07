@@ -23,6 +23,8 @@ pub enum MatchKind {
     /// The infohash is a SeaDex pick for this series; the title gate
     /// was bypassed on purpose.
     SeadexCurated,
+    /// A saved source-file decision identifies this entry.
+    ReviewedSource,
 }
 
 impl MatchKind {
@@ -31,6 +33,7 @@ impl MatchKind {
             MatchKind::Verbatim => "verbatim",
             MatchKind::Fuzzy => "fuzzy",
             MatchKind::SeadexCurated => "seadex_curated",
+            MatchKind::ReviewedSource => "reviewed_source",
         }
     }
 
@@ -39,6 +42,7 @@ impl MatchKind {
             "verbatim" => Some(MatchKind::Verbatim),
             "fuzzy" => Some(MatchKind::Fuzzy),
             "seadex_curated" => Some(MatchKind::SeadexCurated),
+            "reviewed_source" => Some(MatchKind::ReviewedSource),
             _ => None,
         }
     }
@@ -139,6 +143,15 @@ pub struct MatchProvenance {
 }
 
 impl MatchProvenance {
+    pub fn reviewed_source(phase: MatchPhase) -> Self {
+        Self {
+            phase,
+            kind: MatchKind::ReviewedSource,
+            alias: String::new(),
+            ratio: 1.0,
+        }
+    }
+
     /// A SeaDex-curated candidate: the alias is empty and the ratio is
     /// 1.0 because the hash, not the title, is what matched.
     pub fn seadex(phase: MatchPhase) -> Self {
@@ -201,6 +214,7 @@ pub fn history_summary(kind: &str, phase: &str, alias: &str, ratio: f64) -> Stri
             phase_name
         ),
         MatchKind::SeadexCurated => format!("SeaDex curated release ({})", phase_name),
+        MatchKind::ReviewedSource => format!("Reviewed source files ({})", phase_name),
     }
 }
 
@@ -208,10 +222,11 @@ pub fn history_summary(kind: &str, phase: &str, alias: &str, ratio: f64) -> Stri
 mod tests {
     use super::*;
 
-    const KINDS: [MatchKind; 3] = [
+    const KINDS: [MatchKind; 4] = [
         MatchKind::Verbatim,
         MatchKind::Fuzzy,
         MatchKind::SeadexCurated,
+        MatchKind::ReviewedSource,
     ];
     const PHASES: [MatchPhase; 7] = [
         MatchPhase::Primary,

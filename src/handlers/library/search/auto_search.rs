@@ -554,6 +554,15 @@ async fn run_auto_search_targets_with_upgrades(
                 // For selective downloads, prefer the `.torrent` URL
                 // over the magnet: qBit can parse metadata straight
                 // from the file instead of waiting on DHT/trackers.
+                if let (Some(sid), Some(mapping)) = (series_id, &result.release_mapping) {
+                    let owner = series::get_by_id(&state.db, sid).await.ok().flatten();
+                    if owner.is_none_or(|row| row.anilist_id != mapping.anilist_id) {
+                        skipped.push(format!(
+                            "{label}: episode mapping belongs to another library entry"
+                        ));
+                        continue;
+                    }
+                }
                 let wants_selective = !result.info_hash.is_empty()
                     && auto_search::has_selective_discriminator(&detail);
                 let url = if wants_selective && !result.torrent.is_empty() {
@@ -715,38 +724,55 @@ async fn run_auto_search_targets_with_upgrades(
                             };
                             // For batch releases, parse all episode numbers from
                             // the title so every covered episode gets a grab tag.
-                            if result.is_batch {
+                            if let Some(replay) = &result.replay_episodes {
+                                ep_nums = replay.clone();
+                            } else if let Some(mapping) = &result.release_mapping {
+                                ep_nums = mapping.episodes();
+                            } else if result.is_batch {
                                 let parsed = auto_search::parse_release_numbers(&result.title);
                                 if !parsed.is_empty() {
                                     ep_nums = parsed.into_iter().collect();
                                     ep_nums.sort_unstable();
                                 }
                             }
-                            // `record_grab` returns `None` on the
-                            // empty-hash + FK-violation anomaly path
-                            // documented on the model, or on a DB
-                            // error. The torrent is already in the
-                            // client at this point, so don't unwind —
-                            // skip the seed-rule + attribution stamp
-                            // and let the next reconcile pick it up.
-                            let grab_id = crate::models::grabbed_torrents::record_grab(
+                            // A persistence error must not leave episode tags
+                            // claiming that this decision was recorded.
+                            let recorded = crate::models::grabbed_torrents::source_replay::record(
                                 &state.db,
                                 &effective_hash,
                                 &result.title,
                                 sid,
                                 &ep_nums,
                                 result.is_batch,
+                                result.release_mapping.as_ref(),
+                                None,
+                                crate::models::grabbed_torrents::source_replay::SourceRef {
+                                    url: &url,
+                                    guid: &result.source_guid,
+                                    indexer_id: result.indexer_id,
+                                    client_id: Some(dispatch_client_id),
+                                    required_replay: result.replay_episodes.is_some(),
+                                },
                             )
-                            .await
-                            .ok()
-                            .flatten();
-                            // Misgrab guardrails: keep the URL so Restore can re-add a removed grab.
-                            if let Some(gid) = grab_id {
-                                let _ = crate::models::grabbed_torrents::set_source_url(
-                                    &state.db, gid, &url,
-                                )
-                                .await;
-                            }
+                            .await;
+                            let saved = match recorded {
+                                Ok(id) => id,
+                                Err(error) => {
+                                    logger::error(
+                                        &state.db,
+                                        LogCategory::Grab,
+                                        "Download added, but its episode decision could not be saved",
+                                        &error.to_string(),
+                                    )
+                                    .await;
+                                    skipped.push(format!("{label}: download needs review; episode decision was not saved"));
+                                    continue;
+                                }
+                            };
+                            let grab_id = saved.as_ref().map(|s| s.id);
+                            let replayed = saved.as_ref().is_some_and(|s| s.replayed);
+                            let ep_nums = saved.map(|s| s.episodes).unwrap_or_default();
+
                             // Issue #28 — apply per-indexer
                             // seed rules + stamp attribution.
                             // Nyaa grabs (indexer_id None) take the
@@ -806,7 +832,7 @@ async fn run_auto_search_targets_with_upgrades(
                                 )
                                 .await;
                             }
-                            for ep_num in &ep_nums {
+                            for ep_num in ep_nums.iter().filter(|_| !replayed) {
                                 let _ = episode_tags::record_grab_with_match(
                                     &state.db,
                                     sid,
@@ -844,6 +870,7 @@ async fn run_auto_search_targets_with_upgrades(
                             // whole pack is actually downloading.
                             let selective_narrowed = wants_selective && kept.is_some();
                             if result.is_batch
+                                && !replayed
                                 && !selective_narrowed
                                 && let Some(grab_id) = grab_id
                             {

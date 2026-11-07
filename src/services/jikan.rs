@@ -231,11 +231,6 @@ struct FullResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct RelationsResponse {
-    data: Vec<RelationGroupResponse>,
-}
-
-#[derive(Debug, Deserialize)]
 struct RelationGroupResponse {
     relation: String,
     entry: Vec<RelationEntryResponse>,
@@ -282,9 +277,7 @@ struct FullAnime {
     /// avoids a second round-trip per detail fetch. Falls through empty
     /// (no implicit fallback to the dedicated endpoint) if Jikan ever
     /// changes the contract; the relations panel for that fetch will
-    /// just be empty until the next refresh sweep. The dedicated
-    /// `/relations` helper still exists (used by `fetch_sequel_chain_ids`)
-    /// if a future caller needs an explicit fallback.
+    /// just be empty until the next refresh sweep.
     #[serde(default)]
     relations: Option<Vec<RelationGroupResponse>>,
 }
@@ -717,54 +710,6 @@ pub async fn get_anime_detail(mal_id: i64) -> Result<AnimeDetail, String> {
     })
 }
 
-async fn fetch_relation_groups_raw(mal_id: i64) -> Vec<RelationGroupResponse> {
-    let client = &*HTTP_CLIENT;
-    let api_base = std::env::var("JIKAN_API_BASE").unwrap_or_else(|_| JIKAN_API.to_string());
-    let url = format!(
-        "{}/anime/{}/relations",
-        api_base.trim_end_matches('/'),
-        mal_id
-    );
-    match get_json_with_retry::<RelationsResponse>(client, &url).await {
-        Ok(body) => body.data,
-        Err(_) => Vec::new(),
-    }
-}
-
-async fn fetch_sequel_chain_ids(start_mal_id: i64, max_extra: usize) -> Vec<i64> {
-    let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    seen.insert(start_mal_id);
-    let mut current = start_mal_id;
-
-    for _ in 0..max_extra {
-        let groups = fetch_relation_groups_raw(current).await;
-        let next_id = groups
-            .into_iter()
-            .find(|g| g.relation.eq_ignore_ascii_case("Sequel"))
-            .and_then(|g| {
-                g.entry.into_iter().find_map(|entry| {
-                    if entry.media_type.eq_ignore_ascii_case("anime")
-                        && !seen.contains(&entry.mal_id)
-                    {
-                        Some(entry.mal_id)
-                    } else {
-                        None
-                    }
-                })
-            });
-
-        let Some(next_id) = next_id else {
-            break;
-        };
-        seen.insert(next_id);
-        out.push(next_id);
-        current = next_id;
-    }
-
-    out
-}
-
 pub async fn fetch_episode_titles(db: &SqlitePool, mal_id: i64) -> HashMap<i32, EpisodeInfo> {
     if let Ok(Some(cached)) = get_cached_episodes(db, mal_id).await {
         return cached;
@@ -807,27 +752,179 @@ async fn log_episode_fetch_failure(db: &SqlitePool, mal_id: i64, err: &str) {
 /// request because a prior 429 armed the cooldown.
 const COOLDOWN_ERROR_PREFIX: &str = "Jikan rate-limited (cooldown";
 
+/// Episode titles in Ryokan's entry numbering, plus whether an unmapped
+/// provider may fill gaps. A shifted list must not be mixed with raw Kitsu
+/// numbers, even when a source request fails.
+pub struct EpisodeTitleSet {
+    pub episodes: HashMap<i32, EpisodeInfo>,
+    pub allow_kitsu_fallback: bool,
+    pub mapping_error: Option<String>,
+}
+
 pub async fn fetch_episode_titles_for_detail(
     db: &SqlitePool,
     detail: &AnimeDetail,
 ) -> HashMap<i32, EpisodeInfo> {
-    let Some(mal_id) = detail.id_mal else {
-        return HashMap::new();
+    fetch_episode_titles_with_mapping(db, detail).await.episodes
+}
+
+pub async fn fetch_episode_titles_with_mapping(
+    db: &SqlitePool,
+    detail: &AnimeDetail,
+) -> EpisodeTitleSet {
+    fetch_episode_titles_for_entry(db, detail.id, detail).await
+}
+
+/// `entry_id` is the canonical library/provider-cache owner. A fallback
+/// detail can carry a Kitsu id in its own namespace or a negative MAL id;
+/// neither may select a different AniList entry's episode mappings.
+pub async fn fetch_episode_titles_for_entry(
+    db: &SqlitePool,
+    entry_id: i64,
+    detail: &AnimeDetail,
+) -> EpisodeTitleSet {
+    let plan = match crate::services::anibridge::mal_episode_plan(entry_id, detail.id_mal).await {
+        Ok(plan) => plan,
+        Err(reason) => {
+            logger::warn(
+                db,
+                LogCategory::Jikan,
+                "Episode titles need provider mappings",
+                &reason,
+            )
+            .await;
+            return EpisodeTitleSet {
+                episodes: HashMap::new(),
+                allow_kitsu_fallback: false,
+                mapping_error: Some(reason),
+            };
+        }
     };
+    if let Some(plan) = plan {
+        let allow_kitsu_fallback = plan.permits_unmapped_fallback(detail.id_mal);
+        if entry_id != detail.id && !allow_kitsu_fallback {
+            return EpisodeTitleSet {
+                episodes: HashMap::new(), allow_kitsu_fallback: false,
+                mapping_error: Some("Episode mapping: keeping the canonical entry until its AniList detail is available".to_string()),
+            };
+        }
+        let to_resolve = plan.clone();
+        let resolved_slots = tokio::task::spawn_blocking(move || to_resolve.source_slots())
+            .await
+            .map_err(|e| format!("Episode mapping: resolver task failed: {e}"))
+            .and_then(|result| result);
+        let slots = match resolved_slots {
+            Ok(slots) => slots,
+            Err(reason) => {
+                logger::warn(
+                    db,
+                    LogCategory::Jikan,
+                    "Episode title mapping needs review",
+                    &format!("anilist_id={entry_id}: {reason}"),
+                )
+                .await;
+                return EpisodeTitleSet {
+                    episodes: HashMap::new(),
+                    allow_kitsu_fallback: false,
+                    mapping_error: Some(reason),
+                };
+            }
+        };
+        let mut episodes = HashMap::new();
+        for source in &plan.sources {
+            let needed: Vec<_> = slots
+                .iter()
+                .filter(|(target, (mid, _))| {
+                    *mid == source.mal_id && detail.episodes.is_none_or(|n| **target <= n)
+                })
+                .map(|(target, (_, number))| (*target, *number))
+                .collect();
+            if needed.is_empty() {
+                continue;
+            }
+            let target = if detail.effective_episode_count() > 0 {
+                needed
+                    .iter()
+                    .filter(|(n, _)| *n <= detail.effective_episode_count())
+                    .map(|(_, n)| *n)
+                    .max()
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            let mut raw = fetch_episode_titles_with_minimum(db, source.mal_id, target).await;
+            // MAL often has no episode list for a one-episode special. Its
+            // own detail is a valid title for that one episode, but only after
+            // the provider confirms it is a single-episode entry.
+            if raw.is_empty()
+                && needed.len() == 1
+                && needed[0].1 == 1
+                && let Ok(single) = get_anime_detail_cached(source.mal_id).await
+                && single.episodes == Some(1)
+            {
+                let title = if !single.title_english.is_empty() {
+                    single.title_english
+                } else {
+                    single.title_romaji
+                };
+                raw.insert(
+                    1,
+                    EpisodeInfo {
+                        title,
+                        aired: String::new(),
+                    },
+                );
+            }
+            for (target, number) in needed {
+                if let Some(info) = raw.remove(&number) {
+                    episodes.insert(target, info);
+                }
+            }
+        }
+        return EpisodeTitleSet {
+            episodes,
+            allow_kitsu_fallback,
+            mapping_error: None,
+        };
+    }
+    let episodes = if let Some(mal_id) = detail.id_mal {
+        fetch_episode_titles_with_minimum(db, mal_id, detail.effective_episode_count()).await
+    } else {
+        HashMap::new()
+    };
+    EpisodeTitleSet {
+        episodes,
+        allow_kitsu_fallback: true,
+        mapping_error: None,
+    }
+}
 
-    // Currently-airing series have `episodes: null` on AniList, so
-    // `detail.episodes.unwrap_or(0)` is 0 and the cache check below would
-    // accept whatever short-count is already stored. Use `nextAiringEpisode
-    // - 1` as a lower bound for what a "complete enough" cache looks like;
-    // otherwise a broken partial fetch (see the Jikan pagination bug with
-    // One Piece) would get pinned in the cache forever.
-    let effective_target = detail.episodes.unwrap_or(0).max(
-        detail
-            .next_airing_episode
-            .map(|n| (n - 1).max(0))
-            .unwrap_or(0),
-    );
+/// Manual refresh invalidates every mapped MAL source, including a separate
+/// prologue/special. The per-MAL cache always remains in provider numbering.
+pub async fn invalidate_episode_sources(
+    db: &SqlitePool,
+    detail: &AnimeDetail,
+) -> Result<(), String> {
+    let mut sources = std::collections::BTreeSet::new();
+    sources.extend(detail.id_mal.filter(|id| *id > 0));
+    if let Some(plan) =
+        crate::services::anibridge::mal_episode_plan(detail.id, detail.id_mal).await?
+    {
+        sources.extend(plan.sources.iter().map(|source| source.mal_id));
+    }
+    for source in sources {
+        invalidate_episode_cache(db, source)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
 
+async fn fetch_episode_titles_with_minimum(
+    db: &SqlitePool,
+    mal_id: i64,
+    effective_target: i32,
+) -> HashMap<i32, EpisodeInfo> {
     // MAL lags AniList by a few episodes for long-running series (One Piece
     // is the canonical case — AniList's airing schedule is always ahead of
     // what MAL has indexed). Accept a small gap so we don't re-fetch Jikan
@@ -866,33 +963,9 @@ pub async fn fetch_episode_titles_for_detail(
         }
     };
     let _ = cache_episodes(db, mal_id, &fresh).await;
-    let target_count = effective_target;
-    let mut merged = fresh;
-    if target_count <= 0 || (merged.len() as i32) >= target_count {
-        return merged;
-    }
-
-    let sequel_ids = fetch_sequel_chain_ids(mal_id, 4).await;
-    let mut next_number = merged.keys().max().copied().unwrap_or(0) + 1;
-    for sequel_id in sequel_ids {
-        let sequel_eps = fetch_episode_titles(db, sequel_id).await;
-        if sequel_eps.is_empty() {
-            continue;
-        }
-        let mut ordered: Vec<_> = sequel_eps.into_iter().collect();
-        ordered.sort_by_key(|(num, _)| *num);
-        for (_, info) in ordered {
-            merged.insert(next_number, info);
-            next_number += 1;
-            if target_count > 0 && (merged.len() as i32) >= target_count {
-                let _ = cache_episodes(db, mal_id, &merged).await;
-                return merged;
-            }
-        }
-    }
-
-    let _ = cache_episodes(db, mal_id, &merged).await;
-    merged
+    // Provider caches contain that provider's episodes only. A sequel is
+    // not evidence for the missing tail of this entry.
+    fresh
 }
 
 async fn get_cached_episodes(

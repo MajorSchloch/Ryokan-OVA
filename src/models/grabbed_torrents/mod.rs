@@ -1,5 +1,16 @@
 use sqlx::{Row, SqlitePool};
 
+mod import_policy;
+pub mod migration_replay;
+mod numbering;
+pub mod source_replay;
+pub use import_policy::{
+    ensure_migration_replay_allowed, get_replacement_episode, legacy_imported_name_for_series,
+    stamp_imported_episode_coverage,
+};
+pub use migration_replay::get_migration_replay;
+pub use numbering::{get_numbering_snapshot, record_grab_series_routes_with_files};
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct GrabbedTorrent {
@@ -78,7 +89,185 @@ pub async fn record_grab(
     episode_numbers: &[i32],
     is_batch: bool,
 ) -> Result<Option<i64>, sqlx::Error> {
-    let eps_json = serde_json::to_string(episode_numbers).unwrap_or_else(|_| "[]".to_string());
+    record_grab_with_release_mapping(
+        db,
+        hash,
+        torrent_name,
+        series_id,
+        episode_numbers,
+        is_batch,
+        None,
+    )
+    .await
+}
+
+/// Publish the source-number decision with the grab, before import can see it.
+#[allow(clippy::too_many_arguments)]
+pub async fn record_grab_with_release_mapping(
+    db: &SqlitePool,
+    hash: &str,
+    torrent_name: &str,
+    series_id: i64,
+    episode_numbers: &[i32],
+    is_batch: bool,
+    mapping: Option<&crate::services::release_numbering::ReleaseMapping>,
+) -> Result<Option<i64>, sqlx::Error> {
+    record_grab_with_policy(
+        db,
+        hash,
+        torrent_name,
+        series_id,
+        episode_numbers,
+        is_batch,
+        mapping,
+        None,
+    )
+    .await
+}
+
+/// A direct request to replace one episode. Extra files in the same download
+/// get no permission from this request. Batch selection and automatic search
+/// use `record_grab` or `record_grab_with_release_mapping` instead.
+pub async fn record_manual_episode_grab(
+    db: &SqlitePool,
+    hash: &str,
+    torrent_name: &str,
+    series_id: i64,
+    episode_numbers: &[i32],
+    replacement_episode: i32,
+) -> Result<Option<i64>, sqlx::Error> {
+    if !(1..=5000).contains(&replacement_episode) || !episode_numbers.contains(&replacement_episode)
+    {
+        return Err(sqlx::Error::Decode(
+            "Import protection: replacement episode is outside the request".into(),
+        ));
+    }
+    record_grab_with_policy(
+        db,
+        hash,
+        torrent_name,
+        series_id,
+        episode_numbers,
+        false,
+        None,
+        Some(replacement_episode),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_grab_with_policy(
+    db: &SqlitePool,
+    hash: &str,
+    torrent_name: &str,
+    series_id: i64,
+    episode_numbers: &[i32],
+    is_batch: bool,
+    mapping: Option<&crate::services::release_numbering::ReleaseMapping>,
+    replacement_episode: Option<i32>,
+) -> Result<Option<i64>, sqlx::Error> {
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    let result = record_grab_in_connection(
+        &mut tx,
+        hash,
+        torrent_name,
+        series_id,
+        episode_numbers,
+        is_batch,
+        mapping,
+        replacement_episode,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_grab_in_connection(
+    db: &mut sqlx::SqliteConnection,
+    hash: &str,
+    torrent_name: &str,
+    series_id: i64,
+    episode_numbers: &[i32],
+    is_batch: bool,
+    mapping: Option<&crate::services::release_numbering::ReleaseMapping>,
+    replacement_episode: Option<i32>,
+) -> Result<Option<i64>, sqlx::Error> {
+    // A migrated source reuses its reviewed per-file decision. Keep the old
+    // parent, claims and routes intact; the requested slot cannot remap files.
+    let migrated = sqlx::query(
+        "SELECT id,series_id,state,library_migration_bridge FROM grabbed_torrents
+         WHERE hash = ? COLLATE NOCASE AND hash != '' AND library_migration_bridge IS NOT NULL",
+    )
+    .bind(hash)
+    .fetch_all(&mut *db)
+    .await?;
+    if !migrated.is_empty() {
+        if migrated.len() != 1 {
+            return Err(sqlx::Error::Decode(
+                "Episode mapping: multiple migrated records for this source require review".into(),
+            ));
+        }
+        let row = &migrated[0];
+        let plan = migration_replay::decode_bridge(row.get("library_migration_bridge"))
+            .map_err(|e| sqlx::Error::Decode(e.into()))?;
+        let episodes = plan.episodes(series_id);
+        if !plan.files.iter().any(|f| f.series_id == series_id)
+            || episode_numbers.iter().any(|n| !episodes.contains(n))
+            || replacement_episode.is_some_and(|n| !episodes.contains(&n))
+        {
+            return Err(sqlx::Error::Decode(
+                "Episode mapping: request is outside the reviewed source-file identities".into(),
+            ));
+        }
+        let parent: i64 = row.get("series_id");
+        if replacement_episode.is_some() && parent != series_id {
+            return Err(sqlx::Error::Decode("Import protection: replacement of a routed sibling requires a separate reviewed request".into()));
+        }
+        let status: String = row.get("state");
+        if status == "pending" {
+            return Ok(None);
+        }
+        if !matches!(status.as_str(), "imported" | "failed" | "removed") {
+            return Err(sqlx::Error::Decode(
+                "Episode mapping: this historical download cannot be reactivated automatically"
+                    .into(),
+            ));
+        }
+        let id: i64 = row.get("id");
+        sqlx::query(
+            "UPDATE grabbed_torrents SET state='pending', imported_at=NULL,
+            client_content_path='', completed_seen_at=NULL, client_removed_at=NULL,
+            grabbed_at=CURRENT_TIMESTAMP, replacement_episode=?,
+            import_mode=NULL, failure_reason='' WHERE id=?",
+        )
+        .bind(replacement_episode)
+        .bind(id)
+        .execute(&mut *db)
+        .await?;
+        return Ok(Some(id));
+    }
+    if let Some(mapping) = mapping {
+        mapping
+            .validate()
+            .map_err(|e| sqlx::Error::Decode(e.into()))?;
+        let owner: i64 = sqlx::query_scalar("SELECT anilist_id FROM series WHERE id = ?")
+            .bind(series_id)
+            .fetch_one(&mut *db)
+            .await?;
+        if mapping.anilist_id != owner {
+            return Err(sqlx::Error::Decode(
+                "Episode mapping: release decision belongs to another entry".into(),
+            ));
+        }
+    }
+    let canonical_eps = mapping.map(|m| m.episodes());
+    let eps_json = serde_json::to_string(canonical_eps.as_deref().unwrap_or(episode_numbers))
+        .map_err(|e| sqlx::Error::Decode(e.into()))?;
+    let mapping_json = mapping
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| sqlx::Error::Decode(e.into()))?;
     let is_batch_i = if is_batch { 1_i64 } else { 0_i64 };
 
     // Step 1 — attempt a fresh insert. Partial UNIQUE index on (hash)
@@ -88,8 +277,8 @@ pub async fn record_grab(
     // comment on the fn) and always land.
     let inserted_id: Option<i64> = sqlx::query_scalar(
         "INSERT OR IGNORE INTO grabbed_torrents
-             (hash, torrent_name, series_id, episode_numbers, state, is_batch)
-         VALUES (?, ?, ?, ?, 'pending', ?)
+             (hash, torrent_name, series_id, episode_numbers, state, is_batch, release_mapping, replacement_episode)
+         VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
          RETURNING id",
     )
     .bind(hash)
@@ -97,7 +286,9 @@ pub async fn record_grab(
     .bind(series_id)
     .bind(&eps_json)
     .bind(is_batch_i)
-    .fetch_optional(db)
+    .bind(&mapping_json)
+    .bind(replacement_episode)
+    .fetch_optional(&mut *db)
     .await?;
 
     if let Some(id) = inserted_id {
@@ -110,6 +301,22 @@ pub async fn record_grab(
     // anomaly instead of silently papering over it.
     if hash.is_empty() {
         return Ok(None);
+    }
+
+    if let Some(new) = &mapping_json {
+        let pending: Option<(i64, Option<String>)> = sqlx::query_as(
+            "SELECT series_id, release_mapping FROM grabbed_torrents WHERE hash = ? AND state = 'pending'",
+        )
+        .bind(hash)
+        .fetch_optional(&mut *db)
+        .await?;
+        if let Some((owner, saved)) = pending
+            && (owner != series_id || saved.as_ref() != Some(new))
+        {
+            return Err(sqlx::Error::Decode(
+                "Episode mapping: pending download has a different or unresolved decision".into(),
+            ));
+        }
     }
 
     // Step 2 — dedup hit. Reactivate the existing row ONLY when it's
@@ -137,6 +344,49 @@ pub async fn record_grab(
     // against a different episode set than the original (e.g. was a
     // batch, now a single episode) should see post-processing import
     // the new intent, not the stale one.
+    let previous_series: Option<i64> = sqlx::query_scalar(
+        "SELECT series_id FROM grabbed_torrents WHERE hash = ? AND state = 'imported'",
+    )
+    .bind(hash)
+    .fetch_optional(&mut *db)
+    .await?;
+    let previous_mapping: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT release_mapping FROM grabbed_torrents WHERE hash = ? AND state = 'imported'",
+    )
+    .bind(hash)
+    .fetch_optional(&mut *db)
+    .await?
+    .flatten();
+    if previous_series == Some(series_id)
+        && let (Some(old), Some(new)) = (&previous_mapping, &mapping_json)
+        && old != new
+    {
+        return Err(sqlx::Error::Decode(
+            "Episode mapping: re-grab conflicts with the saved release decision".into(),
+        ));
+    }
+    let retained_mapping = if previous_series == Some(series_id) {
+        mapping_json.or(previous_mapping)
+    } else {
+        mapping_json
+    };
+    let eps_json = if let Some(json) = &retained_mapping {
+        let saved: crate::services::release_numbering::ReleaseMapping =
+            serde_json::from_str(json).map_err(|e| sqlx::Error::Decode(e.into()))?;
+        saved
+            .validate()
+            .map_err(|e| sqlx::Error::Decode(e.into()))?;
+        serde_json::to_string(&saved.episodes()).map_err(|e| sqlx::Error::Decode(e.into()))?
+    } else {
+        eps_json
+    };
+    if previous_series == Some(series_id) && retained_mapping.is_some() {
+        let routed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM grabbed_torrent_series r JOIN grabbed_torrents g ON g.id = r.grab_id WHERE g.hash = ? AND g.state = 'imported')")
+            .bind(hash).fetch_one(&mut *db).await?;
+        if routed {
+            return Err(sqlx::Error::Decode("Episode mapping: existing file routes require review before a new release decision".into()));
+        }
+    }
     let reactivated: Option<i64> = sqlx::query_scalar(
         "UPDATE grabbed_torrents
          SET state = 'pending',
@@ -148,7 +398,12 @@ pub async fn record_grab(
              series_id = ?,
              episode_numbers = ?,
              torrent_name = ?,
-             is_batch = ?
+             is_batch = ?,
+             release_mapping = ?,
+             replacement_episode = ?,
+             imported_episode_coverage = NULL,
+             import_mode = NULL,
+             imported_source_paths = NULL
          WHERE hash = ? AND state = 'imported'
          RETURNING id",
     )
@@ -156,11 +411,48 @@ pub async fn record_grab(
     .bind(&eps_json)
     .bind(torrent_name)
     .bind(is_batch_i)
+    .bind(retained_mapping)
+    .bind(replacement_episode)
     .bind(hash)
-    .fetch_optional(db)
+    .fetch_optional(&mut *db)
     .await?;
 
+    // A same-entry retry retains its saved choice. A deliberate re-grab for a
+    // different entry starts a new decision; old sibling routes must not leak
+    // into it. The pending row and this cleanup become visible together.
+    if let Some(id) = reactivated
+        && previous_series != Some(series_id)
+    {
+        sqlx::query("DELETE FROM grabbed_torrent_series WHERE grab_id = ?")
+            .bind(id)
+            .execute(&mut *db)
+            .await?;
+        sqlx::query("DELETE FROM grabbed_torrent_numbering WHERE grab_id = ?")
+            .bind(id)
+            .execute(&mut *db)
+            .await?;
+    }
     Ok(reactivated)
+}
+
+pub async fn get_release_mapping(
+    db: &SqlitePool,
+    grab_id: i64,
+) -> Result<Option<crate::services::release_numbering::ReleaseMapping>, String> {
+    let json: Option<String> =
+        sqlx::query_scalar("SELECT release_mapping FROM grabbed_torrents WHERE id = ?")
+            .bind(grab_id)
+            .fetch_one(db)
+            .await
+            .map_err(|e| format!("Episode mapping: cannot read release decision: {e}"))?;
+    json.map(|json| {
+        let mapping: crate::services::release_numbering::ReleaseMapping =
+            serde_json::from_str(&json)
+                .map_err(|e| format!("Episode mapping: invalid release decision: {e}"))?;
+        mapping.validate()?;
+        Ok(mapping)
+    })
+    .transpose()
 }
 
 /// Per-file routing row for a grabbed torrent. Used to drive
@@ -204,27 +496,22 @@ pub async fn record_grab_series_routes(
     db: &SqlitePool,
     routes: &[GrabSeriesRoute],
 ) -> Result<(), sqlx::Error> {
+    let mut tx = db.begin().await?;
     for route in routes {
-        let file_idx_i64: Vec<i64> = route.file_indices.iter().map(|i| *i as i64).collect();
-        let file_indices_json =
-            serde_json::to_string(&file_idx_i64).unwrap_or_else(|_| "[]".to_string());
-        let eps_json =
-            serde_json::to_string(&route.episode_numbers).unwrap_or_else(|_| "[]".to_string());
-        sqlx::query(
-            r#"INSERT OR REPLACE INTO grabbed_torrent_series
-               (grab_id, series_id, file_indices, episode_numbers, matched_subtitle, episode_offset)
-               VALUES (?, ?, ?, ?, ?, ?)"#,
+        let saved: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM grabbed_torrent_numbering WHERE grab_id = ?1) OR EXISTS(SELECT 1 FROM grabbed_torrents WHERE id = ?1 AND library_migration_bridge IS NOT NULL)",
         )
         .bind(route.grab_id)
-        .bind(route.series_id)
-        .bind(&file_indices_json)
-        .bind(&eps_json)
-        .bind(&route.matched_subtitle)
-        .bind(route.episode_offset)
-        .execute(db)
+        .fetch_one(&mut *tx)
         .await?;
+        if saved {
+            return Err(sqlx::Error::Decode(
+                "Episode mapping: cannot change routes without their saved file mapping".into(),
+            ));
+        }
+        numbering::write_route(&mut tx, route).await?;
     }
-    Ok(())
+    tx.commit().await
 }
 
 /// Fetch every route row for a grab. Returns an empty vec for legacy
@@ -247,23 +534,28 @@ pub async fn get_series_routes(
     .fetch_all(db)
     .await?;
 
-    Ok(rows
-        .iter()
-        .map(|row| {
-            let file_idx_json: String = row.get("file_indices");
-            let file_idx: Vec<i64> = serde_json::from_str(&file_idx_json).unwrap_or_default();
-            let eps_json: String = row.get("episode_numbers");
-            let episode_numbers: Vec<i32> = serde_json::from_str(&eps_json).unwrap_or_default();
-            GrabSeriesRoute {
-                grab_id: row.get("grab_id"),
-                series_id: row.get("series_id"),
-                file_indices: file_idx.into_iter().map(|i| i as usize).collect(),
-                episode_numbers,
-                matched_subtitle: row.get("matched_subtitle"),
-                episode_offset: row.get("episode_offset"),
-            }
-        })
-        .collect())
+    rows.iter().map(decode_route).collect()
+}
+
+fn decode_route(row: &sqlx::sqlite::SqliteRow) -> Result<GrabSeriesRoute, sqlx::Error> {
+    // A corrupt route is not an empty route. In particular, negative indices
+    // must not wrap to usize and silently return a file to the parent entry.
+    let file_indices =
+        serde_json::from_str::<Vec<usize>>(row.try_get("file_indices")?).map_err(|e| {
+            sqlx::Error::Decode(format!("Episode mapping: invalid saved indices: {e}").into())
+        })?;
+    let episode_numbers = serde_json::from_str::<Vec<i32>>(row.try_get("episode_numbers")?)
+        .map_err(|e| {
+            sqlx::Error::Decode(format!("Episode mapping: invalid saved episodes: {e}").into())
+        })?;
+    Ok(GrabSeriesRoute {
+        grab_id: row.try_get("grab_id")?,
+        series_id: row.try_get("series_id")?,
+        file_indices,
+        episode_numbers,
+        matched_subtitle: row.try_get("matched_subtitle")?,
+        episode_offset: row.try_get("episode_offset")?,
+    })
 }
 
 /// Bulk variant of [`get_series_routes`] — fetches routes for many
@@ -303,18 +595,7 @@ pub async fn get_series_routes_for_grabs(
     let mut grouped: std::collections::HashMap<i64, Vec<GrabSeriesRoute>> =
         std::collections::HashMap::new();
     for row in rows {
-        let file_idx_json: String = row.get("file_indices");
-        let file_idx: Vec<i64> = serde_json::from_str(&file_idx_json).unwrap_or_default();
-        let eps_json: String = row.get("episode_numbers");
-        let episode_numbers: Vec<i32> = serde_json::from_str(&eps_json).unwrap_or_default();
-        let route = GrabSeriesRoute {
-            grab_id: row.get("grab_id"),
-            series_id: row.get("series_id"),
-            file_indices: file_idx.into_iter().map(|i| i as usize).collect(),
-            episode_numbers,
-            matched_subtitle: row.get("matched_subtitle"),
-            episode_offset: row.get("episode_offset"),
-        };
+        let route = decode_route(&row)?;
         grouped.entry(route.grab_id).or_default().push(route);
     }
     Ok(grouped)
@@ -401,7 +682,7 @@ pub async fn get_all_pending(db: &SqlitePool) -> Result<Vec<GrabbedTorrent>, sql
 }
 
 /// Issue #228: grabs post-processing fully imported (`imported_at`
-/// set and `import_mode` not `partial`; `mark_completed_no_import`
+/// set and `import_mode` neither `partial` nor `protected`; `mark_completed_no_import`
 /// rows and partial imports never qualify, their download folder still
 /// holds the only copy of something) whose item may still sit in a
 /// download client (never removed by Ryokan, never seen gone). The
@@ -411,7 +692,7 @@ pub async fn list_imported_in_client(db: &SqlitePool) -> Result<Vec<GrabbedTorre
     let sql = format!(
         "SELECT {GRAB_COLS} FROM grabbed_torrents \
          WHERE state = 'imported' AND imported_at IS NOT NULL \
-           AND COALESCE(import_mode, '') != 'partial' \
+           AND COALESCE(import_mode, '') NOT IN ('partial', 'protected') \
            AND client_removed_at IS NULL AND hash != '' \
          ORDER BY grabbed_at ASC"
     );
@@ -926,6 +1207,23 @@ fn title_select_expr(preference: &str) -> &'static str {
     }
 }
 
+// The download history shows current parent-entry identities. Raw source
+// claims remain in storage. Cross-entry targets are represented by their own
+// episode history and ownership, not relabeled as parent episodes here.
+const DISPLAY_EPISODES_SQL: &str = r#"CASE
+    WHEN g.imported_episode_coverage IS NOT NULL THEN
+        COALESCE(json_extract(g.imported_episode_coverage, '$."' || g.series_id || '"'), '[]')
+    WHEN g.library_migration_bridge IS NOT NULL THEN CASE
+        WHEN NOT json_valid(g.library_migration_bridge) THEN '[]'
+        WHEN COALESCE(json_extract(g.library_migration_bridge, '$.version'), 0) NOT IN (1, 2) THEN '[]'
+        ELSE (SELECT json_group_array(json_extract(identity.value, '$.to_episode'))
+            FROM json_each(g.library_migration_bridge, '$.identities') identity
+            WHERE json_extract(identity.value, '$.from_series') = g.series_id
+              AND json_extract(identity.value, '$.to_series') = g.series_id
+              AND EXISTS(SELECT 1 FROM json_each(g.episode_numbers) source
+                  WHERE source.value = json_extract(identity.value, '$.from_episode'))) END
+    ELSE g.episode_numbers END AS episode_numbers"#;
+
 /// Get all grabbed torrents with series title, ordered by most recent first.
 pub async fn get_all_with_series(
     db: &SqlitePool,
@@ -933,7 +1231,7 @@ pub async fn get_all_with_series(
     title_language: &str,
 ) -> Result<Vec<GrabbedTorrentWithSeries>, sqlx::Error> {
     let sql = format!(
-        r#"SELECT g.id, g.hash, g.torrent_name, g.series_id, g.episode_numbers, g.state, g.grabbed_at, g.imported_at,
+        r#"SELECT g.id, g.hash, g.torrent_name, g.series_id, {DISPLAY_EPISODES_SQL}, g.state, g.grabbed_at, g.imported_at,
                   COALESCE(g.failure_reason, '') AS failure_reason,
                   {title_expr},
                   COALESCE(s.anilist_id, 0) AS anilist_id,
@@ -983,7 +1281,7 @@ pub async fn get_blocked(
     title_language: &str,
 ) -> Result<Vec<GrabbedTorrentWithSeries>, sqlx::Error> {
     let sql = format!(
-        r#"SELECT g.id, g.hash, g.torrent_name, g.series_id, g.episode_numbers, g.state, g.grabbed_at, g.imported_at,
+        r#"SELECT g.id, g.hash, g.torrent_name, g.series_id, {DISPLAY_EPISODES_SQL}, g.state, g.grabbed_at, g.imported_at,
                   COALESCE(g.failure_reason, '') AS failure_reason,
                   {title_expr},
                   COALESCE(s.anilist_id, 0) AS anilist_id,
@@ -1124,34 +1422,22 @@ pub async fn find_imported_for_episode(
     series_id: i64,
     episode_number: i32,
 ) -> Result<Vec<GrabbedTorrent>, sqlx::Error> {
-    // episode_numbers is stored as a JSON array, so we search with
-    // json_each on both the legacy column and the routes column.
-    // UNION dedups grabs where the same series matches through both
-    // paths (parent of a single-series grab).
+    // Actual ownership can include a new entry without an old route row.
+    // Claims remain immutable; returned episodes describe the requested owner.
     let rows = sqlx::query(
-        r#"SELECT id, hash, torrent_name, series_id, episode_numbers, grabbed_at, is_batch, download_client_id FROM (
-             SELECT g.id AS id, g.hash AS hash, g.torrent_name AS torrent_name,
-                    g.series_id AS series_id, g.episode_numbers AS episode_numbers,
-                    g.grabbed_at AS grabbed_at,
-                    COALESCE(g.is_batch, 0) AS is_batch,
-                    g.download_client_id AS download_client_id
-             FROM grabbed_torrents g, json_each(g.episode_numbers) AS je
-             WHERE g.series_id = ? AND je.value = ? AND g.state = 'imported'
-             UNION
-             SELECT g.id AS id, g.hash AS hash, g.torrent_name AS torrent_name,
-                    g.series_id AS series_id, g.episode_numbers AS episode_numbers,
-                    g.grabbed_at AS grabbed_at,
-                    COALESCE(g.is_batch, 0) AS is_batch,
-                    g.download_client_id AS download_client_id
-             FROM grabbed_torrents g
-             JOIN grabbed_torrent_series r ON r.grab_id = g.id
-             , json_each(r.episode_numbers) AS je
-             WHERE r.series_id = ? AND je.value = ? AND g.state = 'imported'
-           )
-           ORDER BY grabbed_at DESC"#,
+        r#"WITH owned AS (
+            SELECT g.*, CASE WHEN g.imported_episode_coverage IS NOT NULL THEN
+                COALESCE(json_extract(g.imported_episode_coverage, '$."' || ?1 || '"'), '[]')
+                ELSE (SELECT json_group_array(value) FROM (
+                    SELECT value FROM json_each(g.episode_numbers) WHERE g.series_id = ?1
+                    UNION SELECT je.value FROM grabbed_torrent_series r, json_each(r.episode_numbers) je
+                    WHERE r.grab_id = g.id AND r.series_id = ?1)) END AS owned_episodes
+            FROM grabbed_torrents g WHERE g.state = 'imported'
+        ) SELECT id, hash, torrent_name, series_id, owned_episodes AS episode_numbers,
+            grabbed_at, COALESCE(is_batch, 0) AS is_batch, download_client_id FROM owned
+            WHERE EXISTS(SELECT 1 FROM json_each(owned_episodes) WHERE value = ?2)
+            ORDER BY grabbed_at DESC"#,
     )
-    .bind(series_id)
-    .bind(episode_number)
     .bind(series_id)
     .bind(episode_number)
     .fetch_all(db)
@@ -1307,23 +1593,18 @@ pub async fn imported_grabs_for_series(
     series_id: i64,
 ) -> Result<Vec<(String, Vec<i32>)>, sqlx::Error> {
     let rows = sqlx::query(
-        r#"SELECT torrent_name, episode_numbers, grabbed_at FROM (
-             SELECT g.torrent_name AS torrent_name,
-                    g.episode_numbers AS episode_numbers,
-                    g.grabbed_at AS grabbed_at
-             FROM grabbed_torrents g
-             WHERE g.series_id = ? AND g.state = 'imported'
-             UNION ALL
-             SELECT g.torrent_name AS torrent_name,
-                    r.episode_numbers AS episode_numbers,
-                    g.grabbed_at AS grabbed_at
-             FROM grabbed_torrents g
-             JOIN grabbed_torrent_series r ON r.grab_id = g.id
-             WHERE r.series_id = ? AND g.state = 'imported'
-           )
-           ORDER BY grabbed_at DESC"#,
+        r#"WITH owned AS (
+            SELECT g.torrent_name, g.grabbed_at,
+                CASE WHEN g.imported_episode_coverage IS NOT NULL THEN
+                COALESCE(json_extract(g.imported_episode_coverage, '$."' || ?1 || '"'), '[]')
+                ELSE (SELECT json_group_array(value) FROM (
+                    SELECT value FROM json_each(g.episode_numbers) WHERE g.series_id = ?1
+                    UNION SELECT je.value FROM grabbed_torrent_series r, json_each(r.episode_numbers) je
+                    WHERE r.grab_id = g.id AND r.series_id = ?1)) END AS episode_numbers
+            FROM grabbed_torrents g WHERE g.state = 'imported'
+        ) SELECT torrent_name, episode_numbers, grabbed_at FROM owned
+          WHERE json_array_length(episode_numbers) > 0 ORDER BY grabbed_at DESC"#,
     )
-    .bind(series_id)
     .bind(series_id)
     .fetch_all(db)
     .await?;
@@ -1650,7 +1931,7 @@ pub async fn list_unverified_pending(
 ) -> Result<Vec<GrabbedTorrent>, sqlx::Error> {
     let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {GRAB_COLS} FROM grabbed_torrents \
-         WHERE state = 'pending' AND verification IS NULL AND hash != '' \
+         WHERE state = 'pending' AND verification IS NULL AND library_migration_bridge IS NULL AND hash != '' \
            AND grabbed_at <= datetime('now', ? || ' seconds') \
          ORDER BY grabbed_at ASC"
     )))
@@ -1711,11 +1992,13 @@ pub async fn mark_misgrab_reviewed(db: &SqlitePool, id: i64) -> Result<(), sqlx:
 }
 
 pub async fn set_source_url(db: &SqlitePool, id: i64, url: &str) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE grabbed_torrents SET source_url = ? WHERE id = ?")
-        .bind(url)
-        .bind(id)
-        .execute(db)
-        .await?;
+    let changed = sqlx::query("UPDATE grabbed_torrents SET source_url = ?1 WHERE id = ?2 AND (library_migration_bridge IS NULL OR source_url = ?1)")
+        .bind(url).bind(id).execute(db).await?.rows_affected();
+    if changed == 0 {
+        return Err(sqlx::Error::Decode(
+            "Episode mapping: a reviewed source URL cannot be changed by a late setter".into(),
+        ));
+    }
     Ok(())
 }
 

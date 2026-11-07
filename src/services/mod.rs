@@ -4,14 +4,17 @@ pub mod anime_relations;
 pub mod calendar;
 pub mod crypto;
 pub mod download_client;
+pub mod episode_mapping;
 pub mod external_sync;
 pub mod http_body;
 pub mod indexer_catalog;
 pub mod indexers;
 pub mod jikan;
 pub mod kitsu;
+pub mod library_guard;
 pub mod mal;
 pub mod media;
+pub mod migration_preview;
 pub mod nyaa;
 pub mod oauth_state;
 pub mod paths;
@@ -53,6 +56,7 @@ pub mod post_processing;
 pub mod recycle;
 
 pub mod anibridge;
+pub mod release_numbering;
 pub mod torrent_file;
 pub mod upgrade;
 

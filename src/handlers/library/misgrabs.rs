@@ -172,38 +172,50 @@ pub async fn restore_misgrab(
             "Cannot restore: no download client is configured",
         );
     };
-    if let Err(e) = client.add_torrent_returning_id(&url, &row.hash).await {
-        logger::warn(
-            db,
-            LogCategory::DownloadClient,
-            &format!(
-                "Restore of '{}' failed at the download client",
-                row.torrent_name
-            ),
-            &e,
-        )
-        .await;
-        return respond(
-            is_htmx,
-            false,
-            id,
-            "restore",
-            "Cannot restore: the download client refused the release",
-        );
-    }
+    let canonical_id = match client.add_torrent_returning_id(&url, &row.hash).await {
+        Ok((_, id)) => id,
+        Err(e) => {
+            logger::warn(
+                db,
+                LogCategory::DownloadClient,
+                &format!(
+                    "Restore of '{}' failed at the download client",
+                    row.torrent_name
+                ),
+                &e,
+            )
+            .await;
+            return respond(
+                is_htmx,
+                false,
+                id,
+                "restore",
+                "Cannot restore: the download client refused the release",
+            );
+        }
+    };
 
     // A fresh pending row; the old failed row points at it as replaced.
-    let new_id = match grabbed_torrents::record_grab(
+    let saved = match grabbed_torrents::source_replay::record(
         db,
-        &row.hash,
+        &canonical_id,
         &row.torrent_name,
         row.series_id,
         &row.episode_numbers,
         row.is_batch,
+        None,
+        None,
+        grabbed_torrents::source_replay::SourceRef {
+            url: &url,
+            guid: "",
+            indexer_id: row.indexer_id,
+            client_id: row.download_client_id,
+            required_replay: false,
+        },
     )
     .await
     {
-        Ok(Some(new_id)) => new_id,
+        Ok(Some(saved)) => saved,
         Ok(None) => {
             let _ = grabbed_torrents::whitelist_by_hash(db, &row.hash, Some(row.series_id)).await;
             return respond(
@@ -224,6 +236,7 @@ pub async fn restore_misgrab(
             );
         }
     };
+    let new_id = saved.id;
     // The new row first, with the reason, then every row for the hash
     // (the old one included) so a re-added torrent is never judged
     // again.
@@ -254,8 +267,7 @@ pub async fn restore_misgrab(
         row.respect_seed_rules,
     )
     .await;
-    let _ = grabbed_torrents::set_source_url(db, new_id, &url).await;
-    for ep in &row.episode_numbers {
+    for ep in saved.episodes.iter().filter(|_| !saved.replayed) {
         let _ = episode_tags::record_grab(
             db,
             row.series_id,

@@ -723,6 +723,8 @@ pub async fn collect_scored_batches_for_target_with_diag(
     let indexer_categories =
         crate::services::indexers::search_categories(&detail.format, detail.is_adult);
     let ctx = AutoQueryCtx {
+        db,
+        anilist_id: detail.id,
         phase: MatchPhase::Primary,
         require_verbatim,
         fuzzy_rejected: &fuzzy_rejected,
@@ -900,6 +902,16 @@ pub async fn collect_scored_batches_for_target_with_diag(
             );
         }
     }
+    if require_verbatim {
+        scored = crate::services::release_numbering::filter_automatic_candidates(
+            db,
+            detail,
+            series_ctx.absolute_offset,
+            target,
+            scored,
+        )
+        .await;
+    }
     (scored, fuzzy_rejected.into_inner().unwrap_or_default())
 }
 
@@ -1004,6 +1016,8 @@ async fn collect_scored_for_target(
     let indexer_categories =
         crate::services::indexers::search_categories(&detail.format, detail.is_adult);
     let ctx = AutoQueryCtx {
+        db,
+        anilist_id: detail.id,
         phase: MatchPhase::Primary,
         require_verbatim,
         fuzzy_rejected: &fuzzy_rejected,
@@ -1227,6 +1241,14 @@ async fn collect_scored_for_target(
             );
         }
     }
+    scored = crate::services::release_numbering::filter_automatic_candidates(
+        db,
+        detail,
+        series_ctx.absolute_offset,
+        target,
+        scored,
+    )
+    .await;
     (scored, fuzzy_rejected.into_inner().unwrap_or_default())
 }
 
@@ -1253,6 +1275,8 @@ impl AutoQueryCtx<'_> {
 
 #[derive(Clone, Copy)]
 struct AutoQueryCtx<'a> {
+    db: &'a sqlx::SqlitePool,
+    anilist_id: i64,
     /// Which query pass this context runs; stamped on every candidate.
     phase: MatchPhase,
     /// Automatic paths take only verbatim (or SeaDex-curated) matches;
@@ -1519,12 +1543,28 @@ async fn run_queries(
             if !ctx.allow_batch && result.is_batch {
                 continue;
             }
-            if ctx.reject_specials && media::is_special_release(&result.title) {
+            let reviewed = match crate::services::release_numbering::apply_reviewed_source(
+                ctx.db,
+                ctx.anilist_id,
+                ctx.target,
+                &mut result,
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(reason) => {
+                    tracing::warn!(%reason, "automatic search held a reviewed source");
+                    continue;
+                }
+            };
+            if !reviewed && ctx.reject_specials && media::is_special_release(&result.title) {
                 tracing::debug!("auto-search: skipping special release {:?}", result.title);
                 rejected_here.insert(dedupe_key);
                 continue;
             }
-            let provenance = if is_seadex_match(&result.info_hash, ctx.seadex_hashes) {
+            let provenance = if reviewed {
+                MatchProvenance::reviewed_source(ctx.phase)
+            } else if is_seadex_match(&result.info_hash, ctx.seadex_hashes) {
                 tracing::debug!(
                     "seadex: bypassing heuristic filters for SeaDex-best release title={:?} hash={}",
                     result.title,
@@ -1585,12 +1625,28 @@ async fn run_queries(
         if !ctx.allow_batch && result.is_batch {
             continue;
         }
-        if ctx.reject_specials && media::is_special_release(&result.title) {
+        let reviewed = match crate::services::release_numbering::apply_reviewed_source(
+            ctx.db,
+            ctx.anilist_id,
+            ctx.target,
+            &mut result,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(reason) => {
+                tracing::warn!(%reason, "automatic search held a reviewed source");
+                continue;
+            }
+        };
+        if !reviewed && ctx.reject_specials && media::is_special_release(&result.title) {
             tracing::debug!("auto-search: skipping special release {:?}", result.title);
             rejected_here.insert(dedupe_key);
             continue;
         }
-        let provenance = if is_seadex_match(&result.info_hash, ctx.seadex_hashes) {
+        let provenance = if reviewed {
+            MatchProvenance::reviewed_source(ctx.phase)
+        } else if is_seadex_match(&result.info_hash, ctx.seadex_hashes) {
             MatchProvenance::seadex(ctx.phase)
         } else {
             match classify_match(
@@ -2446,6 +2502,9 @@ mod tests {
         use std::collections::HashSet;
         let nyaa_result = SearchResult {
             match_provenance: None,
+            release_mapping: None,
+            source_guid: String::new(),
+            replay_episodes: None,
             title: "[smol] Nisemonogatari".to_string(),
             link: String::new(),
             magnet: String::new(),
@@ -2534,6 +2593,9 @@ mod tests {
         use std::collections::HashSet;
         let nyaa_result = SearchResult {
             match_provenance: None,
+            release_mapping: None,
+            source_guid: String::new(),
+            replay_episodes: None,
             title: "[smol] Nisemonogatari".to_string(),
             link: String::new(),
             magnet: String::new(),
@@ -3323,6 +3385,9 @@ mod tests {
         fn mk(title: &str, hash: &str) -> SearchResult {
             SearchResult {
                 match_provenance: None,
+                release_mapping: None,
+                source_guid: String::new(),
+                replay_episodes: None,
                 title: title.to_string(),
                 link: String::new(),
                 magnet: String::new(),
@@ -3449,6 +3514,9 @@ mod episode_set_tests {
     fn hit(title: &str, score: i32, is_batch: bool) -> SearchResult {
         SearchResult {
             match_provenance: None,
+            release_mapping: None,
+            source_guid: String::new(),
+            replay_episodes: None,
             title: title.to_string(),
             link: String::new(),
             magnet: String::new(),

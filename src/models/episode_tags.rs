@@ -330,6 +330,8 @@ pub async fn record_grab_with_match(
     // by the automatic classifier's verdict. An upgrade re-grab on a
     // pinned row is a no-op on the tag row; the grab history row still
     // records the event unconditionally above.
+    // A completed row with upgrades disabled also stays attached to the
+    // existing file. Import updates its identity only after replacement.
     sqlx::query(
         "INSERT INTO episode_quality_tags (
              series_id, episode_number, quality_tag, release_title, release_group, state,
@@ -351,7 +353,9 @@ pub async fn record_grab_with_match(
              needs_review = excluded.needs_review,
              classification_evidence = excluded.classification_evidence,
              updated_at = CURRENT_TIMESTAMP
-         WHERE COALESCE(episode_quality_tags.manual_override, 0) = 0",
+         WHERE COALESCE(episode_quality_tags.manual_override, 0) = 0
+           AND NOT (episode_quality_tags.state = 'completed'
+             AND EXISTS(SELECT 1 FROM series WHERE id = excluded.series_id AND allow_upgrades = 0))",
     )
     .bind(series_id)
     .bind(episode_number)
@@ -372,6 +376,96 @@ pub async fn record_grab_with_match(
     tx.commit().await?;
 
     Ok(history_id)
+}
+
+/// A protected file stays on disk. Keep its completed tag/history intact;
+/// discard only this incoming release's provisional tag and mark its attempt
+/// skipped. A legacy or external file with no completed tag can be classified
+/// from its own bytes later, never from the refused pack's title.
+pub async fn skip_protected_import(
+    db: &SqlitePool,
+    series_id: i64,
+    ep: i32,
+    release: &str,
+) -> Result<(), sqlx::Error> {
+    let mut tx = db.begin().await?;
+    sqlx::query(
+        "UPDATE episode_grab_history SET state = 'skipped'
+        WHERE series_id = ? AND episode_number = ? AND release_title = ? AND state = 'grabbed'",
+    )
+    .bind(series_id)
+    .bind(ep)
+    .bind(release)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM episode_quality_tags WHERE series_id = ? AND episode_number = ?
+        AND release_title = ? AND state = 'grabbed' AND COALESCE(manual_override, 0) = 0",
+    )
+    .bind(series_id)
+    .bind(ep)
+    .bind(release)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await
+}
+
+/// Only after placement succeeds may a preserved completed row describe the
+/// new release. A picker may have kept the old row without writing history;
+/// create the incoming history entry if necessary. Classification pins remain.
+#[allow(clippy::too_many_arguments)]
+pub async fn prepare_imported_release(
+    db: &SqlitePool,
+    series_id: i64,
+    ep: i32,
+    release: &str,
+    group: &str,
+    quality: &str,
+    size: i64,
+    is_batch: bool,
+) -> Result<(), sqlx::Error> {
+    let mut tx = db.begin().await?;
+    sqlx::query("INSERT INTO episode_grab_history
+        (series_id, episode_number, quality_tag, release_title, release_group, file_name, size_bytes, is_batch, state)
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'grabbed'
+        WHERE NOT EXISTS(SELECT 1 FROM episode_grab_history WHERE series_id = ? AND episode_number = ? AND release_title = ? AND state = 'grabbed')")
+        .bind(series_id).bind(ep).bind(quality).bind(release).bind(group).bind(release).bind(size).bind(is_batch)
+        .bind(series_id).bind(ep).bind(release).execute(&mut *tx).await?;
+    sqlx::query(
+        "UPDATE episode_quality_tags SET release_title = ?, release_group = ?, state = 'grabbed'
+        WHERE series_id = ? AND episode_number = ?",
+    )
+    .bind(release)
+    .bind(group)
+    .bind(series_id)
+    .bind(ep)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await
+}
+
+pub async fn complete_imported_history(
+    db: &SqlitePool,
+    series_id: i64,
+    ep: i32,
+    release: &str,
+    file_name: &str,
+    size: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE episode_grab_history SET state = 'completed', file_name = ?,
+        size_bytes = CASE WHEN COALESCE(is_batch, 0) = 1 THEN size_bytes ELSE ? END
+        WHERE id = (SELECT id FROM episode_grab_history WHERE series_id = ? AND episode_number = ?
+          AND release_title = ? AND state = 'grabbed' ORDER BY id DESC LIMIT 1)",
+    )
+    .bind(file_name)
+    .bind(size)
+    .bind(series_id)
+    .bind(ep)
+    .bind(release)
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 /// Get the current quality tag map for a series.

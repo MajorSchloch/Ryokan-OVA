@@ -98,6 +98,8 @@ function grabInteractiveResult(epNum, btn) {
             seeders: Number(result.seeders) || 0,
             group: result.group || '',
             infoHash: result.info_hash || '',
+            sourceGuid: result.source_guid || '',
+            indexerId: result.indexer_id ?? null,
             seriesId: SD.dbId || null,
             isBatch: true,
             onConfirm: function () {
@@ -124,6 +126,7 @@ function grabInteractiveResult(epNum, btn) {
             info_hash: result.info_hash,
             size_bytes: result.size_bytes || 0,
             indexer_id: result.indexer_id ?? null,
+            source_guid: result.source_guid || "",
             match_provenance: result.match_provenance ?? null
         })
     })
@@ -217,6 +220,8 @@ function grabInteractiveBatchResult(btn) {
             seeders: Number(result.seeders) || 0,
             group: result.group || '',
             infoHash: result.info_hash || '',
+            sourceGuid: result.source_guid || '',
+            indexerId: result.indexer_id ?? null,
             seriesId: SD.dbId || null,
             isBatch: true,
             onConfirm: function () {
@@ -242,6 +247,7 @@ function grabInteractiveBatchResult(btn) {
             info_hash: result.info_hash,
             size_bytes: result.size_bytes || 0,
             indexer_id: result.indexer_id ?? null,
+            source_guid: result.source_guid || "",
             match_provenance: result.match_provenance ?? null
         })
     })

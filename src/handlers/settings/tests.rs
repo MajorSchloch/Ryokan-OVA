@@ -661,6 +661,7 @@ mod non_htmx_path {
             grab_preview_mode: "never".to_string(),
             external_sync_interval_minutes: 60,
             // Quality seeds.
+            default_allow_upgrades: true,
             preferred_groups: "SeedPreferred".to_string(),
             blocked_groups: "SeedBlocked".to_string(),
             preferred_source: "bluray".to_string(),
@@ -767,6 +768,10 @@ mod non_htmx_path {
         // against the per-tab handler clobbering fields it
         // doesn't own).
         assert_eq!(saved.preferred_resolution, "720");
+        assert!(
+            saved.default_allow_upgrades,
+            "another tab must keep the upgrade default"
+        );
         assert_eq!(saved.jellyfin_url, "http://jelly.seed:8096");
     }
 
@@ -796,7 +801,8 @@ mod non_htmx_path {
                 finished_series_quality: "bd_only".to_string(), // seed=same
                 prefer_subs: "1".to_string(),                   // seed=false → submit→true
                 upgrade_search_enabled: Some(String::new()),    // seed=false → submit→true
-                seadex_enabled: None,                           // seed=true → submit→false
+                default_allow_upgrades: None,
+                seadex_enabled: None, // seed=true → submit→false
                 default_custom_query_tokens: Some("submit-tokens".to_string()), // seed=seed-tokens
             }),
         )
@@ -821,6 +827,10 @@ mod non_htmx_path {
         assert_eq!(saved.finished_series_quality, "bd_only");
         assert!(saved.prefer_subs);
         assert!(saved.upgrade_search_enabled);
+        assert!(
+            !saved.default_allow_upgrades,
+            "an unchecked box must disable the default"
+        );
         assert!(!saved.seadex_enabled);
         assert_eq!(saved.default_custom_query_tokens, "submit-tokens");
         assert_eq!(
@@ -831,6 +841,51 @@ mod non_htmx_path {
         assert_eq!(saved.media_root, "/seed/media");
         assert_eq!(saved.jellyfin_url, "http://jelly.seed:8096");
         assert_eq!(saved.qbit_url, "http://qbit.seed:8080");
+    }
+
+    #[tokio::test]
+    async fn quality_form_saves_and_renders_the_new_series_upgrade_default() {
+        use tower::ServiceExt;
+        let db = in_memory_pool().await;
+        seed_initial_config(&db).await;
+        for enabled in [true, false, true] {
+            let checkbox = if enabled {
+                "&default_allow_upgrades=1"
+            } else {
+                ""
+            };
+            let encoded = format!(
+                "preferred_groups=&blocked_groups=&preferred_source=web&preferred_resolution=1080&cutoff_source=bluray&cutoff_resolution=1080&finished_series_quality=same&prefer_subs=1{checkbox}"
+            );
+            let state = build_test_app_state(db.clone(), None);
+            let app = axum::Router::new()
+                .route(
+                    "/settings/quality",
+                    axum::routing::post(settings_quality_submit),
+                )
+                .with_state(state);
+            let request = axum::http::Request::builder()
+                .method("POST")
+                .uri("/settings/quality")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("HX-Request", "true")
+                .body(axum::body::Body::from(encoded))
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let body = body_string(response).await;
+            assert!(body.contains("id=\"settings-quality-region\""));
+            let control = body
+                .split("name=\"default_allow_upgrades\"")
+                .nth(1)
+                .expect("the form must expose the saved setting")
+                .split('>')
+                .next()
+                .unwrap();
+            assert_eq!(control.contains("checked"), enabled);
+            let saved = config::get_config(&db).await.unwrap().unwrap();
+            assert_eq!(saved.default_allow_upgrades, enabled);
+        }
     }
 
     #[tokio::test]
@@ -1300,6 +1355,7 @@ mod non_htmx_path {
                 finished_series_quality: "garbage".to_string(),
                 prefer_subs: "1".to_string(),
                 upgrade_search_enabled: None,
+                default_allow_upgrades: None,
                 seadex_enabled: None,
                 default_custom_query_tokens: None,
             }),
@@ -1697,6 +1753,7 @@ mod non_htmx_path {
                 finished_series_quality: "prefer_bd".to_string(),
                 prefer_subs: "1".to_string(),
                 upgrade_search_enabled: None,
+                default_allow_upgrades: None,
                 seadex_enabled: None,
                 default_custom_query_tokens: None,
             }),

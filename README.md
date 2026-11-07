@@ -1,7 +1,13 @@
-# Ryokan
+# Ryokan OVA
 
-[![CI](https://github.com/johnthreekay/Ryokan/actions/workflows/rust.yml/badge.svg)](https://github.com/johnthreekay/Ryokan/actions/workflows/rust.yml)
+[![CI](https://github.com/MajorSchloch/Ryokan-OVA/actions/workflows/rust.yml/badge.svg?branch=ova)](https://github.com/MajorSchloch/Ryokan-OVA/actions/workflows/rust.yml?query=branch%3Aova)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+
+Ryokan OVA is a fork of [Ryokan](https://github.com/johnthreekay/Ryokan). The `ova` branch uses the AniList entry and episode number as the library identity. A release can use a different number for the same episode.
+
+The Docker image for this branch is `ghcr.io/majorschloch/ryokan-ova:ova`. For an existing library, review the [migration procedure](docs/migration-preview.md) before you change the image. An image update alone cannot move files or repair old episode assignments.
+
+## Upstream project
 
 A self-hosted anime PVR written in Rust. Searches indexers for releases, scores them by quality, and sends them to your download client from a single web UI. Supports qBittorrent, Deluge, Transmission, rTorrent/ruTorrent, and SABnzbd.
 

@@ -178,10 +178,15 @@ pub async fn run_sanitize(live_db: &Path, output: &Path) -> Result<SanitizeSumma
     // `/feed/<passkey>`), so only scheme and host survive (`redact_url`).
     // A feed's URL is UNIQUE, and two feeds on one host (two uploaders'
     // Nyaa feeds) redact to the same value, so those keep their row id.
+    // Picker metadata now retains the exact dispatched source and its GUID.
+    // Both can contain a private tracker URL; keep display fields only.
+    let pending_urls = sqlx::query("UPDATE pending_grabs SET release_metadata_json = CASE WHEN json_valid(release_metadata_json) THEN json_remove(release_metadata_json, '$.source_url', '$.source_guid', '$.torrent', '$.magnet', '$.link') ELSE '{}' END WHERE release_metadata_json != ''")
+        .execute(&pool).await.map_err(|e| format!("scrub picker source URLs: {e}"))?.rows_affected();
     let url_rows = redact_url_column(&pool, "grabbed_torrents", "source_url", false).await?
         + redact_url_column(&pool, "direct_rss_feeds", "url", true).await?
         + redact_url_column(&pool, "rss_seen", "link", false).await?
-        + redact_item_keys(&pool).await?;
+        + redact_item_keys(&pool).await?
+        + pending_urls;
 
     // Notification providers: the Discord webhook URL carries its token,
     // a generic webhook its URL, HMAC secret and custom headers
@@ -882,6 +887,10 @@ mod tests {
         .await
         .unwrap();
 
+        sqlx::query("INSERT INTO pending_grabs (preview_id,created_at,heartbeat_at,release_metadata_json) VALUES ('source-preview',0,0,?)")
+            .bind(serde_json::json!({"title":"Keep this title","source_url":"https://proxy.example/?apikey=picker-key","source_guid":"https://tracker.example/private/guid","torrent":"https://proxy.example/?apikey=picker-key"}).to_string())
+            .execute(&pool).await.unwrap();
+
         // Seed an external_accounts row via the real model helper so
         // the encrypted blobs match the live encrypt() output shape.
         crate::models::external_accounts::link(
@@ -1028,7 +1037,7 @@ mod tests {
         assert_eq!(summary.indexer_keys, 1);
         assert_eq!(summary.client_passwords, 1);
         assert_eq!(summary.api_keys, 1);
-        assert_eq!(summary.credential_urls, 2);
+        assert_eq!(summary.credential_urls, 3);
 
         let url = format!("sqlite://{}?mode=ro", out.display());
         let pool = SqlitePool::connect(&url).await.unwrap();
@@ -1059,6 +1068,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(source_url, "http://prowlarr:9696/[redacted]");
+        let metadata: String = sqlx::query_scalar(
+            "SELECT release_metadata_json FROM pending_grabs WHERE preview_id='source-preview'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&metadata).unwrap(),
+            serde_json::json!({"title":"Keep this title"})
+        );
+
         let feed_url: String = sqlx::query_scalar("SELECT url FROM direct_rss_feeds")
             .fetch_one(&pool)
             .await

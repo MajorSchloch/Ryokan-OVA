@@ -1069,6 +1069,9 @@ mod handler_endpoints {
     fn empty_search_result(title: &str, info_hash: &str) -> SearchResult {
         SearchResult {
             match_provenance: None,
+            release_mapping: None,
+            source_guid: String::new(),
+            replay_episodes: None,
             title: title.into(),
             link: String::new(),
             magnet: String::new(),
@@ -1175,6 +1178,9 @@ mod handler_endpoints {
 
         let mut hit = SearchResult {
             match_provenance: None,
+            release_mapping: None,
+            source_guid: String::new(),
+            replay_episodes: None,
             title: "[Group] Show - 03 [BD 1080p].mkv".into(),
             link: "https://nyaa.example/view/42".into(),
             magnet: "magnet:?xt=urn:btih:abc123".into(),

@@ -67,6 +67,7 @@ pub async fn grab_batch_result(
     // frontend round-trips it on grab so the dispatch routes through
     // the indexer's pin (or Nyaa pin for Nyaa-direct).
     let indexer_id: Option<i64> = body["indexer_id"].as_i64();
+    let source_guid = body["source_guid"].as_str().unwrap_or("");
 
     if url.is_empty() {
         return Err((
@@ -202,21 +203,33 @@ pub async fn grab_batch_result(
         // UNKNOWN in the UI, and with post-processing disabled the
         // rows never get created at all.
         let ep_nums = batch_episode_numbers(&title, &detail);
-        let grab_id = crate::models::grabbed_torrents::record_grab(
+        let saved = crate::models::grabbed_torrents::source_replay::record(
             &state.db,
             &effective_hash,
             &title,
             sid,
             &ep_nums,
             true,
+            None,
+            None,
+            crate::models::grabbed_torrents::source_replay::SourceRef {
+                url: &url,
+                guid: source_guid,
+                indexer_id,
+                client_id: Some(dispatch_client_id),
+                required_replay: false,
+            },
         )
         .await
-        .ok()
-        .flatten();
-        // Misgrab guardrails: keep the URL so Restore can re-add a removed grab.
-        if let Some(gid) = grab_id {
-            let _ = crate::models::grabbed_torrents::set_source_url(&state.db, gid, &url).await;
-        }
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!("Download added but its episode decision could not be saved: {e}"),
+            )
+        })?;
+        let grab_id = saved.as_ref().map(|s| s.id);
+        let replayed = saved.as_ref().is_some_and(|s| s.replayed);
+        let ep_nums = saved.map(|s| s.episodes).unwrap_or_default();
         if let Some(gid) = grab_id {
             let _ = crate::models::grabbed_torrents::set_download_client(
                 &state.db,
@@ -240,7 +253,7 @@ pub async fn grab_batch_result(
             )
             .await;
         }
-        for ep_num in &ep_nums {
+        for ep_num in ep_nums.iter().filter(|_| !replayed) {
             let _ = episode_tags::record_grab(
                 &state.db,
                 sid,
@@ -263,7 +276,10 @@ pub async fn grab_batch_result(
         // download) still auto-expands because the whole pack is
         // actually downloading.
         let selective_narrowed = wants_selective && selective_outcome.is_some();
-        if !selective_narrowed && let Some(grab_id) = grab_id {
+        if !replayed
+            && !selective_narrowed
+            && let Some(grab_id) = grab_id
+        {
             // Fire-and-forget so the HTTP handler doesn't block
             // up to ~60s on qBit metadata discovery. See the
             // matching spawn in `run_auto_search_targets_with_upgrades`.
@@ -352,6 +368,7 @@ pub async fn grab_interactive_result(
     // frontend round-trips it on grab so the dispatch routes through
     // the indexer's pin (or Nyaa pin for Nyaa-direct).
     let indexer_id: Option<i64> = body["indexer_id"].as_i64();
+    let source_guid = body["source_guid"].as_str().unwrap_or("");
     // Misgrab guardrails: the interactive table round-trips the match
     // provenance the search stamped on the row so the grab history and
     // the log say how this release matched. Absent or malformed means
@@ -483,21 +500,33 @@ pub async fn grab_interactive_result(
         // episode shows as downloading. The import writes the final rows
         // from the file name either way.
         let held = held_episodes(&title, episode_number);
-        let grab_id = crate::models::grabbed_torrents::record_grab(
+        let saved = crate::models::grabbed_torrents::source_replay::record(
             &state.db,
             &effective_hash,
             &title,
             sid,
             &held,
             false,
+            None,
+            Some(episode_number),
+            crate::models::grabbed_torrents::source_replay::SourceRef {
+                url: &url,
+                guid: source_guid,
+                indexer_id,
+                client_id: Some(dispatch_client_id),
+                required_replay: false,
+            },
         )
         .await
-        .ok()
-        .flatten();
-        // Misgrab guardrails: keep the URL so Restore can re-add a removed grab.
-        if let Some(gid) = grab_id {
-            let _ = crate::models::grabbed_torrents::set_source_url(&state.db, gid, &url).await;
-        }
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!("Download added but its episode decision could not be saved: {e}"),
+            )
+        })?;
+        let grab_id = saved.as_ref().map(|s| s.id);
+        let replayed = saved.as_ref().is_some_and(|s| s.replayed);
+        let held = saved.map(|s| s.episodes).unwrap_or_default();
         if let Some(gid) = grab_id {
             let _ = crate::models::grabbed_torrents::set_download_client(
                 &state.db,
@@ -524,7 +553,7 @@ pub async fn grab_interactive_result(
             )
             .await;
         }
-        for ep in &held {
+        for ep in held.iter().filter(|_| !replayed) {
             let _ = episode_tags::record_grab_with_match(
                 &state.db,
                 sid,

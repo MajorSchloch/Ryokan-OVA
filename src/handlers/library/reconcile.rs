@@ -96,8 +96,10 @@ pub(super) async fn maybe_hydrate_cumulative_offset(
     // entry is cached so the search can read franchise aliases.
     if let Some(rule) = anime_relations::offset_for(t.anilist_id, t.mal_id) {
         return match series::update_cumulative_prior_episodes(db, t.id, rule.episodes, true).await {
-            Ok(()) => {
-                metadata_sync::log_rule_offset(db, &t, &rule).await;
+            Ok(written) => {
+                if written {
+                    metadata_sync::log_rule_offset(db, &t, &rule).await;
+                }
                 let force_kitsu = force_kitsu_fallback_enabled(db).await;
                 metadata_sync::hydrate_rule_source(db, t.anilist_id, &rule, force_kitsu).await;
                 series::get_by_id(db, t.id).await.ok().flatten().or(Some(t))

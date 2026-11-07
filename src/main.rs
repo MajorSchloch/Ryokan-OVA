@@ -381,6 +381,22 @@ fn resolve_live_db_path() -> std::path::PathBuf {
 
 #[tokio::main]
 async fn main() {
+    let database_url = services::paths::database_url();
+    if database_url.is_none() {
+        std::fs::create_dir_all(services::paths::data_dir()).expect("Cannot create data directory");
+    }
+    // Keep the lease for the whole process, including restore and CLI modes.
+    let _library_lease = tokio::task::spawn_blocking(|| {
+        let lease = services::library_guard::LibraryLease::acquire_configured(
+            &services::paths::live_db_path(),
+            services::paths::database_url().as_deref(),
+        )?;
+        lease.require_clean()?;
+        Ok::<_, String>(lease)
+    })
+    .await
+    .expect("Library startup guard failed")
+    .expect("Library is not ready to open");
     // One-shot CLI modes run BEFORE tracing init so their output isn't
     // interleaved with startup log lines. Each mode exits the process
     // on completion; falling through means "boot the server normally."
@@ -413,10 +429,6 @@ async fn main() {
     // database is `<data dir>/ryokan.db` (#259), where the data dir is
     // `RYOKAN_DATA_DIR` (the Docker image sets `/data`) or the
     // project-local `./data` under `cargo run`.
-    let database_url = services::paths::database_url();
-    if database_url.is_none() {
-        let _ = std::fs::create_dir_all(services::paths::data_dir());
-    }
 
     // WAL mode lets readers run concurrently with a writer, which matters a
     // lot here: every supervised background task (grep `supervise(&` for the

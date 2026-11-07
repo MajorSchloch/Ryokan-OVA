@@ -67,6 +67,7 @@ fn candidate(title: &str, score: i32) -> PendingCandidate {
         score,
         new_episode_count: 1,
         is_upgrade: false,
+        release_mapping: None,
         classification: ClassificationResult {
             source: Source::Web,
             resolution: Resolution::R1080p,

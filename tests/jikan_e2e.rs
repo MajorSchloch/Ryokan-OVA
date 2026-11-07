@@ -28,6 +28,215 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
+fn episode_detail(id: i64, mal_id: i64, episodes: i32) -> ryokan::services::anilist::AnimeDetail {
+    serde_json::from_value(json!({
+        "id": id, "id_mal": mal_id, "episodes": episodes,
+        "title_romaji": "Test", "title_english": "Test", "title_native": "",
+        "cover_url": "", "banner_url": "", "format": "TV", "status": "FINISHED",
+        "status_display": "Finished", "season": "", "description": "", "genres": [],
+        "score_is_ten_point": false, "score_class": "", "synonyms": [],
+        "streaming_episodes": [], "relations": []
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn split_entry_without_an_explicit_map_does_not_borrow_its_siblings_numbering() {
+    let _gate = ENV_LOCK.lock().await;
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&json!({
+        "mal:61469": {"anilist:190327": {"1": "1"}}
+    }))
+    .await;
+    let db = ryokan::test_support::in_memory_pool().await;
+    let result =
+        jikan::fetch_episode_titles_with_mapping(&db, &episode_detail(210482, 61469, 11)).await;
+    assert!(
+        result
+            .mapping_error
+            .unwrap()
+            .contains("none for AniList 210482")
+    );
+    assert!(result.episodes.is_empty());
+    assert!(!result.allow_kitsu_fallback);
+}
+
+#[tokio::test]
+async fn fallback_provider_id_does_not_select_an_unrelated_anilist_map() {
+    let _gate = ENV_LOCK.lock().await;
+    jikan::reset_state_for_tests().await;
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&json!({
+        "mal:701": {"anilist:700": {"1-3": "1-3"}},
+        "mal:801": {"anilist:800": {"1-3": "1-3"}}
+    }))
+    .await;
+    let db = ryokan::test_support::in_memory_pool().await;
+    for number in 1..=3 {
+        sqlx::query("INSERT INTO episode_cache (mal_id, episode_number, title) VALUES (701, ?, 'Correct entry'), (801, ?, 'Wrong entry')")
+            .bind(number).bind(number).execute(&db).await.unwrap();
+    }
+    // The fallback detail's id is Kitsu 800, not AniList 800. The tracked
+    // identity remains AniList 700, associated with MAL 701.
+    let detail = episode_detail(800, 701, 3);
+    let result = jikan::fetch_episode_titles_for_entry(&db, 700, &detail).await;
+    assert!(result.mapping_error.is_none());
+    assert_eq!(result.episodes.len(), 3);
+    assert!(
+        result
+            .episodes
+            .values()
+            .all(|episode| episode.title == "Correct entry")
+    );
+    // A provider with different numbering cannot also supply the canonical
+    // entry's count/order during an AniList outage.
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&json!({
+        "mal:701": {"anilist:700": {"1-3": "2-4"}}
+    }))
+    .await;
+    let blocked = jikan::fetch_episode_titles_for_entry(&db, 700, &detail).await;
+    assert!(blocked.mapping_error.is_some());
+    assert!(blocked.episodes.is_empty());
+    assert!(!blocked.allow_kitsu_fallback);
+}
+
+#[tokio::test]
+async fn short_provider_list_never_borrows_a_sequel_title() {
+    let _gate = ENV_LOCK.lock().await;
+    jikan::reset_state_for_tests().await;
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&json!({})).await;
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/anime/123/episodes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"mal_id": 1, "title": "First Entry"}]
+        })))
+        .expect(1)
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/anime/123/relations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{
+            "relation": "Sequel", "entry": [{"mal_id": 124, "type": "anime", "name": "Sequel"}]
+        }]})))
+        .expect(0)
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/anime/124/episodes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"mal_id": 1, "title": "Wrong Entry"}]
+        })))
+        .expect(0)
+        .mount(&mock)
+        .await;
+    unsafe {
+        std::env::set_var("JIKAN_API_BASE", mock.uri());
+    }
+    let db = ryokan::test_support::in_memory_pool().await;
+    let episodes = jikan::fetch_episode_titles_for_detail(&db, &episode_detail(999, 123, 2)).await;
+    assert_eq!(episodes.len(), 1);
+    assert_eq!(episodes[&1].title, "First Entry");
+    assert_eq!(
+        episode_cache_rows(&db, 123).await,
+        vec![(1, "First Entry".into())]
+    );
+    unsafe {
+        std::env::remove_var("JIKAN_API_BASE");
+    }
+}
+
+#[tokio::test]
+async fn mapped_titles_keep_provider_identity_and_survive_cache_reload() {
+    let _gate = ENV_LOCK.lock().await;
+    jikan::reset_state_for_tests().await;
+    // Direct mappings read from AniBridge's published dataset on 2026-11-06.
+    // The application uses the same parser for every title; these IDs occur
+    // only in this regression fixture.
+    let mappings = json!({
+        "mal:22297": {"anilist:19603": {"1-12": "2-13"}},
+        "mal:27821": {"anilist:19603": {"1": "1"}}
+    });
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&mappings).await;
+    let mock = MockServer::start().await;
+    let data: Vec<_> = (1..=12)
+        .map(|n| {
+            json!({
+                "mal_id": n, "title": format!("Regular {n}"), "aired": "2014-10-11"
+            })
+        })
+        .collect();
+    Mock::given(method("GET"))
+        .and(path("/anime/22297/episodes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": data})))
+        .expect(1)
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/anime/27821/episodes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
+            {"mal_id": 1, "title": "Prologue", "aired": "2014-10-04"}
+        ]})))
+        .expect(1)
+        .mount(&mock)
+        .await;
+    unsafe {
+        std::env::set_var("JIKAN_API_BASE", mock.uri());
+    }
+    let db = ryokan::test_support::in_memory_pool().await;
+    for _ in 0..2 {
+        let result =
+            jikan::fetch_episode_titles_with_mapping(&db, &episode_detail(19603, 22297, 13)).await;
+        assert!(!result.allow_kitsu_fallback);
+        assert_eq!(result.episodes.len(), 13);
+        assert_eq!(result.episodes[&1].title, "Prologue");
+        assert_eq!(result.episodes[&1].aired, "2014-10-04");
+        assert_eq!(result.episodes[&2].title, "Regular 1");
+        assert_eq!(result.episodes[&13].title, "Regular 12");
+        // Drop process caches, then reuse only database rows and parsed maps.
+        jikan::reset_state_for_tests().await;
+        ryokan::services::anibridge::clear_cache_for_tests().await;
+        ryokan::services::anibridge::seed_mapping_data_for_tests(&mappings).await;
+    }
+    let raw = jikan::fetch_episode_titles(&db, 22297).await;
+    assert_eq!(raw.len(), 12);
+    assert_eq!(raw[&1].title, "Regular 1");
+    assert!(!raw.contains_key(&13));
+    unsafe {
+        std::env::remove_var("JIKAN_API_BASE");
+    }
+}
+
+#[tokio::test]
+async fn missing_mapped_episode_stays_empty_and_blocks_unmapped_fallback() {
+    let _gate = ENV_LOCK.lock().await;
+    jikan::reset_state_for_tests().await;
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&json!({
+        "mal:901": {"anilist:902": {"1-2": "2-3"}}
+    }))
+    .await;
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/anime/901/episodes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
+            {"mal_id": 1, "title": "Second Video"}
+        ]})))
+        .expect(1)
+        .mount(&mock)
+        .await;
+    unsafe {
+        std::env::set_var("JIKAN_API_BASE", mock.uri());
+    }
+    let db = ryokan::test_support::in_memory_pool().await;
+    let result = jikan::fetch_episode_titles_with_mapping(&db, &episode_detail(902, 901, 3)).await;
+    assert!(!result.allow_kitsu_fallback);
+    assert_eq!(result.episodes.len(), 1);
+    assert_eq!(result.episodes[&2].title, "Second Video");
+    assert!(!result.episodes.contains_key(&1));
+    assert!(!result.episodes.contains_key(&3));
+    unsafe {
+        std::env::remove_var("JIKAN_API_BASE");
+    }
+}
+
 /// Minimal Jikan v4 search response — only the fields the parser
 /// reads. Matches `services::jikan::AnimeSearchItem` shape.
 fn search_response(mal_id: i64, title: &str, score: f64) -> serde_json::Value {

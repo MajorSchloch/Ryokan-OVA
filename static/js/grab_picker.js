@@ -699,6 +699,7 @@
                 size: ctx.size || '',
                 seeders: ctx.seeders != null ? Number(ctx.seeders) : null,
                 group: ctx.group || '',
+                source_guid: ctx.sourceGuid || '',
                 // Forward the search-hit's batch flag so the backend's
                 // grab-row write picks it up verbatim instead of
                 // inferring from file count.
@@ -706,6 +707,7 @@
             },
         };
         if (ctx.seriesId) body.series_id = Number(ctx.seriesId);
+        if (ctx.indexerId != null) body.indexer_id = Number(ctx.indexerId);
 
         fetch('/api/grab/preview', {
             method: 'POST',

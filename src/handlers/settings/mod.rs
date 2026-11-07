@@ -419,6 +419,8 @@ pub struct SettingsForm {
     radarr_enabled: Option<String>,
     radarr_api_key: Option<String>,
     upgrade_search_enabled: Option<String>,
+    #[serde(default)]
+    default_allow_upgrades: Option<String>,
     seadex_enabled: Option<String>,
     default_custom_query_tokens: Option<String>,
     /// Issue #83 — interactive file-picker trigger policy. `batches_only`
@@ -564,6 +566,8 @@ pub struct QualityForm {
     /// makes serde_urlencoded map the absence to `None`.
     #[serde(default)]
     upgrade_search_enabled: Option<String>,
+    #[serde(default)]
+    default_allow_upgrades: Option<String>,
     #[serde(default)]
     seadex_enabled: Option<String>,
     #[serde(default)]
@@ -1497,6 +1501,13 @@ pub async fn settings_submit(
                 .map(|c| c.upgrade_search_enabled)
                 .unwrap_or(false)
         },
+        default_allow_upgrades: if form.tab.as_deref() == Some("quality") || form.tab.is_none() {
+            form.default_allow_upgrades.is_some()
+        } else {
+            existing_cfg
+                .as_ref()
+                .is_some_and(|c| c.default_allow_upgrades)
+        },
         // Owned by the dedicated Quality subform handler; carried
         // forward here like the other Quality knobs.
         proper_policy: existing_cfg
@@ -2288,6 +2299,7 @@ pub async fn settings_quality_submit(
         },
         prefer_subs: form.prefer_subs == "1",
         upgrade_search_enabled: form.upgrade_search_enabled.is_some(),
+        default_allow_upgrades: form.default_allow_upgrades.is_some(),
         seadex_enabled: form.seadex_enabled.is_some(),
         default_custom_query_tokens: form
             .default_custom_query_tokens

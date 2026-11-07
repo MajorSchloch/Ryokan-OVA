@@ -56,6 +56,71 @@ pub async fn expand_from_files(
     torrent_title: &str,
     grab_ctx: &AutoExpandGrabContext,
 ) -> usize {
+    // The import-time caller already holds this lock and uses the checked
+    // helper directly. Background waiters must not publish a new mapping
+    // halfway through an import that started without one.
+    let _import_guard = crate::services::post_processing::POST_PROC_LOCK
+        .lock()
+        .await;
+    match try_expand_from_files(
+        db,
+        filenames,
+        parent_detail,
+        parent_series_id,
+        parent_episode_numbers,
+        grab_id,
+        torrent_title,
+        grab_ctx,
+    )
+    .await
+    {
+        Ok(added) => added,
+        Err(error) => {
+            logger::warn(
+                db,
+                LogCategory::Library,
+                "Auto-expand: episode mapping was not saved",
+                &error,
+            )
+            .await;
+            0
+        }
+    }
+}
+
+/// Import must propagate a failed choice instead of falling back to a parent
+/// heuristic. Background callers use the logging wrapper above and retry here
+/// when the completed download is available. The caller holds POST_PROC_LOCK.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn try_expand_from_files(
+    db: &SqlitePool,
+    filenames: &[String],
+    parent_detail: &AnimeDetail,
+    parent_series_id: i64,
+    parent_episode_numbers: &[i32],
+    grab_id: i64,
+    torrent_title: &str,
+    grab_ctx: &AutoExpandGrabContext,
+) -> Result<usize, String> {
+    // Automatic search already chose this release's numbering. Its importer
+    // validates the actual files; the older pack heuristics cannot replace it.
+    if grabbed_torrents::get_release_mapping(db, grab_id)
+        .await?
+        .is_some()
+    {
+        return Ok(0);
+    }
+    // A restart or a second async waiter must not rerun source detection for
+    // a download whose choice is already frozen. Import binds it by file name.
+    match grabbed_torrents::get_numbering_snapshot(db, grab_id).await {
+        Ok(Some(_)) => return Ok(0),
+        Ok(None) => {}
+        Err(error) => {
+            return Err(format!(
+                "Episode mapping: saved mapping is unreadable: {error}"
+            ));
+        }
+    }
     // Misgrab guardrails: judge the file list before anything is
     // written. A detected misgrab must not upsert siblings, write
     // routes, or widen the grab's episode coverage; the unclaimed-files
@@ -95,7 +160,7 @@ pub async fn expand_from_files(
             "the misgrab sweep removes and blocklists it",
         )
         .await;
-        return 0;
+        return Ok(0);
     }
 
     let parent_title = if !parent_detail.title_english.is_empty() {
@@ -115,7 +180,7 @@ pub async fn expand_from_files(
             ),
         )
         .await;
-        return 0;
+        return Ok(0);
     }
 
     logger::debug(
@@ -334,12 +399,18 @@ pub async fn expand_from_files(
             if let Some(name) = filenames.get(file_idx)
                 && let Some(span) = media::parse_episode_span(&name.to_lowercase())
             {
-                // Every episode a multi-episode file holds (issue #246).
-                for raw in span.episodes() {
-                    let effective = raw - sibling.episode_offset;
-                    if effective > 0 {
-                        ep_nums.push(effective);
-                    }
+                // Use the import resolver's complete-span validation when
+                // writing grabbed tags. Never tag only half a combined file.
+                use crate::services::episode_mapping::{MappingRule, resolve_file};
+                if let Ok(mapped) = MappingRule::for_offset(
+                    sibling_id,
+                    span.first,
+                    span.last,
+                    sibling.episode_offset,
+                )
+                .and_then(|rule| resolve_file(&[rule], span.first, span.last))
+                {
+                    ep_nums.extend(mapped.first..=mapped.last);
                 }
             }
         }
@@ -397,7 +468,10 @@ pub async fn expand_from_files(
         .filter(|i| {
             filenames
                 .get(*i)
-                .map(|n| auto_search::is_media_filename(n))
+                .map(|n| {
+                    auto_search::is_media_filename(n)
+                        || crate::services::post_processing::is_video_file(n)
+                })
                 .unwrap_or(false)
                 && !claimed.contains(i)
         })
@@ -526,7 +600,8 @@ pub async fn expand_from_files(
     }
 
     if !routes.is_empty()
-        && let Err(e) = grabbed_torrents::record_grab_series_routes(db, &routes).await
+        && let Err(e) =
+            grabbed_torrents::record_grab_series_routes_with_files(db, &routes, filenames).await
     {
         logger::warn(
             db,
@@ -538,6 +613,7 @@ pub async fn expand_from_files(
             &e.to_string(),
         )
         .await;
+        return Err(format!("Episode mapping: could not save pack routes: {e}"));
     }
 
     logger::info(
@@ -556,7 +632,7 @@ pub async fn expand_from_files(
     )
     .await;
 
-    added
+    Ok(added)
 }
 
 #[cfg(test)]

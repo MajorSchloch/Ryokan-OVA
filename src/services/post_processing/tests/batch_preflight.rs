@@ -35,6 +35,61 @@ fn accepts_unique_dot_delimited_complete_series_batch() {
 }
 
 #[test]
+fn explicit_route_maps_zero_and_rejects_overflow() {
+    let plan = validate_batch_episode_map(
+        &[(0, 42, Some(-1), 99, "Show - 00.mkv".to_string())],
+        &HashSet::new(),
+    )
+    .unwrap();
+    assert_eq!(plan.slots[&0].episode, 1);
+    assert_eq!(plan.slots[&0].episode_last, 1);
+    for offset in [i32::MIN, i32::MAX, 5000] {
+        let result = validate_batch_episode_map(
+            &[(0, 42, Some(offset), 0, "Show - 01.mkv".to_string())],
+            &HashSet::new(),
+        );
+        assert!(
+            result.is_err(),
+            "offset {offset} must not overflow or partially import"
+        );
+    }
+}
+
+#[test]
+fn routed_combined_file_cannot_extend_past_the_entry_boundary() {
+    let files = [(0, 42, Some(12), 0, "Show - 24-25.mkv".to_string())];
+    let error = crate::services::post_processing::validate_batch_episode_map_with_counts(
+        &files,
+        &HashSet::new(),
+        &[(42, 12)].into_iter().collect(),
+    )
+    .unwrap_err();
+    assert!(error.contains("beyond entry count 12"), "{error}");
+    assert!(error.contains("no files were changed"));
+}
+
+#[test]
+fn conflicting_saved_routes_never_choose_by_row_order() {
+    use crate::models::grabbed_torrents::GrabSeriesRoute;
+    let a = GrabSeriesRoute {
+        grab_id: 1,
+        series_id: 42,
+        file_indices: vec![0],
+        episode_numbers: vec![1],
+        matched_subtitle: String::new(),
+        episode_offset: 0,
+    };
+    let b = GrabSeriesRoute {
+        series_id: 43,
+        ..a.clone()
+    };
+    for routes in [vec![a.clone(), b.clone()], vec![b, a.clone()]] {
+        assert!(crate::services::post_processing::validated_file_routes(&routes).is_err());
+    }
+    assert!(crate::services::post_processing::validated_file_routes(&[a.clone(), a]).is_ok());
+}
+
+#[test]
 fn unparseable_extras_are_skipped_without_failing_the_batch() {
     // Real packs routinely ship NCOP/NCED/PV/CM/menu videos that parse to
     // `None` by design. They must be absent from the plan (the import loop
