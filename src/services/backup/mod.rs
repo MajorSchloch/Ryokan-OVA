@@ -1013,10 +1013,10 @@ async fn prepare_staged_database(path: &Path, sanitized: bool) -> Result<(), Res
     let foreign_objects: i64 = sqlx::query_scalar(
         "SELECT (SELECT COUNT(*) FROM sqlite_master WHERE lower(type) NOT IN ('table', 'index') \
                  AND NOT (type IS 'trigger' AND name IS 'series_clear_reviewed_offset' \
-                          AND tbl_name IS 'series' AND sql IS ('CREATE TRIGGER ' || ?))) \
+                          AND tbl_name IS 'series' AND sql IS ?)) \
               + (SELECT COUNT(*) FROM pragma_table_list WHERE schema = 'main' AND type != 'table')",
     )
-    .bind(crate::models::migrations::REVIEWED_OFFSET_TRIGGER)
+    .bind(crate::models::migrations::REVIEWED_OFFSET_TRIGGER.replacen(" IF NOT EXISTS", "", 1))
     .fetch_one(&pool)
     .await
     .unwrap_or(1);
