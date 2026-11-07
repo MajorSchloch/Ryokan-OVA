@@ -89,6 +89,8 @@ pub struct GrabForm {
     /// from `SearchResult.indexer_id` and round-trips it on grab.
     #[serde(default)]
     indexer_id: Option<i64>,
+    #[serde(default)]
+    source_guid: String,
 }
 
 /// Helper to build SearchOptions from config.
@@ -404,23 +406,29 @@ pub async fn grab_release(
                     &outcome,
                     crate::services::library_link::LibraryLinkOutcome::AutoAdded { .. }
                 );
-                let grab_id = crate::models::grabbed_torrents::record_grab(
+                let saved = crate::models::grabbed_torrents::source_replay::record(
                     &state.db,
                     &hash,
                     &title,
                     series.id,
                     episode_numbers,
                     is_batch,
+                    None,
+                    None,
+                    crate::models::grabbed_torrents::source_replay::SourceRef {
+                        url: &form.url,
+                        guid: &form.source_guid,
+                        indexer_id: form.indexer_id,
+                        client_id: Some(dispatch_client_id),
+                        required_replay: false,
+                    },
                 )
                 .await
-                .ok()
-                .flatten();
-                // Misgrab guardrails: keep the URL so Restore can re-add a removed grab.
-                if let Some(gid) = grab_id {
-                    let _ =
-                        crate::models::grabbed_torrents::set_source_url(&state.db, gid, &form.url)
-                            .await;
-                }
+                .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e.to_string()))?;
+                let grab_id = saved.as_ref().map(|s| s.id);
+                let replayed = saved.as_ref().is_some_and(|s| s.replayed);
+                let canonical_episodes = saved.map(|s| s.episodes).unwrap_or_default();
+                let episode_numbers = &canonical_episodes;
                 if let Some(gid) = grab_id {
                     let _ = crate::models::grabbed_torrents::set_download_client(
                         &state.db,
@@ -464,7 +472,7 @@ pub async fn grab_release(
                     }),
                 )
                 .await;
-                for ep in episode_numbers {
+                for ep in episode_numbers.iter().filter(|_| !replayed) {
                     let _ = crate::models::episode_tags::record_grab(
                         &state.db,
                         series.id,
@@ -504,6 +512,7 @@ pub async fn grab_release(
                 // no AL graph to walk). The 180s metadata wait is
                 // why this stays in a `tokio::spawn`.
                 if is_batch
+                    && !replayed
                     && series.anilist_id > 0
                     && let Some(grab_id) = grab_id
                 {
@@ -773,6 +782,7 @@ mod tests {
                     info_hash: Some(bad.clone()),
                     is_batch: None,
                     indexer_id: None,
+                    source_guid: String::new(),
                 }),
             )
             .await;

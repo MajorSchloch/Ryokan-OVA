@@ -100,39 +100,34 @@ pub async fn commit_grab_and_expand(
         .unwrap_or(0);
     let ep_nums = episode_numbers_for_commit(release_title, &filenames, cumulative_prior_episodes);
 
-    let grab_id = match grabbed_torrents::record_grab(
+    let metadata: serde_json::Value =
+        serde_json::from_str(&row.release_metadata_json).unwrap_or_default();
+    let source_url = metadata["source_url"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| metadata["torrent"].as_str().filter(|s| !s.is_empty()))
+        .or_else(|| metadata["magnet"].as_str())
+        .unwrap_or("");
+    let (grab_id, replayed, ep_nums) = match grabbed_torrents::source_replay::record(
         &state.db,
         &row.info_hash,
         release_title,
         series_id,
         &ep_nums,
         is_batch,
+        None,
+        None,
+        grabbed_torrents::source_replay::SourceRef {
+            url: source_url,
+            guid: metadata["source_guid"].as_str().unwrap_or(""),
+            indexer_id: row.indexer_id,
+            client_id: row.download_client_id,
+            required_replay: false,
+        },
     )
     .await
     {
-        Ok(Some(id)) => {
-            // Stamp the dispatch client id captured at preview time so
-            // post-processing's `resolve_grab_client` routes the import /
-            // delete back through the same client even if defaults change.
-            // Without this, picker-confirm and walkaway-auto-commit grabs
-            // land NULL-stamped: SAB rows are still rescued by the
-            // `SABnzbd_nzo_` hash heuristic, but a BT grab routed to a
-            // non-default client (e.g. indexer pinned to seedbox-qBit
-            // while local-qBit is the default) silently falls through to
-            // the torrent default at import time.
-            if let Err(e) =
-                grabbed_torrents::set_download_client(&state.db, id, row.download_client_id).await
-            {
-                logger::warn(
-                    &state.db,
-                    LogCategory::Grab,
-                    "set_download_client failed after record_grab",
-                    &format!("{} ({})", e, row.info_hash),
-                )
-                .await;
-            }
-            id
-        }
+        Ok(Some(saved)) => (saved.id, saved.replayed, saved.episodes),
         Ok(None) => {
             // Dedup hit against an in-flight `pending` row — another
             // flow is mid-commit on this hash. Don't stomp it; the
@@ -170,7 +165,7 @@ pub async fn commit_grab_and_expand(
     let tags = crate::models::episode_tags::get_for_series(&state.db, series_id)
         .await
         .unwrap_or_default();
-    for ep in &ep_nums {
+    for ep in ep_nums.iter().filter(|_| !replayed) {
         // An episode with a file on disk keeps its `completed` row. The
         // upsert would replace the file's classification with the
         // pack's, and a cancelled download would then delete the row
@@ -232,7 +227,7 @@ pub async fn commit_grab_and_expand(
     // A failed fetch or panic inside the spawn drops the auto-expand
     // silently; the import-time call in `services::post_processing`
     // is the safety net that guarantees siblings land eventually.
-    if !filenames.is_empty() {
+    if !replayed && !filenames.is_empty() {
         let db_task = state.db.clone();
         let title_task = release_title.to_string();
         let ep_nums_task = ep_nums.clone();
@@ -321,7 +316,11 @@ pub(crate) fn file_slot_episodes(
     } else {
         crate::services::post_processing::fallback_ep_offset(span.first, cumulative_prior_episodes)
     };
-    (span.first - offset..=span.last - offset).filter(|e| *e > 0)
+    use crate::services::episode_mapping::{MappingRule, resolve_file};
+    MappingRule::for_offset(1, span.first, span.last, offset)
+        .and_then(|rule| resolve_file(&[rule], span.first, span.last))
+        .into_iter()
+        .flat_map(|mapped| mapped.first..=mapped.last)
 }
 
 /// The `group` the picker stored in the pending row's release

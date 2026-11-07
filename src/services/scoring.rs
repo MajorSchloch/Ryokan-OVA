@@ -380,6 +380,9 @@ mod tests {
     fn result(seeders: i32, title: &str) -> SearchResult {
         SearchResult {
             match_provenance: None,
+            release_mapping: None,
+            source_guid: String::new(),
+            replay_episodes: None,
             title: title.to_string(),
             link: String::new(),
             magnet: String::new(),

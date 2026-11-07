@@ -512,10 +512,13 @@ pub async fn upsert(db: &SqlitePool, core: SeriesCore<'_>) -> Result<(i64, bool)
     };
     let folder = unique_series_folder(db, folder, core.season_year, None).await?;
 
+    // Read the configured upgrade default in the INSERT itself. Every add
+    // path uses this function; existing rows and MAL promotions return above
+    // without replacing the user's per-series choice.
     let result = sqlx::query(
         r#"
-        INSERT INTO series (anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO series (anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT default_allow_upgrades FROM config WHERE id = 1), 0))
         "#,
     )
     .bind(core.anilist_id)
@@ -902,23 +905,24 @@ pub async fn update_allow_pt_upgrades(
 /// AniList detail (not a MAL / Kitsu fallback whose relations the walk
 /// never saw); it flips `cumulative_offset_known` on and never off, so
 /// `{episode.absolute}` renders only once the season chain is real.
+/// Returns false when the row is missing or a library review owns the offset.
 pub async fn update_cumulative_prior_episodes(
     db: &SqlitePool,
     id: i64,
     offset: i32,
     known: bool,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
         "UPDATE series SET cumulative_prior_episodes = ?, \
          cumulative_offset_known = CASE WHEN ? THEN 1 ELSE cumulative_offset_known END \
-         WHERE id = ?",
+         WHERE id = ? AND cumulative_offset_reviewed = 0",
     )
     .bind(offset)
     .bind(known)
     .bind(id)
     .execute(db)
     .await?;
-    Ok(())
+    Ok(result.rows_affected() != 0)
 }
 
 /// The series' absolute-numbering offset (`cumulative_prior_episodes`)
@@ -999,6 +1003,79 @@ impl Series {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn upgrade_default_applies_only_when_a_series_is_created() {
+        let db = crate::test_support::in_memory_pool().await;
+        let (off, _) = upsert(&db, core_ids(801, None, "Default off"))
+            .await
+            .unwrap();
+        assert!(!get_by_id(&db, off).await.unwrap().unwrap().allow_upgrades);
+
+        let mut cfg = crate::models::config::Config {
+            default_allow_upgrades: true,
+            ..Default::default()
+        };
+        crate::models::config::save_config(&db, &cfg).await.unwrap();
+        let (on, _) = upsert(&db, core_ids(802, None, "Default on"))
+            .await
+            .unwrap();
+        assert!(get_by_id(&db, on).await.unwrap().unwrap().allow_upgrades);
+        let (_, created) = upsert(&db, core_ids(801, None, "Refreshed off"))
+            .await
+            .unwrap();
+        assert!(!created);
+        assert!(!get_by_id(&db, off).await.unwrap().unwrap().allow_upgrades);
+
+        cfg.default_allow_upgrades = false;
+        crate::models::config::save_config(&db, &cfg).await.unwrap();
+        upsert(&db, core_ids(802, None, "Refreshed on"))
+            .await
+            .unwrap();
+        assert!(get_by_id(&db, on).await.unwrap().unwrap().allow_upgrades);
+        update_allow_upgrades(&db, off, true).await.unwrap();
+        upsert(&db, core_ids(801, None, "Explicit choice"))
+            .await
+            .unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        assert!(get_by_id(&db, off).await.unwrap().unwrap().allow_upgrades);
+        assert!(
+            !crate::models::config::get_config(&db)
+                .await
+                .unwrap()
+                .unwrap()
+                .default_allow_upgrades
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_promotion_preserves_the_series_upgrade_choice() {
+        for allow in [false, true] {
+            let db = crate::test_support::in_memory_pool().await;
+            let cfg = crate::models::config::Config {
+                default_allow_upgrades: allow,
+                ..Default::default()
+            };
+            crate::models::config::save_config(&db, &cfg).await.unwrap();
+            let (id, _) = upsert(&db, core_ids(-803, Some(803), "MAL entry"))
+                .await
+                .unwrap();
+            let cfg = crate::models::config::Config {
+                default_allow_upgrades: !allow,
+                ..cfg
+            };
+            crate::models::config::save_config(&db, &cfg).await.unwrap();
+            let (promoted, created) = upsert(&db, core_ids(804, Some(803), "AniList entry"))
+                .await
+                .unwrap();
+            assert_eq!(promoted, id);
+            assert!(!created);
+            assert_eq!(
+                get_by_id(&db, id).await.unwrap().unwrap().allow_upgrades,
+                allow
+            );
+        }
+    }
 
     #[tokio::test]
     async fn a_series_sharing_another_ones_title_gets_its_own_folder() {
@@ -1271,6 +1348,55 @@ mod tests {
 mod absolute_offset_tests {
     use super::*;
     use crate::test_support::{in_memory_pool, seed_series};
+
+    #[tokio::test]
+    async fn reviewed_offsets_survive_provider_writes_until_the_entry_changes() {
+        let db = in_memory_pool().await;
+        for (entry, reviewed, proposed) in [(100, 0, 25), (200, 13, 12)] {
+            let id = seed_series(&db, entry, "Reviewed series").await;
+            sqlx::query("UPDATE series SET cumulative_prior_episodes=?, cumulative_offset_known=1, cumulative_offset_reviewed=1 WHERE id=?")
+                .bind(reviewed).bind(id).execute(&db).await.unwrap();
+            for known in [false, true] {
+                assert!(
+                    !update_cumulative_prior_episodes(&db, id, proposed, known)
+                        .await
+                        .unwrap()
+                );
+                assert_eq!(
+                    absolute_offset_if_known(&db, id).await.unwrap(),
+                    Some(reviewed)
+                );
+            }
+            // Refreshing the same identity retains the review. A different
+            // entry starts with an unknown offset and can learn its own.
+            sqlx::query("UPDATE series SET anilist_id=anilist_id WHERE id=?")
+                .bind(id)
+                .execute(&db)
+                .await
+                .unwrap();
+            assert!(
+                !update_cumulative_prior_episodes(&db, id, proposed, true)
+                    .await
+                    .unwrap()
+            );
+            sqlx::query("UPDATE series SET anilist_id=? WHERE id=?")
+                .bind(entry + 1)
+                .bind(id)
+                .execute(&db)
+                .await
+                .unwrap();
+            assert_eq!(absolute_offset_if_known(&db, id).await.unwrap(), None);
+            assert!(
+                update_cumulative_prior_episodes(&db, id, proposed, true)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                absolute_offset_if_known(&db, id).await.unwrap(),
+                Some(proposed)
+            );
+        }
+    }
 
     #[tokio::test]
     async fn offset_is_unknown_until_written_then_known() {

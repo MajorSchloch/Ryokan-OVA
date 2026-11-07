@@ -168,6 +168,9 @@ pub fn total_cf_score_for_release(
 ) -> i32 {
     let result = super::SearchResult {
         match_provenance: None,
+        release_mapping: None,
+        source_guid: String::new(),
+        replay_episodes: None,
         title: title.to_string(),
         group: group.to_string(),
         size_bytes,

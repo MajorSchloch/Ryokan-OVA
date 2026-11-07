@@ -190,6 +190,9 @@ pub(super) fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResu
 
         let mut result = SearchResult {
             match_provenance: None,
+            release_mapping: None,
+            source_guid: String::new(),
+            replay_episodes: None,
             title,
             link,
             magnet,
@@ -508,6 +511,9 @@ pub(super) fn parse_view_page(
 
     let mut result = SearchResult {
         match_provenance: None,
+        release_mapping: None,
+        source_guid: String::new(),
+        replay_episodes: None,
         title,
         link: view_url.to_string(),
         magnet,
@@ -1032,6 +1038,9 @@ mod tests {
 
         let mut results = vec![SearchResult {
             match_provenance: None,
+            release_mapping: None,
+            source_guid: String::new(),
+            replay_episodes: None,
             title: "[SubsPlease] Show - 01 (1080p) [abc].mkv".to_string(),
             link: String::new(),
             magnet: String::new(),
@@ -1078,6 +1087,9 @@ mod tests {
 
         let mut results = vec![SearchResult {
             match_provenance: None,
+            release_mapping: None,
+            source_guid: String::new(),
+            replay_episodes: None,
             title: "[SubsPlease] Show - 01 (BD 1080p) [abc].mkv".to_string(),
             link: String::new(),
             magnet: String::new(),

@@ -4,6 +4,9 @@ use std::sync::LazyLock;
 use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, RwLock};
 
+mod episode_maps;
+pub use episode_maps::{MalEpisodePlan, MalSource};
+
 const MAPPINGS_URL_DEFAULT: &str =
     "https://github.com/anibridge/anibridge-mappings/releases/latest/download/mappings.min.json";
 
@@ -159,6 +162,7 @@ pub struct AnimeIds {
 
 #[derive(Debug)]
 struct MappingCache {
+    mal_episode_plans: HashMap<i64, MalEpisodePlan>,
     /// (TMDB show ID, season) → Vec of anime IDs. Every show key in the
     /// mappings names a season, and season 0 is the show's Specials.
     tmdb_to_anime: HashMap<(i64, i32), Vec<AnimeIds>>,
@@ -219,9 +223,18 @@ pub struct EpisodeSpan {
 impl EpisodeSpan {
     /// AniList episode for TMDB episode `ep`, when this span covers it.
     pub fn anilist_episode(&self, ep: i32) -> Option<i32> {
-        (self.tmdb_start..=self.tmdb_end)
-            .contains(&ep)
-            .then(|| self.anilist_start + (ep - self.tmdb_start))
+        crate::services::episode_mapping::resolve_episode(&[self.mapping_rule()], ep)
+            .ok()
+            .map(|mapped| mapped.number)
+    }
+
+    fn mapping_rule(&self) -> crate::services::episode_mapping::MappingRule {
+        crate::services::episode_mapping::MappingRule {
+            source_first: self.tmdb_start,
+            source_last: self.tmdb_end,
+            target_entry: self.anilist_id,
+            target_first: self.anilist_start,
+        }
     }
 }
 
@@ -413,11 +426,49 @@ pub async fn tmdb_episode_spans(tmdb_id: i64, season: i32) -> Vec<EpisodeSpan> {
 }
 
 /// `(anilist_id, anilist_episode)` for TMDB episode `ep` of a season,
-/// given that season's spans. `None` when no span covers it.
+/// given that season's spans. `None` for an absent, invalid or conflicting map.
 pub fn map_tmdb_episode(spans: &[EpisodeSpan], ep: i32) -> Option<(i64, i32)> {
-    spans
-        .iter()
-        .find_map(|s| s.anilist_episode(ep).map(|al_ep| (s.anilist_id, al_ep)))
+    map_tmdb_file(spans, ep, ep)
+        .ok()
+        .map(|mapped| (mapped.entry, mapped.first))
+}
+
+/// A combined file must map completely into one AniList entry. Checking only
+/// its first episode can place a split-cour boundary file in the wrong entry.
+pub fn map_tmdb_file(
+    spans: &[EpisodeSpan],
+    first: i32,
+    last: i32,
+) -> Result<
+    crate::services::episode_mapping::MappedFile,
+    crate::services::episode_mapping::MappingError,
+> {
+    let rules: Vec<_> = spans.iter().map(EpisodeSpan::mapping_rule).collect();
+    crate::services::episode_mapping::resolve_file(&rules, first, last)
+}
+
+#[cfg(test)]
+mod mapping_conflict_tests {
+    use super::*;
+
+    #[test]
+    fn conflicting_episode_mappings_do_not_pick_the_first_entry() {
+        let spans = vec![
+            EpisodeSpan {
+                tmdb_start: 1,
+                tmdb_end: 12,
+                anilist_id: 55,
+                anilist_start: 1,
+            },
+            EpisodeSpan {
+                tmdb_start: 1,
+                tmdb_end: 12,
+                anilist_id: 56,
+                anilist_start: 1,
+            },
+        ];
+        assert_eq!(map_tmdb_episode(&spans, 6), None);
+    }
 }
 
 fn lookup_show_seasons(
@@ -502,6 +553,7 @@ pub async fn seed_mal_to_anilist_for_tests(pairs: &[(i64, i64)]) {
         mal_to_anilist.insert(mal, al);
     }
     let data = MappingCache {
+        mal_episode_plans: HashMap::new(),
         tmdb_to_anime: HashMap::new(),
         tvdb_to_anime: HashMap::new(),
         anilist_to_tmdb: HashMap::new(),
@@ -513,6 +565,45 @@ pub async fn seed_mal_to_anilist_for_tests(pairs: &[(i64, i64)]) {
     };
     let mut w = CACHE.write().await;
     *w = Some(CacheState { data });
+}
+
+/// Direct MAL episode mappings into an AniList entry. The complete plan is
+/// cloned under one read lock so a daily refresh cannot change half a lookup.
+/// Missing mappings preserve the existing provider-numbering path; unavailable
+/// mapping data is an error, not evidence that the numbering is identical.
+pub async fn mal_episode_plan(
+    anilist_id: i64,
+    primary_mal: Option<i64>,
+) -> Result<Option<MalEpisodePlan>, String> {
+    if anilist_id <= 0 {
+        return Ok(None);
+    }
+    if !ensure_loaded().await {
+        return Err("Episode mapping: provider mappings are unavailable".to_string());
+    }
+    let cache = CACHE.read().await;
+    let data = &cache.as_ref().expect("loaded mapping cache").data;
+    if let Some(plan) = data.mal_episode_plans.get(&anilist_id) {
+        return Ok(Some(plan.clone()));
+    }
+    if primary_mal.is_some_and(|mid| {
+        data.mal_episode_plans
+            .values()
+            .any(|plan| plan.sources.iter().any(|source| source.mal_id == mid))
+    }) {
+        return Err(format!(
+            "Episode mapping: MAL entry has episode mappings, but none for AniList {anilist_id}"
+        ));
+    }
+    Ok(None)
+}
+
+/// Seed the real parser, including direct provider episode mappings.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn seed_mapping_data_for_tests(data: &serde_json::Value) {
+    *CACHE.write().await = Some(CacheState {
+        data: build_cache(data),
+    });
 }
 
 /// Test-only: drop the in-memory cache so a subsequent
@@ -591,6 +682,7 @@ pub async fn seed_external_mappings_for_tests(
         }
     }
     let data = MappingCache {
+        mal_episode_plans: HashMap::new(),
         tmdb_to_anime,
         tvdb_to_anime,
         anilist_to_tmdb,
@@ -636,6 +728,7 @@ pub async fn seed_tmdb_episode_spans_for_tests(spans: &[(i64, i32, i32, i32, i64
         v.sort_by_key(|s| s.tmdb_start);
     }
     let data = MappingCache {
+        mal_episode_plans: HashMap::new(),
         tmdb_to_anime,
         tvdb_to_anime: HashMap::new(),
         anilist_to_tmdb,
@@ -884,6 +977,7 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
         Some(o) => o,
         None => {
             return MappingCache {
+                mal_episode_plans: HashMap::new(),
                 tmdb_to_anime,
                 tvdb_to_anime,
                 anilist_to_tmdb,
@@ -1010,6 +1104,7 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
     }
 
     MappingCache {
+        mal_episode_plans: episode_maps::build_mal_plans(data),
         tmdb_to_anime,
         tvdb_to_anime,
         anilist_to_tmdb,

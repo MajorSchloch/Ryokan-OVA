@@ -346,7 +346,12 @@ pub async fn grab_preview(
         "Download client not configured".to_string(),
     ))?;
     let client_kind = client.sonarr_impl_name().to_string();
-    let metadata_json = form.release_metadata.to_string();
+    let mut metadata = form.release_metadata.clone();
+    if !metadata.is_object() {
+        metadata = serde_json::json!({});
+    }
+    metadata["source_url"] = serde_json::json!(form.url);
+    let metadata_json = metadata.to_string();
 
     // Run the paused-add synchronously so we know whether the
     // torrent was added fresh or was pre-existing. `we_added_torrent`

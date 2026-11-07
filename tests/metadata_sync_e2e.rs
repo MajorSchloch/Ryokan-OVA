@@ -115,8 +115,100 @@ async fn seed_minimal_series_tv(db: &SqlitePool, anilist_id: i64) -> i64 {
 }
 
 #[tokio::test]
+async fn mapped_refresh_keeps_titles_in_canonical_order_and_preserves_cache_on_conflict() {
+    let _gate = ENV_LOCK.lock().await;
+    anilist::reset_state_for_tests();
+    ryokan::services::jikan::reset_state_for_tests().await;
+    let maps = json!({
+        "mal:981": {"anilist:980": {"1-2": "2-3"}},
+        "mal:982": {"anilist:980": {"1": "1"}}
+    });
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&maps).await;
+    let mock = MockServer::start().await;
+    let mut detail = tv_media_detail_response_with_format(980, 981, "TV", 3);
+    detail["data"]["Media"]["coverImage"] = json!({});
+    detail["data"]["Media"]["bannerImage"] = json!(null);
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(detail))
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/anime/981/episodes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
+            {"mal_id": 1, "title": "First Regular", "aired": "2024-01-08"},
+            {"mal_id": 2, "title": "Last Regular", "aired": "2024-01-15"}
+        ]})))
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/anime/982/episodes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
+            {"mal_id": 1, "title": "Prologue", "aired": "2024-01-01"}
+        ]})))
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/mappings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .expect(0)
+        .mount(&mock)
+        .await;
+    unsafe {
+        std::env::set_var("RYOKAN_ANILIST_API_BASE", mock.uri());
+        std::env::set_var("JIKAN_API_BASE", mock.uri());
+        std::env::set_var("RYOKAN_KITSU_API_BASE", mock.uri());
+    }
+    let db = in_memory_pool().await;
+    sqlx::query("INSERT INTO config (id, force_kitsu_fallback) VALUES (1, 1) ON CONFLICT(id) DO UPDATE SET force_kitsu_fallback=1")
+        .execute(&db).await.unwrap();
+    let id = seed_minimal_series_tv(&db, 980).await;
+    let tracked = series::get_by_id(&db, id).await.unwrap().unwrap();
+    metadata_sync::refresh_series_metadata(&db, &tracked, false)
+        .await
+        .unwrap();
+    for cache in [
+        local_metadata::get_episode_map_for_series(&db, id)
+            .await
+            .unwrap(),
+        local_metadata::get_episode_map_for_provider(&db, 980)
+            .await
+            .unwrap(),
+    ] {
+        assert_eq!(cache.len(), 3);
+        assert_eq!(cache[&1].title, "Prologue");
+        assert_eq!(cache[&2].title, "First Regular");
+        assert_eq!(cache[&3].title, "Last Regular");
+        assert_eq!(cache[&1].aired, "2024-01-01");
+    }
+    // A corrupt/ambiguous daily map must not blank previously good metadata.
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&json!({
+        "mal:981": {"anilist:980": {"1-2": "2-3"}},
+        "mal:982": {"anilist:980": {"1": "2"}}
+    }))
+    .await;
+    let tracked = series::get_by_id(&db, id).await.unwrap().unwrap();
+    let error = metadata_sync::refresh_series_metadata(&db, &tracked, false)
+        .await
+        .unwrap_err();
+    assert!(error.starts_with("Episode mapping:"), "{error}");
+    let cached = local_metadata::get_episode_map_for_series(&db, id)
+        .await
+        .unwrap();
+    assert_eq!(cached[&1].title, "Prologue");
+    assert_eq!(cached[&3].title, "Last Regular");
+    unsafe {
+        std::env::remove_var("RYOKAN_ANILIST_API_BASE");
+        std::env::remove_var("JIKAN_API_BASE");
+        std::env::remove_var("RYOKAN_KITSU_API_BASE");
+    }
+    anilist::reset_state_for_tests();
+}
+
+#[tokio::test]
 async fn refresh_series_metadata_writes_cache_on_happy_al_response() {
     let _gate = ENV_LOCK.lock().await;
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&json!({})).await;
     anilist::reset_state_for_tests();
 
     let mock = MockServer::start().await;
@@ -223,6 +315,7 @@ async fn refresh_series_metadata_returns_error_on_al_5xx_with_no_fallback_signal
     // and no title candidates has nowhere to fall back to. The final
     // arm re-calls AL, hits the same 5xx, and returns Err.
     let _gate = ENV_LOCK.lock().await;
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&json!({})).await;
     anilist::reset_state_for_tests();
 
     let mock = MockServer::start().await;
@@ -262,6 +355,7 @@ async fn refresh_series_metadata_returns_rate_limit_error_on_al_429() {
     // sweep). Caller gets back an `is_rate_limit_error`-tagged Err
     // and the metadata refresh defers.
     let _gate = ENV_LOCK.lock().await;
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&json!({})).await;
     anilist::reset_state_for_tests();
 
     let mock = MockServer::start().await;
@@ -415,6 +509,7 @@ async fn refresh_series_metadata_tv_format_merges_jikan_episode_titles() {
     // merge ladder at line ~304: the Jikan title takes precedence
     // when present, the fallback chain only fires when Jikan is empty.
     let _gate = ENV_LOCK.lock().await;
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&json!({})).await;
     anilist::reset_state_for_tests();
 
     let mock = MockServer::start().await;
@@ -531,6 +626,7 @@ async fn refresh_series_metadata_movie_with_single_episode_skips_jikan_fetch() {
     // The .expect(0) on the Jikan mock is the assertion: any unwanted
     // call (mutation triggers the gate) fails the test on mock drop.
     let _gate = ENV_LOCK.lock().await;
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&json!({})).await;
     anilist::reset_state_for_tests();
 
     let mock = MockServer::start().await;
@@ -588,6 +684,7 @@ async fn refresh_series_metadata_movie_format_with_multi_episodes_still_fetches_
     // Also pins line 233's `>` operator on ep_count: `replace > with
     // <=/==/<` would skip the Jikan fetch for ep_count=3.
     let _gate = ENV_LOCK.lock().await;
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&json!({})).await;
     anilist::reset_state_for_tests();
 
     let mock = MockServer::start().await;
@@ -668,6 +765,7 @@ async fn refresh_series_metadata_tv_format_falls_back_to_series_title_when_jikan
     // The mutation surface here is the `if ep_count <= 1` guard at
     // line 264 of metadata_sync.rs and the fallback ladder around it.
     let _gate = ENV_LOCK.lock().await;
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&json!({})).await;
     anilist::reset_state_for_tests();
 
     let mock = MockServer::start().await;
@@ -758,6 +856,7 @@ async fn refresh_series_metadata_movie_falls_back_to_romaji_when_english_empty()
     // title. A `delete !` mutation flips the guard to "fire when
     // title_english IS empty," which would write the empty string.
     let _gate = ENV_LOCK.lock().await;
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&json!({})).await;
     anilist::reset_state_for_tests();
 
     let mock = MockServer::start().await;
@@ -808,6 +907,7 @@ async fn refresh_series_metadata_movie_falls_back_to_native_when_english_and_rom
     // line 267 would prefer the empty title_romaji over the populated
     // title_native.
     let _gate = ENV_LOCK.lock().await;
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&json!({})).await;
     anilist::reset_state_for_tests();
 
     let mock = MockServer::start().await;
@@ -858,6 +958,7 @@ async fn refresh_all_series_metadata_skips_when_anilist_is_unreachable() {
     // sweep's (refreshed, failed) tuple is part of the
     // `system::api_metadata_refresh` handler contract.
     let _gate = ENV_LOCK.lock().await;
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&json!({})).await;
     anilist::reset_state_for_tests();
 
     let mock = MockServer::start().await;
@@ -928,6 +1029,7 @@ async fn manual_rebuild_drops_the_jikan_negative_cache_and_refetches_titles() {
     // drops the series' Jikan episode cache first and reads Tenrai
     // again; `.expect(1..)` on the episodes mock is the assertion.
     let _gate = ENV_LOCK.lock().await;
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&json!({})).await;
     anilist::reset_state_for_tests();
 
     let mock = MockServer::start().await;
@@ -1006,6 +1108,7 @@ async fn refresh_with_a_jikan_sentinel_takes_kitsu_titles_by_mal_id_not_by_title
     // titles came from the fuzz picking "Gabriel DropOut Specials"
     // for "Dropout". `.expect(0)` on `/anime` is the assertion.
     let _gate = ENV_LOCK.lock().await;
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&json!({})).await;
     anilist::reset_state_for_tests();
 
     let mock = MockServer::start().await;
@@ -1157,6 +1260,7 @@ async fn reconcile_leaves_a_split_mal_entry_as_a_mal_series() {
     // `Page` query sees both and the row stays a MAL series; a MAL id
     // with one AniList entry is promoted as before.
     let _gate = ENV_LOCK.lock().await;
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&json!({})).await;
     anilist::reset_state_for_tests();
 
     let mock = MockServer::start().await;

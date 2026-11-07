@@ -1397,6 +1397,9 @@ pub async fn settings_custom_formats_test(
     let group = fc.release_group.clone().unwrap_or_default();
     let release = SearchResult {
         match_provenance: None,
+        release_mapping: None,
+        source_guid: String::new(),
+        replay_episodes: None,
         title: title.clone(),
         link: String::new(),
         magnet: String::new(),

@@ -311,6 +311,77 @@ async fn client_switch_off_keeps_move_mode_torrents_in_the_client() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[tokio::test]
+async fn protected_import_cleanup_waits_only_when_a_skipped_video_holds_missing_episodes() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    for usenet in [false, true] {
+        for missing in [false, true] {
+            let (root, downloads, media) = temp_dirs("protected-cleanup");
+            let incoming = if missing {
+                "Show - 01-02.mkv"
+            } else {
+                "Show - 01.mkv"
+            };
+            std::fs::write(downloads.join(incoming), "new bytes").unwrap();
+            let season = media.join("Show/Season 01");
+            std::fs::create_dir_all(&season).unwrap();
+            std::fs::write(season.join("Show - S01E01.mkv"), "Tdarr bytes").unwrap();
+            let db = in_memory_pool().await;
+            seed_config(&db, &media, "hardlink", true).await;
+            let sid = seed_series(&db, 9501, "Show").await;
+            crate::models::series::update_allow_upgrades(&db, sid, false)
+                .await
+                .unwrap();
+            let gid = grabbed_torrents::record_grab(
+                &db,
+                "protected-cleanup",
+                "Show 01-02",
+                sid,
+                &[1, 2],
+                true,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            grabbed_torrents::set_download_client(&db, gid, Some(1))
+                .await
+                .unwrap();
+            let items = vec![item(
+                "protected-cleanup",
+                &downloads,
+                DownloadItemState::Seeding,
+                true,
+            )];
+            let files = vec![DownloadFile {
+                name: incoming.into(),
+                size: 9,
+                progress: 1.0,
+                wanted: true,
+            }];
+            let client = Arc::new(if usenet {
+                CleanupClient::usenet(items, files)
+            } else {
+                CleanupClient::torrent(items, files)
+            });
+            let state = build_test_app_state(db.clone(), Some(client.clone()));
+            post_processing::run_once(&state).await;
+            post_processing::sweep_finished_seeds_now(&state)
+                .await
+                .unwrap();
+            assert_eq!(
+                std::fs::read_to_string(season.join("Show - S01E01.mkv")).unwrap(),
+                "Tdarr bytes"
+            );
+            assert_eq!(client.deletes().is_empty(), missing);
+            assert_eq!(client_removed_at(&db, gid).await.is_none(), missing);
+            if missing {
+                assert!(downloads.join(incoming).exists());
+            }
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+}
+
 // ── The finished-seed sweep ──────────────────────────────────────────
 
 async fn seed_imported(db: &sqlx::SqlitePool, hash: &str) -> i64 {

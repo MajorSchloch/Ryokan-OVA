@@ -159,18 +159,50 @@ fn resolve_episode(
             )
         }
     });
-    let episode = span.first - episode_offset;
-    if episode <= 0 {
+    // This helper resolves numbers within one already-routed entry. Entry 1
+    // is a local sentinel, never a stored/provider identity. The route owns
+    // the real series id; the resolver validates the full span and arithmetic.
+    let rule = crate::services::episode_mapping::MappingRule::for_offset(
+        1,
+        span.first,
+        span.last,
+        episode_offset,
+    )
+    .map_err(|e| e.to_string())?;
+    let mapped = crate::services::episode_mapping::resolve_file(&[rule], span.first, span.last)
+        .map_err(|e| e.to_string())?;
+    if route_offset.is_some() && episode_count > 0 && mapped.last > episode_count {
         return Err(format!(
-            "episode {} minus offset {} is non-positive",
-            span.first, episode_offset
+            "Episode mapping: file ends at episode {}, beyond entry count {}",
+            mapped.last, episode_count
         ));
     }
     Ok(ResolvedEpisode {
         raw_episode: span.first,
-        episode,
-        episode_last: span.last - episode_offset,
+        episode: mapped.first,
+        episode_last: mapped.last,
     })
+}
+
+/// Overlapping persisted routes must agree. HashMap collection used to let
+/// database iteration order select the destination before any mapping check.
+fn validated_file_routes(
+    routes: &[grabbed_torrents::GrabSeriesRoute],
+) -> Result<HashMap<usize, (i64, i32)>, String> {
+    let mut out = HashMap::new();
+    for route in routes {
+        let destination = (route.series_id, route.episode_offset);
+        for &file in &route.file_indices {
+            if let Some(previous) = out.insert(file, destination)
+                && previous != destination
+            {
+                return Err(format!(
+                    "Episode mapping: conflicting routes for file {file}; no files were changed"
+                ));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The slot a lone video with an unparseable name takes from the grab
@@ -243,9 +275,18 @@ pub(crate) struct BatchPlan {
 /// `tv_series` holds the ids of target series whose AniList format is
 /// TV (`media::is_tv_format`): only for those does a special marker in
 /// a file name mean "special" rather than the series' own numbering.
+#[cfg(test)]
 pub(crate) fn validate_batch_episode_map(
     files: &[(usize, i64, Option<i32>, i32, String)],
     tv_series: &HashSet<i64>,
+) -> Result<BatchPlan, String> {
+    validate_batch_episode_map_with_counts(files, tv_series, &HashMap::new())
+}
+
+fn validate_batch_episode_map_with_counts(
+    files: &[(usize, i64, Option<i32>, i32, String)],
+    tv_series: &HashSet<i64>,
+    episode_counts: &HashMap<i64, i32>,
 ) -> Result<BatchPlan, String> {
     struct Entry<'a> {
         file_idx: usize,
@@ -281,9 +322,18 @@ pub(crate) fn validate_batch_episode_map(
         let Some(span) = parsed else {
             continue;
         };
-        let Ok(resolved) = resolve_episode(span, *route_offset, *cumulative_prior_episodes, &[], 0)
-        else {
-            continue;
+        let resolved = match resolve_episode(
+            span,
+            *route_offset,
+            *cumulative_prior_episodes,
+            &[],
+            episode_counts.get(series_id).copied().unwrap_or(0),
+        ) {
+            Ok(resolved) => resolved,
+            Err(reason) if route_offset.is_some() => {
+                return Err(format!("{reason}: '{name}'; no files were changed"));
+            }
+            Err(_) => continue,
         };
         // No version token reads as v1 so `E05` + `E05v2` compare 1 vs 2.
         let version = media::parse_release_version(&lower).unwrap_or(1);
@@ -837,10 +887,14 @@ async fn import_special_file(
     cfg: &config::Config,
     ctx: &SeriesImportCtx,
     src: &Path,
-    filename_only: &str,
     span: media::EpisodeSpan,
     taken: &mut HashSet<PathBuf>,
+    reviewed: Option<&grabbed_torrents::migration_replay::ReplayFile>,
 ) -> Result<SpecialOutcome, String> {
+    let filename_only = src
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Import special: invalid source filename".to_string())?;
     let specials_dir = Path::new(&cfg.media_root)
         .join(&ctx.folder_name)
         .join(SPECIALS_FOLDER);
@@ -859,6 +913,12 @@ async fn import_special_file(
         episode_name_context_with_tag(ctx, None, span.first, span.last, "", filename_only, ext);
     name_ctx.season_number = 0;
     name_ctx.episode_absolute = None;
+    if let Some(file) = reviewed {
+        name_ctx.episode_title = file.title.clone();
+        name_ctx.quality_resolution = file.resolution.clone();
+        name_ctx.quality_source = file.source.clone();
+        name_ctx.release_group = file.release_group.clone();
+    }
     let name = naming::episode_file(&cfg.episode_file_format, &name_ctx);
     let mut dest = specials_dir.join(&name.file_name);
     if taken.contains(&dest) {
@@ -940,7 +1000,9 @@ fn episode_name_context(
 ) -> naming::NameContext {
     episode_name_context_with_tag(
         ctx,
-        ctx.existing_tags.get(&ep_num),
+        ctx.existing_tags
+            .get(&ep_num)
+            .filter(|tag| tag.manual_override || tag.state != "completed"),
         ep_num,
         ep_last,
         ep_title,
@@ -1177,12 +1239,9 @@ async fn load_series_import_ctx(
     })
 }
 
-/// Process a single completed torrent. Returns `true` if at least one file was
-/// imported, `false` if there was nothing to do yet.
-///
 /// Outcome of an [`import_torrent`] call. Replaces the older
-/// `Result<bool, String>` shape so the caller can distinguish four
-/// states the prior bool flattened together:
+/// `Result<bool, String>` shape so the caller can distinguish outcomes the
+/// prior bool flattened together:
 ///
 /// - `NotReady` — torrent complete but no video files visible yet
 ///   (qBit still finalizing, or the pack is all samples/.nfo). Leave
@@ -1201,11 +1260,24 @@ async fn load_series_import_ctx(
 ///   pending forever — the previous Ok(false) collapse meant a disk-
 ///   full pack would re-attempt every tick, generating duplicate
 ///   error logs without ever escalating to a user-visible failure.
+/// - `Protected` — existing episodes were kept. Normal cleanup applies when
+///   all files were handled; missing slots in a skipped video or other failures
+///   require review and retain the download.
 pub(crate) enum ImportOutcome {
     NotReady,
     Imported,
-    PartiallyImported { failed_episodes: Vec<i32> },
-    AllFailed { failed_episodes: Vec<i32> },
+    PartiallyImported {
+        failed_episodes: Vec<i32>,
+    },
+    AllFailed {
+        failed_episodes: Vec<i32>,
+    },
+    Protected {
+        imported_files: usize,
+        skipped_files: usize,
+        needs_review: bool,
+        failed_episodes: Vec<i32>,
+    },
 }
 
 /// Phase 2: if the grab has routing rows in `grabbed_torrent_series`
@@ -1226,6 +1298,25 @@ async fn import_torrent(
     // routed `get_files` to the wrong client for any pinned grab.
     client: &std::sync::Arc<dyn DownloadClient>,
 ) -> Result<ImportOutcome, String> {
+    let migration_replay = grabbed_torrents::get_migration_replay(&state.db, grab.id).await?;
+    let prior_coverage: std::collections::BTreeMap<i64, Vec<i32>> = if migration_replay.is_some() {
+        let raw: Option<String> =
+            sqlx::query_scalar("SELECT imported_episode_coverage FROM grabbed_torrents WHERE id=?")
+                .bind(grab.id)
+                .fetch_one(&state.db)
+                .await
+                .map_err(|e| format!("Episode mapping: cannot read replay ownership: {e}"))?;
+        raw.as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| format!("Episode mapping: invalid replay ownership: {e}"))?
+            .unwrap_or_default()
+    } else {
+        std::collections::BTreeMap::new()
+    };
+    let mut retained_coverage: std::collections::BTreeMap<i64, Vec<i32>> =
+        std::collections::BTreeMap::new();
+    let replacement_episode = grabbed_torrents::get_replacement_episode(&state.db, grab.id).await?;
     let mut files = client
         .get_files(torrent_hash)
         .await
@@ -1237,9 +1328,21 @@ async fn import_torrent(
     // belongs to; an empty result is the legacy path where every file
     // routes to `grab.series_id` (pre-Phase-2 grabs, or Phase-2 grabs
     // where sibling detection returned nothing).
-    let mut routes = grabbed_torrents::get_series_routes(&state.db, grab.id)
-        .await
-        .unwrap_or_default();
+    let (release_mapping, mut numbering_snapshot, mut routes) = if migration_replay.is_some() {
+        // The reviewed source files supersede old offsets for execution only.
+        // Historical claims, routes and numbering snapshots remain unchanged.
+        (None, None, Vec::new())
+    } else {
+        (
+            grabbed_torrents::get_release_mapping(&state.db, grab.id).await?,
+            grabbed_torrents::get_numbering_snapshot(&state.db, grab.id)
+                .await
+                .map_err(|e| format!("Episode mapping: cannot read saved mapping: {e}"))?,
+            grabbed_torrents::get_series_routes(&state.db, grab.id)
+                .await
+                .map_err(|e| format!("Episode mapping: cannot read saved routes: {e}"))?,
+        )
+    };
 
     // Grab-time auto-expand can fail when qBit's metadata wait times
     // out on a slow tracker (see the 180s wait in
@@ -1250,7 +1353,13 @@ async fn import_torrent(
     // file falling back to the parent. Motivating case (#45): the
     // HorribleSubs JoJo P3 48-ep pack, where the grab-time wait timed
     // out and Egypt-hen never got auto-added.
-    if routes.is_empty() && grab.is_batch && grab.series_id > 0 {
+    if migration_replay.is_none()
+        && release_mapping.is_none()
+        && numbering_snapshot.is_none()
+        && routes.is_empty()
+        && grab.is_batch
+        && grab.series_id > 0
+    {
         match metadata_cache::get_by_series_id(&state.db, grab.series_id).await {
             Ok(Some(cached)) => {
                 // A file the client was told to skip (a partial pick
@@ -1287,7 +1396,7 @@ async fn import_torrent(
                     release_group: String::new(),
                     size_bytes: 0,
                 };
-                let _ = crate::services::auto_expand::expand_from_files(
+                crate::services::auto_expand::try_expand_from_files(
                     &state.db,
                     &filenames,
                     &cached.detail,
@@ -1297,14 +1406,17 @@ async fn import_torrent(
                     &grab.torrent_name,
                     &ctx,
                 )
-                .await;
+                .await?;
                 // Reload regardless of return value: `expand_from_files`
                 // writes routes when it detects siblings even if those
                 // siblings were already tracked (added=0 but routes
                 // written).
                 routes = grabbed_torrents::get_series_routes(&state.db, grab.id)
                     .await
-                    .unwrap_or_default();
+                    .map_err(|e| format!("Episode mapping: cannot read saved routes: {e}"))?;
+                numbering_snapshot = grabbed_torrents::get_numbering_snapshot(&state.db, grab.id)
+                    .await
+                    .map_err(|e| format!("Episode mapping: cannot read saved mapping: {e}"))?;
             }
             Ok(None) => {
                 // Rare but possible: a grab landed before the metadata
@@ -1345,16 +1457,7 @@ async fn import_torrent(
     // arc-local episode number. Offset is 0 for siblings with arc-
     // local numbering and for all legacy routes (via COALESCE in the
     // model read).
-    let routes_by_file: HashMap<usize, (i64, i32)> = routes
-        .iter()
-        .flat_map(|r| {
-            let series_id = r.series_id;
-            let offset = r.episode_offset;
-            r.file_indices
-                .iter()
-                .map(move |i| (*i, (series_id, offset)))
-        })
-        .collect();
+    let mut routes_by_file = validated_file_routes(&routes)?;
 
     // Preserve the canonical qBit file index alongside each entry so
     // completed files can be correlated back to their route row. qBit
@@ -1484,12 +1587,29 @@ async fn import_torrent(
             .map(|file_idx| (*file_idx, &files[*file_idx]))
             .collect();
 
+    let replay_files = migration_replay
+        .as_ref()
+        .map(|plan| {
+            let current: Vec<_> = files
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| is_video_file(&f.name))
+                .map(|(i, f)| (i, f.name.as_str(), f.wanted))
+                .collect();
+            plan.bind_files(&current)
+        })
+        .transpose()?;
+    if let Some(bound) = &replay_files {
+        routes_by_file = bound.iter().map(|(&i, f)| (i, (f.series_id, 0))).collect();
+    }
+
     // Misgrab guardrails: a fast download can finish before the sweep's
     // first look. Judge the file list now if nobody has; a misgrab is
     // never imported, and the sweep removes and blocklists it.
-    if grabbed_torrents::get_verification(&state.db, grab.id)
-        .await
-        .is_none()
+    if migration_replay.is_none()
+        && grabbed_torrents::get_verification(&state.db, grab.id)
+            .await
+            .is_none()
     {
         let names: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
         let verdict = crate::services::misgrab::assess_grab(&state.db, grab, &names).await;
@@ -1517,8 +1637,95 @@ async fn import_torrent(
     // grabs can predate (or have missed) batch classification; allowing a
     // multi-video import through the single-file path would reintroduce the
     // duplicate-destination overwrite that this preflight prevents.
-    let batch_episode_plan = if requires_episode_map_preflight(grab.is_batch, video_files.len()) {
+    let frozen_files = numbering_snapshot
+        .as_ref()
+        .map(|saved| {
+            let files: Vec<_> = files
+                .iter()
+                .enumerate()
+                .filter(|(_, file)| is_video_file(&file.name))
+                .map(|(index, file)| (index, file.name.as_str(), file.wanted))
+                .collect();
+            saved.bind_files(&files)
+        })
+        .transpose()?;
+    if let Some(frozen) = &frozen_files {
+        routes_by_file = frozen
+            .iter()
+            .map(|(&index, file)| (index, (file.series_id, file.episode_offset)))
+            .collect();
+    }
+    if let Some(mapping) = &release_mapping {
+        if numbering_snapshot.is_some() || !routes.is_empty() {
+            return Err("Episode mapping: conflicting release and file decisions".into());
+        }
+        let owner = series::get_by_id(&state.db, grab.series_id)
+            .await
+            .map_err(|e| format!("Episode mapping: cannot read release owner: {e}"))?
+            .ok_or_else(|| "Episode mapping: release owner no longer exists".to_string())?;
+        if owner.anilist_id != mapping.anilist_id
+            || media::is_tv_format(&owner.format) != mapping.tv_series
+        {
+            return Err("Episode mapping: release owner identity changed".into());
+        }
+        let mut actual_episodes = HashSet::new();
+        for (index, file) in &video_files {
+            let basename = Path::new(&file.name)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&file.name);
+            if let Some(span) = media::parse_episode_span(&basename.to_lowercase()) {
+                let special = media::is_tv_format(&owner.format)
+                    && (span.special || media::path_names_specials(Path::new(&file.name)));
+                if !special {
+                    let mapped = mapping.resolve_file(span)?;
+                    actual_episodes.extend(mapped.first..=mapped.last);
+                }
+            }
+            routes_by_file.insert(*index, (grab.series_id, mapping.offset()));
+        }
+        if actual_episodes.is_empty()
+            || (!grab.is_batch
+                && mapping
+                    .episodes()
+                    .iter()
+                    .any(|n| !actual_episodes.contains(n)))
+        {
+            return Err(
+                "Episode mapping: downloaded files do not contain the saved release episodes"
+                    .into(),
+            );
+        }
+    }
+    let preflight_ran = replay_files.is_some()
+        || release_mapping.is_some()
+        || numbering_snapshot.is_some()
+        || requires_episode_map_preflight(grab.is_batch, video_files.len());
+    let batch_episode_plan = if let Some(bound) = &replay_files {
+        let mut plan = BatchPlan::default();
+        for (&index, file) in bound {
+            if file.season == 0 {
+                plan.specials.insert(index);
+            } else {
+                let raw_episode = Path::new(&file.name)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(|n| media::parse_episode_span(&n.to_lowercase()))
+                    .map_or(file.first, |s| s.first);
+                plan.slots.insert(
+                    index,
+                    ResolvedEpisode {
+                        raw_episode,
+                        episode: file.first,
+                        episode_last: file.last,
+                    },
+                );
+            }
+        }
+        plan
+    } else if preflight_ran {
         let mut cumulative_by_series = HashMap::new();
+        let mut episode_counts = HashMap::new();
         let mut tv_series: HashSet<i64> = HashSet::new();
         let mut batch_files = Vec::with_capacity(video_files.len());
         for (file_idx, file) in &video_files {
@@ -1526,21 +1733,39 @@ async fn import_torrent(
             let target_series_id = route
                 .map(|(series_id, _)| series_id)
                 .unwrap_or(grab.series_id);
-            let cumulative_prior_episodes =
-                if let Some(value) = cumulative_by_series.get(&target_series_id) {
-                    *value
-                } else {
-                    let row = series::get_by_id(&state.db, target_series_id)
-                        .await
-                        .map_err(|e| e.to_string())?
-                        .ok_or_else(|| format!("series {} not found", target_series_id))?;
-                    if media::is_tv_format(&row.format) {
-                        tv_series.insert(target_series_id);
-                    }
-                    let value = row.cumulative_prior_episodes;
-                    cumulative_by_series.insert(target_series_id, value);
-                    value
-                };
+            let cumulative_prior_episodes = if let Some(value) =
+                cumulative_by_series.get(&target_series_id)
+            {
+                *value
+            } else {
+                let row = series::get_by_id(&state.db, target_series_id)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| {
+                        if numbering_snapshot.is_some() {
+                            format!(
+                                "Episode mapping: saved entry {target_series_id} no longer exists"
+                            )
+                        } else {
+                            format!("series {target_series_id} not found")
+                        }
+                    })?;
+                if let Some(saved) = frozen_files.as_ref().and_then(|files| files.get(file_idx))
+                    && row.anilist_id != saved.anilist_id
+                {
+                    return Err(format!(
+                        "Episode mapping: entry identity changed for '{}'; no files were changed",
+                        file.name
+                    ));
+                }
+                if media::is_tv_format(&row.format) {
+                    tv_series.insert(target_series_id);
+                }
+                episode_counts.insert(target_series_id, row.episodes.unwrap_or(0));
+                let value = row.cumulative_prior_episodes;
+                cumulative_by_series.insert(target_series_id, value);
+                value
+            };
             batch_files.push((
                 *file_idx,
                 target_series_id,
@@ -1549,11 +1774,45 @@ async fn import_torrent(
                 file.name.clone(),
             ));
         }
-        validate_batch_episode_map(&batch_files, &tv_series)?
+        let plan =
+            validate_batch_episode_map_with_counts(&batch_files, &tv_series, &episode_counts)
+                .map_err(|error| {
+                    if release_mapping.is_some() && !error.starts_with("Episode mapping:") {
+                        format!("Episode mapping: {error}")
+                    } else {
+                        error
+                    }
+                })?;
+        if let Some(frozen) = &frozen_files {
+            for (&index, file) in frozen {
+                if file.special != plan.specials.contains(&index) {
+                    return Err(format!(
+                        "Episode mapping: special classification changed for '{}'; no files were changed",
+                        file.name
+                    ));
+                }
+                let expected = file.mapped_episode()?;
+                if let Some(actual) = plan.slots.get(&index) {
+                    if !expected.is_some_and(|mapped| {
+                        actual.episode == mapped.first && actual.episode_last == mapped.last
+                    }) {
+                        return Err(format!(
+                            "Episode mapping: saved episode choice changed for '{}'; no files were changed",
+                            file.name
+                        ));
+                    }
+                } else if expected.is_some() && !plan.superseded.contains_key(&index) {
+                    return Err(format!(
+                        "Episode mapping: saved episode is absent for '{}'; no files were changed",
+                        file.name
+                    ));
+                }
+            }
+        }
+        plan
     } else {
         BatchPlan::default()
     };
-    let preflight_ran = requires_episode_map_preflight(grab.is_batch, video_files.len());
     // Specials of a TV series imported into (or already in) the
     // Specials folder; they carry no episode rows, so they count apart
     // from `imported_count`. `specials_written` dedupes the S00 names
@@ -1598,6 +1857,8 @@ async fn import_torrent(
     let mut imported_eps_by_series: std::collections::BTreeMap<i64, Vec<(i32, i64, String)>> =
         std::collections::BTreeMap::new();
     let mut imported_count = 0_usize;
+    let mut protected_count = 0_usize;
+    let mut protected_missing = false;
     // Source-side paths we successfully imported FROM. Persisted on
     // the grab row at the end of this function so the delete and
     // series-remove handlers can clean up SAB's complete dir
@@ -1655,6 +1916,9 @@ async fn import_torrent(
                 match load_series_import_ctx(state, cfg, target_series_id).await {
                     Ok(ctx) => entry.insert(ctx),
                     Err(e) => {
+                        if e.starts_with("Import protection:") {
+                            return Err(e);
+                        }
                         logger::error(
                             &state.db,
                             LogCategory::PostProcess,
@@ -1815,22 +2079,24 @@ async fn import_torrent(
                 continue;
             }
             // A bare `- OVA` with no number is the show's one special.
-            let span = name_span.unwrap_or(media::EpisodeSpan {
+            let reviewed = replay_files
+                .as_ref()
+                .and_then(|bound| bound.get(file_idx))
+                .copied();
+            let reviewed_span = reviewed.map(|f| media::EpisodeSpan {
+                season: Some(0),
+                first: f.first,
+                last: f.last,
+                special: true,
+            });
+            let span = reviewed_span.or(name_span).unwrap_or(media::EpisodeSpan {
                 season: None,
                 first: 1,
                 last: 1,
                 special: true,
             });
-            match import_special_file(
-                state,
-                cfg,
-                ctx,
-                &src,
-                filename_only,
-                span,
-                &mut specials_written,
-            )
-            .await
+            match import_special_file(state, cfg, ctx, &src, span, &mut specials_written, reviewed)
+                .await
             {
                 Ok(SpecialOutcome::Imported) => {
                     specials_imported += 1;
@@ -1989,7 +2255,47 @@ async fn import_torrent(
         // is one (it may carry a manual override), else a filename-only
         // classification of the source; the post-download reclassify
         // below still runs on the landed file, it just doesn't rename.
-        let name_ctx = episode_name_context(ctx, ep_num, ep_last, &ep_title, filename_only, ext);
+        // A completed tag describes the old file, not this incoming release.
+        // Keep explicit quality pins, but otherwise name from the new file.
+        let mut name_ctx =
+            episode_name_context(ctx, ep_num, ep_last, &ep_title, filename_only, ext);
+        if ctx
+            .existing_tags
+            .get(&ep_num)
+            .is_some_and(|tag| tag.state == "completed")
+        {
+            // A quality pin does not pin the old release's group.
+            name_ctx.release_group = quality_from_name(filename_only).2;
+        }
+        if name_ctx.release_group.is_empty() {
+            // Completed tags remain attached to the old file until placement.
+            // Use this release's pending history for a group omitted from its
+            // filenames; never borrow the previous file's release identity.
+            name_ctx.release_group =
+                episode_tags::get_grab_history(&state.db, target_series_id, ep_num)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|entry| {
+                        entry.state == "grabbed"
+                            && entry.release_title == grab.torrent_name
+                            && !entry.release_group.is_empty()
+                    })
+                    .max_by_key(|entry| entry.id)
+                    .map(|entry| entry.release_group)
+                    .unwrap_or_else(|| quality_from_name(&grab.torrent_name).2);
+        }
+        if let Some(file) = replay_files.as_ref().and_then(|bound| bound.get(file_idx)) {
+            if !ctx
+                .existing_tags
+                .get(&ep_num)
+                .is_some_and(|tag| tag.manual_override)
+            {
+                name_ctx.quality_resolution = file.resolution.clone();
+                name_ctx.quality_source = file.source.clone();
+            }
+            name_ctx.release_group = file.release_group.clone();
+        }
         let episode_name = naming::episode_file(&cfg.episode_file_format, &name_ctx);
         if episode_name.truncated {
             logger::info(
@@ -2006,59 +2312,82 @@ async fn import_torrent(
         let dest_video = ctx.season_dir.join(&episode_name.file_name);
         let dest_nfo = ctx.season_dir.join(format!("{}.nfo", episode_name.stem));
 
-        // Existing files for this episode slot (any extension). Matched
-        // by parsing each name back through `parse_episode_span`
-        // rather than by a fixed `SxxExx` substring, so the check works
-        // for every template the validator accepts (it requires the
-        // sample name to parse back) and still catches files named under
-        // an earlier template or an episode title that changed between
-        // grabs. A file whose span overlaps the incoming one counts
-        // (issue #246): `S01E05-E06` retires a lone `S01E06`, and a lone
-        // `S01E06` retires `S01E05-E06`, since either would leave the
-        // season folder with two files claiming the same episode.
-        // Walk the season directory off the runtime — a big season pack on
-        // an NFS mount can make the sync read_dir/stat calls block for
-        // hundreds of ms. The filter logic is cheap CPU, so we also move
-        // it into the spawned task.
-        let existing_for_ep: Vec<(PathBuf, media::EpisodeSpan)> = {
-            let season_dir = ctx.season_dir.clone();
-            tokio::task::spawn_blocking(move || -> Vec<(PathBuf, media::EpisodeSpan)> {
-                std::fs::read_dir(&season_dir)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.path())
-                    .filter_map(|p| {
-                        // Episode files only: the `.nfo` and the
-                        // subtitles named after a file go with it
-                        // through the recycle bin's companion sweep,
-                        // never as entries of their own. A `.strm` stub
-                        // (issue #287) is the episode's file to the
-                        // scanner, so the upgrade retires it too rather
-                        // than leaving two files on one episode.
-                        let is_episode_file = p
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .is_some_and(|n| is_video_file(n) || media::is_stream_stub(n));
-                        if !is_episode_file {
-                            return None;
-                        }
-                        let span = p
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .and_then(|n| media::parse_episode_span(&n.to_lowercase()))
-                            .filter(|s| {
-                                s.first <= ep_last
-                                    && s.last >= ep_num
-                                    && s.season.is_none_or(|n| n == season)
-                            })?;
-                        Some((p, span))
-                    })
-                    .collect()
-            })
-            .await
-            .unwrap_or_default()
-        };
+        // Read all folders with the same parser as the library scan. This
+        // includes old season templates and stream stubs. A failed scan is a
+        // hold, never proof that the episode is missing.
+        let series_root = Path::new(&cfg.media_root).join(&ctx.folder_name);
+        let existing_for_ep: Vec<(PathBuf, media::EpisodeSpan)> =
+            media::scan_series_folder_checked(&cfg.media_root, &ctx.folder_name)
+                .await?
+                .into_iter()
+                .filter(|file| file.episode_number <= ep_last && file.episode_last >= ep_num)
+                .map(|file| (series_root.join(&file.filename), file.span()))
+                .collect();
+
+        // A pack chosen to fill missing slots must not replace a present
+        // episode. Permission is tied to the explicit episode request and
+        // the parent entry; it never spreads to another episode or sibling.
+        let protects_existing = !ctx.series.allow_upgrades
+            && existing_for_ep.iter().any(|(_, span)| {
+                (span.first..=span.last).any(|ep| {
+                    !(target_series_id == grab.series_id && replacement_episode == Some(ep))
+                })
+            });
+        if protects_existing {
+            // A combined file cannot be split here. If it also holds a
+            // missing episode, retain the source rather than calling the
+            // whole download safely handled.
+            protected_missing |= resolved.episodes().any(|ep| {
+                !existing_for_ep
+                    .iter()
+                    .any(|(_, span)| (span.first..=span.last).contains(&ep))
+            });
+            for ep in resolved.episodes() {
+                episode_tags::skip_protected_import(
+                    &state.db,
+                    target_series_id,
+                    ep,
+                    &grab.torrent_name,
+                )
+                .await
+                .map_err(|e| format!("Import protection: cannot record skipped episode: {e}"))?;
+            }
+            // Replaying the same source may keep files it already owns. Keep
+            // that proven ownership without claiming another release's files.
+            let kept: Vec<_> = resolved
+                .episodes()
+                .filter(|ep| {
+                    prior_coverage
+                        .get(&target_series_id)
+                        .is_some_and(|eps| eps.contains(ep))
+                        && existing_for_ep
+                            .iter()
+                            .any(|(_, span)| (span.first..=span.last).contains(ep))
+                        && ctx.existing_tags.get(ep).is_some_and(|tag| {
+                            tag.state == "completed" && tag.release_title == grab.torrent_name
+                        })
+                })
+                .collect();
+            if kept.len() == resolved.episodes().count() {
+                imported_source_paths.push(src.display().to_string());
+            }
+            retained_coverage
+                .entry(target_series_id)
+                .or_default()
+                .extend(kept);
+            protected_count += 1;
+            logger::info(
+                &state.db,
+                LogCategory::PostProcess,
+                &format!(
+                    "Kept existing episodes of '{}': upgrades are off",
+                    ctx.series.title
+                ),
+                &format!("skipped={} slot={slot}", file.name),
+            )
+            .await;
+            continue;
+        }
 
         // The other direction of the overlap rule (issue #246): a
         // release that covers fewer episodes than a file it would retire
@@ -2705,6 +3034,24 @@ async fn import_torrent(
                         }
                     }
 
+                    // Commit the release identity only after the file landed.
+                    // Completed tags kept during acquisition still describe
+                    // the old file until this point.
+                    episode_tags::prepare_imported_release(
+                        &state.db,
+                        target_series_id,
+                        ep,
+                        &grab.torrent_name,
+                        &name_ctx.release_group,
+                        &post.label(),
+                        file.size,
+                        grab.is_batch,
+                    )
+                    .await
+                    .map_err(|e| {
+                        format!("Import protection: cannot record imported release: {e}")
+                    })?;
+
                     imported_eps_by_series
                         .entry(target_series_id)
                         .or_default()
@@ -2768,7 +3115,7 @@ async fn import_torrent(
     // The picker (and auto-expand's backfill) wrote `grabbed` tag rows
     // for the episodes the grab claimed; a file that landed as a
     // special never fills them, and nothing else would clear them.
-    if !special_claims.is_empty() {
+    if !special_claims.is_empty() && migration_replay.is_none() {
         let imported: HashSet<i32> = imported_eps_by_series
             .get(&grab.series_id)
             .map(|eps| eps.iter().map(|(n, _, _)| *n).collect())
@@ -2787,7 +3134,23 @@ async fn import_torrent(
             }
         }
     }
-    if imported_count == 0 {
+    let mut coverage: std::collections::BTreeMap<i64, Vec<i32>> = imported_eps_by_series
+        .iter()
+        .map(|(sid, eps)| (*sid, eps.iter().map(|(ep, _, _)| *ep).collect()))
+        .collect();
+    for (sid, kept) in retained_coverage {
+        if !kept.is_empty() {
+            let episodes = coverage.entry(sid).or_default();
+            episodes.extend(kept);
+            episodes.sort_unstable();
+            episodes.dedup();
+        }
+    }
+    grabbed_torrents::stamp_imported_episode_coverage(&state.db, grab.id, &coverage)
+        .await
+        .map_err(|e| format!("Import protection: cannot save imported coverage: {e}"))?;
+
+    if imported_count == 0 && protected_count == 0 {
         // Distinguish "no video files visible yet" (handled earlier as
         // NotReady) from "video files were attempted but every one
         // failed." The latter shouldn't sit pending forever.
@@ -2965,14 +3328,26 @@ async fn import_torrent(
         let ep_nums: Vec<i32> = episodes.iter().map(|(n, _, _)| *n).collect();
         let _ = episode_tags::mark_completed(&state.db, *series_id, &ep_nums).await;
         for (ep_num, file_size, file_name) in episodes {
-            let _ = episode_tags::mark_grab_history_completed(
-                &state.db, *series_id, *ep_num, file_name, *file_size,
+            let _ = episode_tags::complete_imported_history(
+                &state.db,
+                *series_id,
+                *ep_num,
+                &grab.torrent_name,
+                file_name,
+                *file_size,
             )
             .await;
         }
     }
 
-    if failed_episodes.is_empty() && specials_refused == 0 {
+    if protected_count > 0 {
+        Ok(ImportOutcome::Protected {
+            imported_files: imported_count,
+            skipped_files: protected_count,
+            needs_review: protected_missing || !failed_episodes.is_empty() || specials_refused > 0,
+            failed_episodes,
+        })
+    } else if failed_episodes.is_empty() && specials_refused == 0 {
         Ok(ImportOutcome::Imported)
     } else {
         Ok(ImportOutcome::PartiallyImported { failed_episodes })
@@ -3277,7 +3652,26 @@ pub async fn run_once(state: &AppState) {
     // grabs of one series failing in the same tick (a dropped mount)
     // get one search, not one per grab.
     let mut researched: HashSet<i64> = HashSet::new();
-    for grab in &pending {
+    for stored_grab in &pending {
+        let mut effective_grab;
+        let grab = match grabbed_torrents::get_migration_replay(&state.db, stored_grab.id).await {
+            Ok(Some(plan)) => {
+                effective_grab = stored_grab.clone();
+                effective_grab.episode_numbers = plan.episodes(stored_grab.series_id);
+                &effective_grab
+            }
+            Ok(None) => stored_grab,
+            Err(error) => {
+                logger::warn(
+                    &state.db,
+                    LogCategory::PostProcess,
+                    "Migration replay held",
+                    &error,
+                )
+                .await;
+                continue;
+            }
+        };
         // Resolve which client this grab landed on. Stamped grabs
         // land on exactly one id; un-stamped grabs (older history,
         // orphan-cleanup just NULLed it) check each per-protocol
@@ -3500,6 +3894,41 @@ pub async fn run_once(state: &AppState) {
         let _ = grabbed_torrents::stamp_client_content_path(&state.db, grab.id, &client_path).await;
 
         match import_torrent(state, &cfg, grab, &torrent.hash, &local_save_path, &client).await {
+            Ok(ImportOutcome::Protected {
+                imported_files,
+                skipped_files,
+                needs_review,
+                failed_episodes,
+            }) => {
+                // Retain sources that still hold missing episodes. A pack
+                // that only duplicates present episodes can finish normally.
+                // Stamp the exclusion before marking imported, so even a
+                // crash between the writes cannot expose it to cleanup.
+                let mode = if needs_review {
+                    "protected"
+                } else {
+                    &cfg.post_processing_mode
+                };
+                let recorded = grabbed_torrents::stamp_import_mode(&state.db, grab.id, mode)
+                    .await
+                    .is_ok()
+                    && grabbed_torrents::mark_imported(&state.db, grab.id)
+                        .await
+                        .is_ok();
+                any_imported |= imported_files > 0;
+                let cleanup = if needs_review || !recorded {
+                    "download retained for review"
+                } else {
+                    "normal download cleanup applies"
+                };
+                logger::info(&state.db, LogCategory::PostProcess,
+                    &format!("Import finished with existing episodes kept: '{}'", grab.torrent_name),
+                    &format!("imported_files={imported_files} skipped_files={skipped_files} failed_episodes={failed_episodes:?}; {cleanup}")).await;
+                if recorded && !needs_review {
+                    client_cleanup::remove_after_import(state, &cfg, grab, grab_client_id, &client)
+                        .await;
+                }
+            }
             Ok(ImportOutcome::Imported) => {
                 any_imported = true;
                 let _ = grabbed_torrents::mark_imported(&state.db, grab.id).await;
@@ -3605,6 +4034,24 @@ pub async fn run_once(state: &AppState) {
                 escalate_if_stalled(state, &cfg, grab).await;
             }
             Err(e) => {
+                // A numbering conflict is not evidence of a bad download.
+                // Keep its source and active grab for review/retry; marking
+                // it failed would blocklist it and invite another download
+                // under the same unresolved numbering. Do not run the generic
+                // import-stall timer for this explicit mapping hold.
+                if e.starts_with("Episode mapping:") || e.starts_with("Import protection:") {
+                    logger::warn(
+                        &state.db,
+                        LogCategory::PostProcess,
+                        &format!(
+                            "Import held for '{}': review is required",
+                            grab.torrent_name
+                        ),
+                        &e,
+                    )
+                    .await;
+                    continue;
+                }
                 logger::error(
                     &state.db,
                     LogCategory::PostProcess,
@@ -3788,6 +4235,15 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
         .collect();
 
     for grab in &pending {
+        // A migrated source needs its verified import plan. Completion in the
+        // client alone must not mark old source numbers as library episodes.
+        if !matches!(
+            grabbed_torrents::get_migration_replay(&state.db, grab.id).await,
+            Ok(None)
+        ) {
+            continue;
+        }
+
         let matched = if !grab.hash.is_empty() {
             by_hash.get(&grab.hash.to_lowercase()).copied()
         } else {

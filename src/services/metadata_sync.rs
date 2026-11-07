@@ -242,9 +242,10 @@ where
 
 async fn build_episode_cache(
     db: &SqlitePool,
+    entry_id: i64,
     detail: &anilist::AnimeDetail,
     force_kitsu_fallback: bool,
-) -> Vec<local_metadata::CachedEpisodeMetadata> {
+) -> Result<Vec<local_metadata::CachedEpisodeMetadata>, String> {
     // Use the effective count so airing series (episodes=null on AniList)
     // still get an episode cache built from `nextAiringEpisode - 1`. Without
     // this, shows like One Piece end up with zero rows in
@@ -254,13 +255,22 @@ async fn build_episode_cache(
     let episodic_format = !matches!(detail.format.as_str(), "MOVIE" | "SPECIAL" | "OVA" | "ONA");
     let should_fetch_jikan = episodic_format || ep_count > 1;
 
-    let mut jikan_eps = if should_fetch_jikan {
-        jikan::fetch_episode_titles_for_detail(db, detail).await
+    let jikan_titles = if should_fetch_jikan && detail.id_mal.is_some() {
+        jikan::fetch_episode_titles_for_entry(db, entry_id, detail).await
     } else {
-        HashMap::new()
+        jikan::EpisodeTitleSet {
+            episodes: HashMap::new(),
+            allow_kitsu_fallback: true,
+            mapping_error: None,
+        }
     };
+    if let Some(error) = jikan_titles.mapping_error {
+        return Err(error);
+    }
+    let mut jikan_eps = jikan_titles.episodes;
 
-    let should_try_kitsu = ep_count > 1
+    let should_try_kitsu = jikan_titles.allow_kitsu_fallback
+        && ep_count > 1
         && (force_kitsu_fallback
             || episode_needs_kitsu_backfill(ep_count, |ep_num| {
                 jikan_eps
@@ -386,7 +396,7 @@ async fn build_episode_cache(
         });
     }
 
-    merged
+    Ok(merged)
 }
 
 async fn cache_provider_detail(
@@ -405,7 +415,7 @@ async fn cache_provider_detail(
     local_metadata::replace_relations_for_provider(db, cache_provider_id, detail)
         .await
         .map_err(|e| e.to_string())?;
-    let merged = build_episode_cache(db, detail, force_kitsu_fallback).await;
+    let merged = build_episode_cache(db, cache_provider_id, detail, force_kitsu_fallback).await?;
     local_metadata::replace_episode_metadata_for_provider(db, cache_provider_id, &merged)
         .await
         .map_err(|e| e.to_string())?;
@@ -671,6 +681,17 @@ async fn refresh_series_metadata_inner(
     let detail = fetch_live_detail(tracked, force_mal_fallback).await?;
     let authoritative_detail = is_authoritative_detail(tracked, &detail);
     let trustworthy_write = is_trustworthy_write(tracked, &detail);
+    if tracked.anilist_id > 0
+        && !authoritative_detail
+        && let Some(plan) =
+            crate::services::anibridge::mal_episode_plan(tracked.anilist_id, tracked.mal_id).await?
+        && !plan.permits_unmapped_fallback(tracked.mal_id)
+    {
+        return Err(
+            "Episode mapping: keeping the canonical entry until its AniList detail is available"
+                .to_string(),
+        );
+    }
 
     // The manual rebuild promises a re-fetch, so drop this series' Jikan
     // episode cache before the merges below read it. Without this a
@@ -680,13 +701,11 @@ async fn refresh_series_metadata_inner(
     // stay cache-driven: one Tenrai episodes request per tracked series
     // per rebuild, paced by the sweep's inter-series delay.
     if allow_degraded_cache_rebuild
-        && let Some(mid) = detail.id_mal.filter(|m| *m > 0)
-        && let Err(err) = jikan::invalidate_episode_cache(db, mid).await
+        && let Err(err) = jikan::invalidate_episode_sources(db, &detail).await
     {
         tracing::warn!(
             target: "ryokan::metadata_sync",
             series_id = tracked.id,
-            mal_id = mid,
             "failed to drop the Jikan episode cache before rebuild: {err}"
         );
     }
@@ -697,6 +716,10 @@ async fn refresh_series_metadata_inner(
         .flatten()
         .map(|cfg| cfg.force_kitsu_fallback)
         .unwrap_or(false);
+
+    // Resolve episode identities before updating the series or either cache.
+    // An unavailable/ambiguous map preserves the previous successful metadata.
+    let merged = build_episode_cache(db, tracked.anilist_id, &detail, force_kitsu_fallback).await?;
 
     // Strict: only replace the row's `anilist_id` column when we got
     // the canonical AL detail back. MAL fallbacks (negative `detail.id`)
@@ -806,19 +829,22 @@ async fn refresh_series_metadata_inner(
         // would stamp a wrong zero as final.
         let offset_known =
             matches!(offset_source, anime_relations::OffsetSource::Rule(_)) || authoritative_detail;
-        if let Err(err) =
-            series::update_cumulative_prior_episodes(db, tracked.id, cumulative, offset_known).await
+        match series::update_cumulative_prior_episodes(db, tracked.id, cumulative, offset_known)
+            .await
         {
-            tracing::warn!(
+            Err(err) => tracing::warn!(
                 target: "ryokan::metadata_sync",
                 series_id = tracked.id,
                 "failed to persist cumulative_prior_episodes: {err}"
-            );
-        } else if let anime_relations::OffsetSource::Rule(rule) = offset_source {
-            if cumulative != tracked.cumulative_prior_episodes {
-                log_rule_offset(db, tracked, &rule).await;
+            ),
+            Ok(written) => {
+                if let anime_relations::OffsetSource::Rule(rule) = offset_source {
+                    if written && cumulative != tracked.cumulative_prior_episodes {
+                        log_rule_offset(db, tracked, &rule).await;
+                    }
+                    hydrate_rule_source(db, stored_anilist_id, &rule, force_kitsu_fallback).await;
+                }
             }
-            hydrate_rule_source(db, stored_anilist_id, &rule, force_kitsu_fallback).await;
         }
 
         if !authoritative_detail {
@@ -849,7 +875,6 @@ async fn refresh_series_metadata_inner(
         .await;
     }
 
-    let merged = build_episode_cache(db, &detail, force_kitsu_fallback).await;
     local_metadata::replace_episode_metadata(db, tracked.id, &merged)
         .await
         .map_err(|e| e.to_string())?;

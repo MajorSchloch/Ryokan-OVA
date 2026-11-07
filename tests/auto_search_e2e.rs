@@ -146,6 +146,177 @@ fn unset_nyaa_base() {
 // ─── Tests ────────────────────────────────────────────────────────
 
 #[tokio::test]
+async fn reviewed_source_passes_disagreeing_title_season_and_special_heuristics() {
+    let _gate = ENV_LOCK.lock().await;
+    let server = MockServer::start().await;
+    let hash = "abababababababababababababababababababab";
+    let title = "[Group] Unrelated S09 OVA 00 (1080p) [WEB]";
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(nyaa_results_page(&nyaa_row(
+                hash, 99003, title, "1.4 GiB", 50,
+            ))),
+        )
+        .mount(&server)
+        .await;
+    set_nyaa_base(&server.uri());
+    let state = build_state().await;
+    let sid = ryokan::test_support::seed_series(&state.db, 99103, "Reviewed Show").await;
+    sqlx::query("UPDATE series SET episodes=2 WHERE id=?")
+        .bind(sid)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let source = format!("magnet:?xt=urn:btih:{hash}&dn={title}");
+    let bridge = serde_json::json!({
+        "version":2,"replay_policy":"verified_files",
+        "replay":{"version":1,"files":[{"name":"Pack/OVA00.mkv","series_id":sid,
+            "anilist_id":99103,"season":1,"first":1,"last":1,"title":"Prologue",
+            "resolution":"1080p","source":"WEB","release_group":"Group"}]}
+    });
+    sqlx::query("INSERT INTO grabbed_torrents (hash,torrent_name,series_id,episode_numbers,state,source_url,library_migration_bridge) VALUES (?,?,?,'[0]','imported',?,?)")
+        .bind(hash).bind(title).bind(sid).bind(source).bind(bridge.to_string())
+        .execute(&state.db).await.unwrap();
+    let mut detail = detail_for(99103, "Reviewed Show");
+    detail.episodes = Some(2);
+    let cfg = default_config();
+    let accepted = ryokan::services::auto_search::find_best_for_target(
+        &state.db,
+        &detail,
+        &cfg,
+        &SearchTarget::Episode(1),
+        true,
+        false,
+        &[],
+        &state.indexers,
+    )
+    .await
+    .expect("saved file identity must precede title, season and special heuristics");
+    assert_eq!(accepted.replay_episodes, Some(vec![1]));
+    assert!(accepted.release_mapping.is_none());
+    assert_eq!(
+        accepted.match_provenance.unwrap().kind.as_str(),
+        "reviewed_source"
+    );
+    assert!(
+        ryokan::services::auto_search::find_best_for_target(
+            &state.db,
+            &detail,
+            &cfg,
+            &SearchTarget::Episode(2),
+            true,
+            false,
+            &[],
+            &state.indexers
+        )
+        .await
+        .is_none(),
+        "a missing slot cannot change the saved decision"
+    );
+    assert!(
+        ryokan::services::auto_search::find_best_for_target(
+            &state.db,
+            &detail,
+            &cfg,
+            &SearchTarget::Episode(1),
+            false,
+            false,
+            &[],
+            &state.indexers
+        )
+        .await
+        .is_none(),
+        "saved assignments must still obey the batch policy"
+    );
+    unset_nyaa_base();
+}
+
+#[tokio::test]
+async fn automatic_numbering_is_chosen_before_the_wanted_slot_and_checks_curated_results() {
+    let _gate = ENV_LOCK.lock().await;
+    let server = MockServer::start().await;
+    let html = nyaa_results_page(&nyaa_row(
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        99001,
+        "[Group] Numbering Decision Show - 06 (1080p) [WEB].mkv",
+        "1.4 GiB",
+        50,
+    ));
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(html))
+        .mount(&server)
+        .await;
+    set_nyaa_base(&server.uri());
+    let state = build_state().await;
+    let sid = ryokan::test_support::seed_series(&state.db, 99101, "Numbering Decision Show").await;
+    let mut detail = detail_for(99101, "Numbering Decision Show");
+    let cfg = default_config();
+    let accepted = ryokan::services::auto_search::find_best_for_target(
+        &state.db,
+        &detail,
+        &cfg,
+        &SearchTarget::Episode(6),
+        false,
+        false,
+        &[],
+        &state.indexers,
+    )
+    .await
+    .expect("positive control: ordinary episode six is available");
+    assert_eq!(
+        accepted.release_mapping.as_ref().unwrap().episodes(),
+        vec![6]
+    );
+    sqlx::query("UPDATE series SET cumulative_prior_episodes = 1 WHERE id = ?")
+        .bind(sid)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    for wanted in [5, 6] {
+        let found = ryokan::services::auto_search::find_best_for_target(
+            &state.db,
+            &detail,
+            &cfg,
+            &SearchTarget::Episode(wanted),
+            false,
+            false,
+            &[],
+            &state.indexers,
+        )
+        .await;
+        assert!(
+            found.is_none(),
+            "requested {wanted} cannot decide what source 6 contains"
+        );
+    }
+    // Even a curated title association cannot establish the episode scheme.
+    detail.id_mal = Some(99201);
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&serde_json::json!({
+        "mal:99201": { "anilist:99101": { "1-12": "2-13" } }
+    }))
+    .await;
+    let mut curated = accepted;
+    curated.match_provenance = Some(ryokan::services::auto_search::MatchProvenance::seadex(
+        ryokan::services::auto_search::MatchPhase::SeadexSeed,
+    ));
+    let rejected = ryokan::services::release_numbering::filter_automatic_candidates(
+        &state.db,
+        &detail,
+        0,
+        &SearchTarget::Episode(6),
+        vec![curated],
+    )
+    .await;
+    unset_nyaa_base();
+    assert!(
+        rejected.is_empty(),
+        "provider disagreement must not bypass the final gate"
+    );
+}
+
+#[tokio::test]
 async fn find_all_for_target_returns_matching_release_from_nyaa() {
     // Smallest happy-path case: one Nyaa row with a title that shares
     // a token with the AL detail's title, episode number matches the

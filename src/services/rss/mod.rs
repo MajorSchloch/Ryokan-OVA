@@ -307,6 +307,7 @@ struct PendingCandidate {
     score: i32,
     new_episode_count: i32,
     is_upgrade: bool,
+    release_mapping: Option<crate::services::release_numbering::ReleaseMapping>,
     /// Full pre-disk classification of this item — filename layer,
     /// group-map, temporal, and description-body-when-ambiguous
     /// combined. Computed once in the upgrade gate and reused by the
@@ -769,7 +770,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             continue;
         }
 
-        let Some(found) = best_series_match(&item, &all_meta) else {
+        let Some(mut found) = best_series_match(&item, &all_meta) else {
             skipped += 1;
             let diag = build_match_diag(&item, None, 0);
             let reason = format!("No tracked series match | {}", diag);
@@ -832,6 +833,122 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             continue;
         }
 
+        let single_entry = found.series.format == "MOVIE"
+            || (matches!(found.series.format.as_str(), "SPECIAL" | "OVA" | "ONA")
+                && found.series.episodes == Some(1));
+        let source_url = if !item.magnet.is_empty() {
+            &item.magnet
+        } else {
+            &item.torrent
+        };
+        let reviewed = crate::models::grabbed_torrents::source_replay::episodes_for_source(
+            &state.db,
+            crate::models::grabbed_torrents::source_replay::SourceRef {
+                url: source_url,
+                guid: &item.guid,
+                indexer_id: match &item.source {
+                    RssSource::Indexer { id, .. } => Some(*id),
+                    _ => None,
+                },
+                client_id: None,
+                required_replay: false,
+            },
+            found.series.anilist_id,
+        )
+        .await;
+        let replay_episodes = match reviewed {
+            Ok(value) => value,
+            Err(reason) => {
+                skipped += 1;
+                let _ = rss::record_decision(
+                    &state.db,
+                    rss::DecisionRecord {
+                        item_key: &item_key,
+                        title: &item.title,
+                        link: &item.link,
+                        series_id: Some(found.series.id),
+                        series_title: &found.series.title,
+                        group_name: &item.group,
+                        is_batch: item.is_batch,
+                        decision: "rejected",
+                        reason: &reason,
+                        source: src_str,
+                        source_id: src_id,
+                    },
+                )
+                .await;
+                continue;
+            }
+        };
+        let release_mapping = if let Some(episodes) = replay_episodes {
+            found.resolved_eps = episodes.into_iter().collect();
+            let meta = SeriesMeta::from_series(&found.series);
+            let family = related_family(&meta, &all_meta);
+            found.canonical_abs_eps =
+                canonical_absolute_numbers(&meta, &family, &found.resolved_eps);
+            found.resolution_mode = "reviewed_source_files";
+            None
+        } else if single_entry {
+            None
+        } else {
+            // The family-count fallback is evidence of ambiguity, never proof
+            // of an offset. Use the same gate as automatic episode search.
+            let offset = if found.resolution_mode == "absolute_mapped" {
+                found.series.cumulative_prior_episodes.max(1)
+            } else {
+                found.series.cumulative_prior_episodes
+            };
+            let decision = crate::services::release_numbering::NumberingContext::load(
+                found.series.anilist_id,
+                found.series.mal_id,
+                &found.series.format,
+                found.series.episodes,
+                offset,
+                SeriesMeta::from_series(&found.series)
+                    .season_num
+                    .unwrap_or(1),
+            )
+            .await
+            .and_then(|ctx| {
+                if found.resolution_mode.ends_with("_miss") {
+                    Err("Episode mapping: source season/episode does not match the entry".into())
+                } else {
+                    ctx.choose(&item.title, item.is_batch)
+                }
+            });
+            match decision {
+                Ok(mapping) => {
+                    found.resolved_eps = mapping.episodes().into_iter().collect();
+                    let meta = SeriesMeta::from_series(&found.series);
+                    let family = related_family(&meta, &all_meta);
+                    found.canonical_abs_eps =
+                        canonical_absolute_numbers(&meta, &family, &found.resolved_eps);
+                    found.resolution_mode = "saved_release_mapping";
+                    Some(mapping)
+                }
+                Err(reason) => {
+                    skipped += 1;
+                    let _ = rss::record_decision(
+                        &state.db,
+                        rss::DecisionRecord {
+                            item_key: &item_key,
+                            title: &item.title,
+                            link: &item.link,
+                            series_id: Some(found.series.id),
+                            series_title: &found.series.title,
+                            group_name: &item.group,
+                            is_batch: item.is_batch,
+                            decision: "rejected",
+                            reason: &reason,
+                            source: src_str,
+                            source_id: src_id,
+                        },
+                    )
+                    .await;
+                    continue;
+                }
+            }
+        };
         matched += 1;
 
         if group_matches_blacklist(&item.group, &blacklist) {
@@ -1089,6 +1206,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             score: 0,
             new_episode_count: decision.new_episode_count,
             is_upgrade: decision.is_upgrade,
+            release_mapping,
             classification: incoming_classification,
         });
     }
@@ -1334,23 +1452,44 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                 // SAB: nzo_id) so post-processing's match-by-hash
                 // works for both.
                 let ep_list: Vec<i32> = cand.found.resolved_eps.iter().copied().collect();
-                let grab_id = crate::models::grabbed_torrents::record_grab(
+                let recorded = crate::models::grabbed_torrents::source_replay::record(
                     &state.db,
                     &canonical_id,
                     &cand.item.title,
                     cand.found.series.id,
                     &ep_list,
                     cand.item.is_batch,
+                    cand.release_mapping.as_ref(),
+                    None,
+                    crate::models::grabbed_torrents::source_replay::SourceRef {
+                        url: &grab_url,
+                        guid: &cand.item.guid,
+                        indexer_id: match &cand.item.source {
+                            RssSource::Indexer { id, .. } => Some(*id),
+                            _ => None,
+                        },
+                        client_id: Some(dispatch_client_id),
+                        required_replay: cand.found.resolution_mode == "reviewed_source_files",
+                    },
                 )
-                .await
-                .ok()
-                .flatten();
-                // Misgrab guardrails: keep the URL so Restore can re-add a removed grab.
-                if let Some(gid) = grab_id {
-                    let _ =
-                        crate::models::grabbed_torrents::set_source_url(&state.db, gid, &grab_url)
-                            .await;
-                }
+                .await;
+                let saved = match recorded {
+                    Ok(id) => id,
+                    Err(error) => {
+                        logger::error(
+                            &state.db,
+                            LogCategory::Grab,
+                            "RSS download added, but its episode decision could not be saved",
+                            &error.to_string(),
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+                let grab_id = saved.as_ref().map(|s| s.id);
+                let replayed = saved.as_ref().is_some_and(|s| s.replayed);
+                let ep_list = saved.map(|s| s.episodes).unwrap_or_default();
+
                 if let Some(gid) = grab_id {
                     let _ = crate::models::grabbed_torrents::set_download_client(
                         &state.db,
@@ -1389,7 +1528,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                 // candidate). Saves a second DB + potential HTTP round
                 // trip per grabbed item.
                 let classification = &cand.classification;
-                for ep_num in &ep_list {
+                for ep_num in ep_list.iter().filter(|_| !replayed) {
                     // RSS items don't carry size info in the feed — the
                     // grab history row starts at 0 and post-processing
                     // fills it in with the actual imported file size at

@@ -1,6 +1,6 @@
 use anitomy::{Anitomy, ElementCategory};
 use regex_lite::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -381,6 +381,55 @@ pub async fn scan_series_folder(media_root: &str, folder_name: &str) -> Vec<Epis
         .unwrap_or_default()
 }
 
+/// Import protection must distinguish an empty folder from an unreadable one.
+/// Use the same parser and Specials rules as the normal scan, but stop on an
+/// incomplete walk instead of authorizing a replacement from an empty result.
+pub async fn scan_series_folder_checked(
+    media_root: &str,
+    folder_name: &str,
+) -> Result<Vec<EpisodeFile>, String> {
+    if media_root.is_empty() || !usable_folder_name(folder_name) {
+        return Err("Import protection: invalid library folder".into());
+    }
+    let root = Path::new(media_root).join(folder_name);
+    tokio::task::spawn_blocking(move || {
+        fn walk(
+            dir: &Path,
+            root: &Path,
+            depth: usize,
+            visited: &mut HashSet<PathBuf>,
+            files: &mut Vec<EpisodeFile>,
+        ) -> std::io::Result<()> {
+            let real = dir.canonicalize()?;
+            if !visited.insert(real) {
+                return Ok(());
+            }
+            if depth > MAX_SCAN_DEPTH {
+                return Err(std::io::Error::other("library scan depth exceeded"));
+            }
+            for entry in std::fs::read_dir(dir)? {
+                let path = entry?.path();
+                if path.metadata()?.is_dir() {
+                    walk(&path, root, depth + 1, visited, files)?;
+                } else if is_library_file(&path)
+                    && let Some(ep) = parse_episode_file(&path, root)
+                    && !ep.is_special
+                    && ep.is_own_season()
+                {
+                    files.push(ep);
+                }
+            }
+            Ok(())
+        }
+        let mut files = Vec::new();
+        walk(&root, &root, 0, &mut HashSet::new(), &mut files)
+            .map_err(|e| format!("Import protection: cannot scan {}: {e}", root.display()))?;
+        Ok(files)
+    })
+    .await
+    .map_err(|e| format!("Import protection: library scan failed: {e}"))?
+}
+
 /// Batch variant of `scan_series_folder` for the library index's
 /// per-card completeness bars: one `spawn_blocking` hop for the whole
 /// library instead of one per series. Each entry is (series_id,
@@ -609,7 +658,8 @@ pub fn parse_episode_number(lower: &str) -> Option<(Option<i32>, i32)> {
 /// The episode slot(s) a file name claims (issue #246). `first == last`
 /// for the ordinary one-episode file; a multi-episode name spans
 /// `first..=last`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EpisodeSpan {
     pub season: Option<i32>,
     pub first: i32,

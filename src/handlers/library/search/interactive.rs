@@ -521,7 +521,8 @@ pub async fn search_batch_releases(
                 )
                 .await;
             }
-            qbit.add_torrent(&url, &result.info_hash)
+            let (_, canonical_id) = qbit
+                .add_torrent_returning_id(&url, &result.info_hash)
                 .await
                 .map_err(|e| {
                     if let Some(h) = &progress_handle {
@@ -589,22 +590,28 @@ pub async fn search_batch_releases(
                 // Capped at 1000 so a garbage AniList record can't
                 // spawn a million rows.
                 let ep_nums = batch_episode_numbers(&result.title, &detail);
-                let grab_id = crate::models::grabbed_torrents::record_grab(
+                let saved = crate::models::grabbed_torrents::source_replay::record(
                     &state.db,
-                    &result.info_hash,
+                    &canonical_id,
                     &result.title,
                     sid,
                     &ep_nums,
                     result.is_batch,
+                    None,
+                    None,
+                    crate::models::grabbed_torrents::source_replay::SourceRef {
+                        url: &url,
+                        guid: &result.source_guid,
+                        indexer_id: result.indexer_id,
+                        client_id: Some(dispatch_client_id),
+                        required_replay: false,
+                    },
                 )
                 .await
-                .ok()
-                .flatten();
-                // Misgrab guardrails: keep the URL so Restore can re-add a removed grab.
-                if let Some(gid) = grab_id {
-                    let _ =
-                        crate::models::grabbed_torrents::set_source_url(&state.db, gid, &url).await;
-                }
+                .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e.to_string()))?;
+                let grab_id = saved.as_ref().map(|s| s.id);
+                let replayed = saved.as_ref().is_some_and(|s| s.replayed);
+                let ep_nums = saved.map(|s| s.episodes).unwrap_or_default();
                 // Stamp the resolved download_client_id on the grab
                 // row so per-grab delete routing
                 // (`state.resolve_grab_client`) sends the eventual
@@ -635,7 +642,7 @@ pub async fn search_batch_releases(
                     )
                     .await;
                 }
-                for ep_num in &ep_nums {
+                for ep_num in ep_nums.iter().filter(|_| !replayed) {
                     let _ = episode_tags::record_grab_with_match(
                         &state.db,
                         sid,

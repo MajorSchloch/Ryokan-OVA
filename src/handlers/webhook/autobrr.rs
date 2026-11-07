@@ -492,22 +492,28 @@ pub async fn webhook_autobrr(
     // we just skip the seed-rule + attribution stamp. The user
     // sees the grab via `client.list_scoped()`; the missing
     // grab row gets caught by the next reconcile pass.
-    let grab_id = grabbed_torrents::record_grab(
+    let saved = grabbed_torrents::source_replay::record(
         &state.db,
         &canonical_id,
         &payload.torrent_name,
         series.id,
         &ep_nums,
         ep_nums.len() > 1,
+        None,
+        None,
+        grabbed_torrents::source_replay::SourceRef {
+            url: &download_url,
+            guid: "",
+            indexer_id,
+            client_id: Some(dispatch_client_id),
+            required_replay: false,
+        },
     )
     .await
     .ok()
     .flatten();
-    // Misgrab guardrails: keep the URL so Restore can re-add a removed grab.
-    if let Some(gid) = grab_id {
-        let _ =
-            crate::models::grabbed_torrents::set_source_url(&state.db, gid, &download_url).await;
-    }
+    let grab_id = saved.as_ref().map(|s| s.id);
+    let ep_nums = saved.map(|s| s.episodes).unwrap_or_default();
     if let Some(gid) = grab_id {
         let respected = download_client::apply_indexer_seed_rules(
             &state.db,

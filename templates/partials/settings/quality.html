@@ -104,8 +104,15 @@
             <div class="setting-rows">
                 <label class="setting-row">
                     <span class="setting-row-text">
+                        <span class="setting-row-title">Allow upgrades for new series</span>
+                        <span class="setting-row-desc">Set the initial Upgrades switch for new series. This also applies to imports and synced lists. Existing series keep their current setting.</span>
+                    </span>
+                    <input type="checkbox" name="default_allow_upgrades" value="1" {% if config.default_allow_upgrades %}checked{% endif %}>
+                </label>
+                <label class="setting-row">
+                    <span class="setting-row-text">
                         <span class="setting-row-title">Automatic Upgrade Search</span>
-                        <span class="setting-row-desc">Look for better releases of downloaded episodes once a day. RSS upgrades happen regardless.</span>
+                        <span class="setting-row-desc">Look for better releases once a day when the series allows upgrades. RSS can also upgrade those series when this search is off.</span>
                     </span>
                     <input type="checkbox" name="upgrade_search_enabled" value="1" {% if config.upgrade_search_enabled %}checked{% endif %}>
                 </label>

@@ -14,8 +14,9 @@
 //! TMDB season that AniList lists as two entries (split cours) sends
 //! episodes 13 to 24 to the second entry as its 1 to 12, and an AniList
 //! entry that TMDB splits across seasons takes `S02E05` as its E17.
-//! Files no span covers keep their parsed numbers and stay with the
-//! search's pick.
+//! Files with a missing, conflicting or cross-entry mapping lose their
+//! automatic match. Keeping the title search's pick would silently apply
+//! source episode numbers as library episode identities.
 //!
 //! [`apply_absolute_numbering`] covers the other common library shape:
 //! a folder with no season at all and absolute episode numbers
@@ -34,6 +35,24 @@ use std::collections::BTreeMap;
 use super::{CandidateFile, SeriesGroup};
 use crate::services::anibridge;
 use crate::services::anilist::{self, AnimeDetail, AnimeEntry};
+use crate::services::episode_mapping::{self, MappingError, MappingRule};
+
+fn source_file_span(file: &CandidateFile) -> Result<(i32, i32), MappingError> {
+    let first = file.episode.ok_or(MappingError::InvalidSource)?;
+    let last = first
+        .checked_add(file.episode_count.max(1) - 1)
+        .ok_or(MappingError::InvalidSource)?;
+    Ok((first, last))
+}
+
+fn unresolved_group(mut group: SeriesGroup, note: String) -> SeriesGroup {
+    group.pick = None;
+    group.existing = None;
+    group.low_confidence = true;
+    group.resolved_by_id = true;
+    group.mapping_note = Some(note);
+    group
+}
 
 /// A search-style entry from a by-id detail fetch, for a mapped
 /// AniList id the title search didn't return.
@@ -69,8 +88,8 @@ async fn tmdb_show_for(group: &SeriesGroup) -> Option<i64> {
 /// Resolve `group` through the TMDB mapping. Returns the group(s) that
 /// replace it, in order: one per AniList entry the season's files map
 /// to (split cours make two), then the files no span covered under
-/// the search's original pick. A group the mapping can't help
-/// (no season, show unknown, nothing covered) comes back as it was.
+/// no automatic pick. A group the mapping can't help
+/// (no season, show unknown, no mapping available) comes back as it was.
 pub async fn apply_season_mapping(group: SeriesGroup) -> Vec<SeriesGroup> {
     let Some(season) = group.tmdb_season else {
         return vec![group];
@@ -93,23 +112,39 @@ pub async fn apply_season_mapping(group: SeriesGroup) -> Vec<SeriesGroup> {
     }
     let mut mapped: BTreeMap<usize, Vec<CandidateFile>> = BTreeMap::new();
     let mut unmapped: Vec<CandidateFile> = Vec::new();
+    let mut failures = std::collections::BTreeSet::new();
     for f in &group.files {
-        match f
-            .episode
-            .and_then(|e| anibridge::map_tmdb_episode(&spans, e).map(|m| (e, m)))
+        match source_file_span(f)
+            .and_then(|(first, last)| anibridge::map_tmdb_file(&spans, first, last))
         {
-            Some((e, (al, al_ep))) => {
+            Ok(result) => {
                 let mut nf = f.clone();
-                nf.episode = Some(al_ep);
-                nf.source_episode = (al_ep != e).then_some(e);
-                let idx = order.iter().position(|id| *id == al).unwrap_or(0);
+                nf.episode = Some(result.first);
+                nf.source_episode = f.episode.filter(|e| *e != result.first);
+                // A season-zero crosswalk can identify a regular episode of
+                // an AniList entry. A stray OVA in another season does not
+                // establish that source identity; retain its special marker.
+                if season == 0 {
+                    nf.special = false;
+                }
+                let idx = order
+                    .iter()
+                    .position(|id| *id == result.entry)
+                    .expect("mapped entry is in spans");
                 mapped.entry(idx).or_default().push(nf);
             }
-            None => unmapped.push(f.clone()),
+            Err(error) => {
+                failures.insert(error.to_string());
+                unmapped.push(f.clone());
+            }
         }
     }
+    let unresolved_note = format!(
+        "Cannot map every episode in these files for season {season}. Automatic match cleared. {}",
+        failures.into_iter().collect::<Vec<_>>().join("; ")
+    );
     if mapped.is_empty() {
-        return vec![group];
+        return vec![unresolved_group(group, unresolved_note)];
     }
 
     // Every mapped entry needs a candidate to pick. Fetch the ones the
@@ -125,11 +160,12 @@ pub async fn apply_season_mapping(group: SeriesGroup) -> Vec<SeriesGroup> {
         match anilist::get_anime_detail(al).await {
             Ok(d) => candidates.push(entry_from_detail(&d)),
             Err(e) => {
-                let mut g = group;
-                g.mapping_note = Some(format!(
-                    "TMDB mapping names AniList entry {al} for season {season}, but the lookup failed: {e}"
-                ));
-                return vec![g];
+                return vec![unresolved_group(
+                    group,
+                    format!(
+                        "TMDB mapping names AniList entry {al} for season {season}, but the lookup failed: {e}"
+                    ),
+                )];
             }
         }
     }
@@ -160,11 +196,7 @@ pub async fn apply_season_mapping(group: SeriesGroup) -> Vec<SeriesGroup> {
     if !unmapped.is_empty() {
         let mut g = group;
         g.files = unmapped;
-        g.resolved_by_id = true;
-        g.mapping_note = Some(format!(
-            "Outside the TMDB mapping for season {season}; kept as parsed"
-        ));
-        out.push(g);
+        out.push(unresolved_group(g, unresolved_note));
     }
     out
 }
@@ -288,15 +320,15 @@ mod tests {
         assert_eq!(out[2].files.len(), 2, "episode 30 and the unnumbered file");
         assert_eq!(
             out[2].picked().map(|e| e.id),
-            Some(56),
-            "leftovers keep the search's pick"
+            None,
+            "unmapped files cannot silently inherit the search's pick"
         );
         assert!(
             out[2]
                 .mapping_note
                 .as_deref()
                 .unwrap()
-                .starts_with("Outside the TMDB mapping")
+                .starts_with("Cannot map every episode")
         );
         clear_cache_for_tests().await;
     }
@@ -357,6 +389,129 @@ mod tests {
         );
         assert_eq!(e.source, "anilist");
     }
+
+    #[tokio::test]
+    async fn combined_file_crossing_entries_has_no_automatic_match() {
+        seed_tmdb_episode_spans_for_tests(&[(9, 2, 1, 12, 55, 1), (9, 2, 13, 24, 56, 1)]).await;
+        let mut combined = file(Some(12));
+        combined.episode_count = 2;
+        let out = apply_season_mapping(group(
+            vec![combined],
+            vec![entry(55, "Show"), entry(56, "Part 2")],
+        ))
+        .await;
+        assert_eq!(out.len(), 1);
+        assert!(
+            out[0].picked().is_none(),
+            "a file crossing two entries must not be assigned to the first entry"
+        );
+        let cfg = crate::models::config::Config::default();
+        let folders = std::collections::HashSet::new();
+        let preview = super::super::preview::project_group(
+            &out[0],
+            &super::super::preview::ProjectionContext {
+                media_root: "/library",
+                owned_folders: &folders,
+                disk_folders: &folders,
+                title_pref: "english",
+                series_folder_format: &cfg.series_folder_format,
+                season_folder_format: &cfg.season_folder_format,
+                episode_file_format: &cfg.episode_file_format,
+            },
+        );
+        assert_eq!(
+            preview.counts.writes(),
+            0,
+            "the import execution uses this same projection"
+        );
+        assert_eq!(preview.kind, super::super::preview::GroupKind::NoMatch);
+        clear_cache_for_tests().await;
+    }
+
+    #[tokio::test]
+    async fn only_a_season_zero_crosswalk_clears_a_special_marker() {
+        seed_tmdb_episode_spans_for_tests(&[(9, 0, 1, 1, 55, 1), (9, 2, 1, 12, 55, 1)]).await;
+        let mut special = file(Some(1));
+        special.special = true;
+        let mut g = group(vec![special], vec![entry(55, "Show")]);
+        let ordinary_season = apply_season_mapping(g.clone()).await;
+        assert!(
+            ordinary_season[0].files[0].special,
+            "an unrelated extra is still a special"
+        );
+        g.tmdb_season = Some(0);
+        let mapped_special = apply_season_mapping(g).await;
+        assert!(!mapped_special[0].files[0].special);
+        assert_eq!(mapped_special[0].files[0].episode, Some(1));
+        clear_cache_for_tests().await;
+    }
+
+    #[tokio::test]
+    async fn explicit_zero_mapping_assigns_regular_episode_one() {
+        seed_tmdb_episode_spans_for_tests(&[(9, 2, 0, 12, 55, 1)]).await;
+        let prologue = file(Some(0));
+        let out = apply_season_mapping(group(
+            vec![prologue, file(Some(12))],
+            vec![entry(55, "Show")],
+        ))
+        .await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].picked().map(|e| e.id), Some(55));
+        assert_eq!(out[0].files[0].episode, Some(1));
+        assert_eq!(out[0].files[0].source_episode, Some(0));
+        assert!(
+            !out[0].files[0].special,
+            "a mapped episode zero is a regular library episode"
+        );
+        assert_eq!(out[0].files[1].episode, Some(13));
+        clear_cache_for_tests().await;
+    }
+
+    #[tokio::test]
+    async fn conflicts_and_partially_mapped_files_have_no_automatic_match() {
+        seed_tmdb_episode_spans_for_tests(&[(9, 2, 1, 12, 55, 1), (9, 2, 6, 6, 56, 1)]).await;
+        let out = apply_season_mapping(group(
+            vec![file(Some(6))],
+            vec![entry(55, "Show"), entry(56, "Other")],
+        ))
+        .await;
+        assert!(out[0].picked().is_none());
+        assert!(
+            out[0]
+                .mapping_note
+                .as_deref()
+                .unwrap()
+                .contains("conflicting mappings")
+        );
+        clear_cache_for_tests().await;
+
+        seed_tmdb_episode_spans_for_tests(&[(9, 2, 1, 12, 55, 1)]).await;
+        let mut combined = file(Some(12));
+        combined.episode_count = 2;
+        let out = apply_season_mapping(group(vec![combined], vec![entry(55, "Show")])).await;
+        assert!(out[0].picked().is_none());
+        assert!(
+            out[0]
+                .mapping_note
+                .as_deref()
+                .unwrap()
+                .contains("no verified mapping for episode 13")
+        );
+        clear_cache_for_tests().await;
+    }
+
+    #[tokio::test]
+    async fn complete_combined_file_maps_to_consecutive_target_episodes() {
+        seed_tmdb_episode_spans_for_tests(&[(9, 2, 13, 24, 55, 1)]).await;
+        let mut combined = file(Some(13));
+        combined.episode_count = 2;
+        let out = apply_season_mapping(group(vec![combined], vec![entry(55, "Part 2")])).await;
+        assert_eq!(out[0].picked().map(|e| e.id), Some(55));
+        assert_eq!(out[0].files[0].episode, Some(1));
+        assert_eq!(out[0].files[0].episode_count, 2);
+        assert_eq!(out[0].files[0].source_episode, Some(13));
+        clear_cache_for_tests().await;
+    }
 }
 
 /// Longest sequel chain the absolute walk follows. Long-running
@@ -408,40 +563,52 @@ pub fn route_absolute(
     files: &[CandidateFile],
     chain: &[AnimeEntry],
 ) -> (Vec<(usize, Vec<CandidateFile>)>, Vec<CandidateFile>) {
-    // Cumulative episodes before each entry; `None` end = open.
-    let mut ranges: Vec<(i32, Option<i32>)> = Vec::new();
+    // The existing sequel-chain decision supplies the source scheme. Apply
+    // it through the same complete-file resolver as the explicit TMDB map.
+    let mut rules = Vec::new();
     let mut cum = 0i32;
     for e in chain {
-        match e.episodes.filter(|n| *n > 0) {
-            Some(n) => {
-                ranges.push((cum, Some(cum + n)));
-                cum += n;
-            }
-            None => {
-                ranges.push((cum, None));
-                break;
-            }
+        let count = e
+            .episodes
+            .and_then(|n| anilist::plausible_episode_count(i64::from(n)));
+        if e.episodes.is_some() && count.is_none() {
+            break;
+        }
+        let end = match count {
+            Some(n) => cum.checked_add(n),
+            None => Some(anilist::MAX_PLAUSIBLE_EPISODES),
+        };
+        let Some(end) = end.filter(|n| *n > cum && *n <= anilist::MAX_PLAUSIBLE_EPISODES) else {
+            break;
+        };
+        rules.push(MappingRule {
+            source_first: cum + 1,
+            source_last: end,
+            target_entry: e.id,
+            target_first: 1,
+        });
+        cum = end;
+        if count.is_none() {
+            break;
         }
     }
     let mut buckets: BTreeMap<usize, Vec<CandidateFile>> = BTreeMap::new();
     let mut leftovers: Vec<CandidateFile> = Vec::new();
     for f in files {
-        let Some(e) = f.episode.filter(|e| *e > 0) else {
-            leftovers.push(f.clone());
-            continue;
-        };
-        let hit = ranges
-            .iter()
-            .position(|(prior, end)| e > *prior && end.is_none_or(|end| e <= end));
-        match hit {
-            Some(idx) => {
-                let prior = ranges[idx].0;
+        match source_file_span(f)
+            .and_then(|(first, last)| episode_mapping::resolve_file(&rules, first, last))
+        {
+            Ok(result) => {
+                let idx = chain
+                    .iter()
+                    .position(|entry| entry.id == result.entry)
+                    .expect("mapping entry comes from this chain");
                 let mut nf = f.clone();
-                nf.episode = Some(e - prior);
-                nf.source_episode = (prior > 0).then_some(e);
+                nf.episode = Some(result.first);
+                nf.source_episode = f.episode.filter(|e| *e != result.first);
                 buckets.entry(idx).or_default().push(nf);
             }
-            None => leftovers.push(f.clone()),
+            Err(_) => leftovers.push(f.clone()),
         }
     }
     (buckets.into_iter().collect(), leftovers)
@@ -465,7 +632,7 @@ pub async fn apply_absolute_numbering(group: SeriesGroup) -> Vec<SeriesGroup> {
         || !group
             .files
             .iter()
-            .any(|f| f.episode.is_some_and(|e| e > count))
+            .any(|f| source_file_span(f).is_ok_and(|(_, last)| last > count))
     {
         return vec![group];
     }
@@ -474,7 +641,7 @@ pub async fn apply_absolute_numbering(group: SeriesGroup) -> Vec<SeriesGroup> {
         return vec![group];
     }
     let (buckets, leftovers) = route_absolute(&group.files, &chain);
-    if !buckets.iter().any(|(idx, _)| *idx > 0) {
+    if leftovers.is_empty() && !buckets.iter().any(|(idx, _)| *idx > 0) {
         return vec![group];
     }
 
@@ -508,9 +675,8 @@ pub async fn apply_absolute_numbering(group: SeriesGroup) -> Vec<SeriesGroup> {
     if !leftovers.is_empty() {
         let mut g = group;
         g.files = leftovers;
-        g.resolved_by_id = true;
-        g.mapping_note = Some("Beyond the sequel chain; kept as parsed".to_string());
-        out.push(g);
+        out.push(unresolved_group(g,
+            "Cannot map every episode in these files to one entry of the sequel chain. Automatic match cleared.".to_string()));
     }
     out
 }
@@ -605,6 +771,31 @@ mod absolute_tests {
         assert_eq!(buckets[0].0, 1);
         let eps: Vec<Option<i32>> = buckets[0].1.iter().map(|f| f.episode).collect();
         assert_eq!(eps, vec![Some(1), Some(87)]);
+    }
+
+    #[test]
+    fn combined_absolute_file_cannot_cross_an_entry_boundary() {
+        let mut crossing = file(Some(12));
+        crossing.episode_count = 2;
+        let mut valid = file(Some(13));
+        valid.episode_count = 2;
+        let (buckets, leftovers) = route_absolute(
+            &[crossing, valid],
+            &[entry(1, Some(12)), entry(2, Some(12))],
+        );
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].0, 1);
+        assert_eq!(buckets[0].1[0].episode, Some(1));
+        assert_eq!(buckets[0].1[0].episode_count, 2);
+        assert_eq!(leftovers.len(), 1);
+        assert_eq!(leftovers[0].episode, Some(12));
+    }
+
+    #[test]
+    fn malformed_absolute_chain_does_not_overflow_or_become_open_ended() {
+        let (buckets, leftovers) = route_absolute(&[file(Some(5))], &[entry(1, Some(i32::MAX))]);
+        assert!(buckets.is_empty());
+        assert_eq!(leftovers.len(), 1);
     }
 
     #[tokio::test]

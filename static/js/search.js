@@ -190,6 +190,7 @@ function loadMore() {
                 tr.dataset.infoHash = r.info_hash || '';
                 tr.dataset.group = r.group || '';
                 if (r.indexer_id != null) tr.dataset.indexerId = r.indexer_id;
+                tr.dataset.sourceGuid = r.source_guid || "";
                 tr.innerHTML = `
                     <td class="col-score">
                         <details class="score-details" name="score-breakdown">
@@ -222,6 +223,7 @@ function loadMore() {
                     card.dataset.infoHash = r.info_hash || '';
                     card.dataset.group = r.group || '';
                     if (r.indexer_id != null) card.dataset.indexerId = r.indexer_id;
+                    card.dataset.sourceGuid = r.source_guid || "";
                     card.innerHTML = `
                         <div class="result-card-header">
                             <details class="score-details" name="score-breakdown">
@@ -308,6 +310,8 @@ function grabRelease(url, btn) {
             seeders: Number(row.dataset.seeders) || 0,
             group: row.dataset.group || '',
             infoHash: row.dataset.infoHash || '',
+            sourceGuid: row.dataset.sourceGuid || '',
+            indexerId: row.dataset.indexerId ? Number(row.dataset.indexerId) : null,
             // Carry the search-hit's batch classification through to
             // the preview POST so the backend's grab-row write uses
             // the listing's flag instead of a file-count proxy (which
@@ -332,6 +336,7 @@ function grabRelease(url, btn) {
         // the backend can dispatch through the per-indexer pin. Falls
         // through to the Nyaa pin server-side when absent.
         if (row.dataset.indexerId) payload.indexer_id = Number(row.dataset.indexerId);
+        payload.source_guid = row.dataset.sourceGuid || "";
     }
     fetch('/api/grab', {
         method: 'POST',

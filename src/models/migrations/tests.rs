@@ -1,5 +1,101 @@
 use super::*;
 
+#[tokio::test]
+async fn new_series_upgrade_default_migration_keeps_existing_choices() {
+    let db = crate::test_support::in_memory_pool().await;
+    crate::models::config::save_config(&db, &Default::default())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO series (anilist_id, title, allow_upgrades) VALUES (9901, 'On', 1), (9902, 'Off', 0)")
+        .execute(&db).await.unwrap();
+    sqlx::query("ALTER TABLE config DROP COLUMN default_allow_upgrades")
+        .execute(&db)
+        .await
+        .unwrap();
+    migrate(&db).await.unwrap();
+    let mut cfg = crate::models::config::get_config(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!cfg.default_allow_upgrades);
+    cfg.default_allow_upgrades = true;
+    crate::models::config::save_config(&db, &cfg).await.unwrap();
+    migrate(&db).await.unwrap();
+    assert!(
+        crate::models::config::get_config(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .default_allow_upgrades
+    );
+    let choices: Vec<i64> =
+        sqlx::query_scalar("SELECT allow_upgrades FROM series ORDER BY anilist_id")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+    assert_eq!(choices, vec![1, 0]);
+}
+
+#[tokio::test]
+async fn episode_identity_migration_clears_disposable_caches_only_once() {
+    let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+    migrate(&db).await.unwrap();
+    sqlx::query("INSERT INTO series (id, anilist_id, title) VALUES (1, 123, 'Keep series')")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO episode_monitor_state (series_id, episode_number, monitored) VALUES (1, 1, 1)",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    for q in [
+        "INSERT INTO episode_cache (mal_id, episode_number, title) VALUES (12, 13, 'Wrong sequel title')",
+        "INSERT INTO series_episode_metadata (series_id, episode_number, title) VALUES (1, 13, 'Wrong sequel title')",
+        "INSERT INTO provider_episode_metadata (provider_id, episode_number, title) VALUES (123, 13, 'Wrong sequel title')",
+    ] {
+        sqlx::query(q).execute(&db).await.unwrap();
+    }
+    sqlx::query("DELETE FROM schema_migrations WHERE id = 'provider_episode_identity_v1'")
+        .execute(&db)
+        .await
+        .unwrap();
+    invalidate_unmapped_episode_caches(&db).await.unwrap();
+    for q in [
+        "SELECT COUNT(*) FROM episode_cache",
+        "SELECT COUNT(*) FROM series_episode_metadata",
+        "SELECT COUNT(*) FROM provider_episode_metadata",
+    ] {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(q)
+                .fetch_one(&db)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT monitored FROM episode_monitor_state WHERE series_id = 1 AND episode_number = 1"
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap(),
+        1
+    );
+    sqlx::query("INSERT INTO episode_cache (mal_id, episode_number, title) VALUES (12, 1, 'Raw provider title')")
+        .execute(&db).await.unwrap();
+    invalidate_unmapped_episode_caches(&db).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT title FROM episode_cache")
+            .fetch_one(&db)
+            .await
+            .unwrap(),
+        "Raw provider title"
+    );
+}
+
 /// Regression: a legacy install has `episode_grab_history.torrent_name`
 /// populated with the release title for every historical grab. The
 /// column-rename path previously ran

@@ -207,6 +207,9 @@ pub(super) mod test_helpers {
     pub fn candidate(title: &str, group: &str, size_bytes: i64, info_hash: &str) -> SearchResult {
         SearchResult {
             match_provenance: None,
+            release_mapping: None,
+            source_guid: String::new(),
+            replay_episodes: None,
             title: title.to_string(),
             link: String::new(),
             magnet: String::new(),

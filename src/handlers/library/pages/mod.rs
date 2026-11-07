@@ -828,7 +828,18 @@ pub(super) async fn build_episodes(
     //   5. per-episode quality tags (DB, only when the series is tracked)
     let disk_files_fut = media::scan_series_folder(media_root, folder_name);
 
-    let detail_id = detail.id;
+    // The series remains the identity authority when detail came from a
+    // fallback provider whose positive numeric id belongs to another namespace.
+    let detail_id = if let Some(sid) = db_id {
+        series::get_by_id(db, sid)
+            .await
+            .ok()
+            .flatten()
+            .map(|row| row.anilist_id)
+            .unwrap_or(0)
+    } else {
+        detail.id
+    };
     let cached_eps_fut = async move {
         if let Some(sid) = db_id {
             let rows = local_metadata::get_episode_map_for_series(db, sid)
@@ -893,13 +904,19 @@ pub(super) async fn build_episodes(
     // returned the aired list.
     let is_airing_status = matches!(detail.status.as_str(), "RELEASING" | "CURRENTLY_AIRING");
     let should_fetch_jikan = !use_cached_eps
+        && detail_id != 0
         && detail.id_mal.is_some()
         && (episodic_format || ep_count > 1 || is_airing_status);
-    let jikan_eps = if should_fetch_jikan {
-        jikan::fetch_episode_titles_for_detail(db, detail).await
+    let jikan_titles = if should_fetch_jikan {
+        jikan::fetch_episode_titles_for_entry(db, detail_id, detail).await
     } else {
-        HashMap::new()
+        jikan::EpisodeTitleSet {
+            episodes: HashMap::new(),
+            allow_kitsu_fallback: detail_id != 0,
+            mapping_error: None,
+        }
     };
+    let jikan_eps = jikan_titles.episodes;
 
     // Promote the larger of (fresh Jikan fetch, locally-cached episode
     // map) into ep_count for airing series whose total wasn't known.
@@ -920,7 +937,8 @@ pub(super) async fn build_episodes(
         0
     });
 
-    let should_try_kitsu = !use_cached_eps
+    let should_try_kitsu = jikan_titles.allow_kitsu_fallback
+        && !use_cached_eps
         && ep_count > 1
         && (force_kitsu_fallback
             || episode_needs_kitsu_backfill(ep_count.max(0), |ep_num| {

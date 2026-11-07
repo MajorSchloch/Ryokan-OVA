@@ -227,8 +227,13 @@ async fn scan_for_unclassified(
                         .or_insert_with(|| name.clone());
                 }
             }
-            let most_recent_grab_name: Option<&str> =
-                imported_grabs.first().map(|(n, _)| n.as_str());
+            // Only legacy grabs with unknown coverage may supply a broad
+            // fallback. A partial pack cannot describe a protected episode.
+            let legacy_grab_name =
+                grabbed_torrents::legacy_imported_name_for_series(&state.db, row.id)
+                    .await
+                    .unwrap_or(None);
+            let most_recent_grab_name = legacy_grab_name.as_deref();
 
             let series_root = Path::new(&cfg.media_root).join(&row.folder_name);
 

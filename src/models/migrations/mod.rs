@@ -741,6 +741,41 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db)
         .await?;
 
+    // A selected pack mapping is bound to file paths and entry identities.
+    // NULL/absent means legacy behavior, never an implicitly verified scheme.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS grabbed_torrent_numbering (
+            grab_id INTEGER PRIMARY KEY REFERENCES grabbed_torrents(id) ON DELETE CASCADE,
+            snapshot TEXT NOT NULL
+        )",
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query("ALTER TABLE grabbed_torrents ADD COLUMN release_mapping TEXT")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE grabbed_torrents ADD COLUMN replacement_episode INTEGER")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE grabbed_torrents ADD COLUMN imported_episode_coverage TEXT")
+        .execute(db)
+        .await
+        .ok();
+    // An existing-library migration does not change the original release
+    // numbering. Keep its audit bridge and hold replay until source-file
+    // identities have a new, reviewed decision.
+    sqlx::query("ALTER TABLE grabbed_torrents ADD COLUMN source_identity TEXT")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE grabbed_torrents ADD COLUMN library_migration_bridge TEXT")
+        .execute(db)
+        .await
+        .ok();
+
     // Per-route episode offset for the Phase 2 auto-expand path.
     // Applied by post_processing at rename time to convert a file's
     // absolute episode number into the sibling's arc-local episode
@@ -1340,6 +1375,10 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
     sqlx::query("ALTER TABLE config ADD COLUMN upgrade_search_enabled INTEGER NOT NULL DEFAULT 0")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE config ADD COLUMN default_allow_upgrades INTEGER NOT NULL DEFAULT 0")
         .execute(db)
         .await
         .ok();
@@ -2891,6 +2930,8 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         "ALTER TABLE grabbed_torrents ADD COLUMN misgrab_action TEXT",
         "ALTER TABLE grabbed_torrents ADD COLUMN reviewed_at TEXT",
         "ALTER TABLE grabbed_torrents ADD COLUMN source_url TEXT NOT NULL DEFAULT ''",
+        "CREATE INDEX IF NOT EXISTS idx_grabbed_reviewed_source ON grabbed_torrents (source_identity) WHERE library_migration_bridge IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS idx_grabbed_reviewed_url ON grabbed_torrents (source_url) WHERE library_migration_bridge IS NOT NULL",
         "CREATE INDEX IF NOT EXISTS idx_grabbed_torrents_verification ON grabbed_torrents (verification) WHERE verification IS NOT NULL",
         "CREATE INDEX IF NOT EXISTS idx_grabbed_torrents_failed_name ON grabbed_torrents (series_id, torrent_name) WHERE state = 'failed'",
         "ALTER TABLE config ADD COLUMN misgrab_auto_remove INTEGER NOT NULL DEFAULT 1",
@@ -3068,6 +3109,12 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         sqlx::query(sql).execute(db).await.ok();
     }
 
+    // Old MAL cache rows may contain titles appended from sequels. Derived
+    // episode caches may also pair raw MAL numbers with AniList slots. They
+    // contain no provenance that can safely distinguish those rows, so rebuild
+    // the three disposable caches once. Files, tags and monitoring stay intact.
+    invalidate_unmapped_episode_caches(db).await?;
+
     // Issue #292: a MAL id is not a series identity. AniList splits
     // some MAL entries into several (Steel Ball Run's 1st STAGE and
     // 2nd - 3rd STAGE are both MAL 61469), and the UNIQUE on
@@ -3078,6 +3125,26 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db)
         .await?;
     drop_series_mal_id_unique(db).await?;
+    if !column_exists(db, "series", "cumulative_offset_reviewed").await {
+        sqlx::query(
+            "ALTER TABLE series ADD COLUMN cumulative_offset_reviewed INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(db)
+        .await?;
+    }
+    // A review belongs to one AniList entry. Reusing the local row for a
+    // different entry invalidates both the review and its cached number.
+    sqlx::query(
+        "CREATE TRIGGER IF NOT EXISTS series_clear_reviewed_offset
+         AFTER UPDATE OF anilist_id ON series
+         WHEN OLD.anilist_id IS NOT NEW.anilist_id AND OLD.cumulative_offset_reviewed = 1
+         BEGIN
+           UPDATE series SET cumulative_offset_reviewed = 0, cumulative_offset_known = 0,
+                             cumulative_prior_episodes = 0 WHERE id = NEW.id;
+         END",
+    )
+    .execute(db)
+    .await?;
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_series_mal_id_lookup ON series (mal_id) WHERE mal_id IS NOT NULL",
     )
@@ -3085,6 +3152,29 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await?;
 
     Ok(())
+}
+
+async fn invalidate_unmapped_episode_caches(db: &SqlitePool) -> Result<(), sqlx::Error> {
+    use crate::models::group_source_map::{ensure_schema_migrations_table, mark_migration_applied};
+    ensure_schema_migrations_table(db).await?;
+    let mut tx = db.begin().await?;
+    const ID: &str = "provider_episode_identity_v1";
+    let applied: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE id = ?)")
+            .bind(ID)
+            .fetch_one(&mut *tx)
+            .await?;
+    if !applied {
+        for query in [
+            "DELETE FROM episode_cache",
+            "DELETE FROM series_episode_metadata",
+            "DELETE FROM provider_episode_metadata",
+        ] {
+            sqlx::query(query).execute(&mut *tx).await?;
+        }
+        mark_migration_applied(&mut tx, ID).await?;
+    }
+    tx.commit().await
 }
 
 /// `mal_id INTEGER UNIQUE` in a stored `series` definition: installs

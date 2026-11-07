@@ -40,6 +40,9 @@ Two more things live on this tab:
 
 The scoring inputs that decide which release wins when several match the same episode.
 
+- **Allow upgrades for new series**: off by default. Sets the initial Upgrades switch for every new series, including imports, synced lists, and compatibility API requests. Existing series keep their own choice. Change that choice on the series page. When a series has Upgrades off, download imports keep its existing episodes and fill missing slots. A direct episode grab can replace the requested episode. Selecting a batch or files in the download picker does not grant that exception.
+- **Automatic Upgrade Search**: runs a daily search for better releases when the series allows upgrades. RSS can also select upgrades for those series when the daily search is off.
+
 - **Preferred / blocked groups**: whitelists and blacklists of release-group names (e.g. `[VCB-Studio]`). Preferred groups boost scores; blocked groups exclude their releases entirely.
 - **Preferred resolution / source**: a coarse first-pass filter. Releases below the resolution floor or wrong source (e.g. WEB-DL when you want BluRay) get filtered out before scoring runs.
 - **Cutoff source / resolution**: once an episode has a release at or above the cutoff, the upgrade-search task stops looking for better. Set this to "I'll take 1080p WEB-DL but stop churning through grabs once I've got that."
@@ -50,6 +53,8 @@ The scoring inputs that decide which release wins when several match the same ep
 - **Audio preference**: subtitled, dubbed, or no preference. Affects scoring, not filtering.
 - **SeaDex enabled**: when on, Ryokan consults [SeaDex](https://releases.moe) (a community-curated list of "best release" picks per AniList ID) and gives matching releases a large score bonus. Adding a Custom Format that uses the `SeaDexBest` spec automatically suppresses this toggle so you don't double-count.
 - **Default custom query tokens**: keywords added to every search, such as `bd 1080p`. A series can override them on its own page. The Nyaa uploader restriction lives on the Nyaa card of the Indexers tab.
+
+If a skipped video also contains a missing episode, Ryokan keeps the download for review. It cannot split that video. If every episode is available, normal download cleanup still applies. The import log lists the imported and skipped files. Existing videos, episode NFO files, subtitles, and completed quality records stay intact when protected. A manual import with a previewed **Replace** action remains an explicit replacement.
 
 ## Custom Formats
 

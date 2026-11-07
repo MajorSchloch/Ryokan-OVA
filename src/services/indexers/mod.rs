@@ -675,6 +675,9 @@ impl Release {
         let indexer_name = self.indexer_name;
         crate::services::nyaa::SearchResult {
             match_provenance: None,
+            release_mapping: None,
+            source_guid: self.guid,
+            replay_episodes: None,
             title: self.title,
             link: self.link.clone(),
             magnet: self.magnet,
