@@ -1002,7 +1002,7 @@ async fn prepare_staged_database(path: &Path, sanitized: bool) -> Result<(), Res
             "ryokan.db has no config table, so it is not a Ryokan database".to_string(),
         ));
     }
-    // Ryokan's schema is plain tables and their indexes. A crafted
+    // Ryokan uses tables, indexes, and one fixed trigger on series. A crafted
     // database used anything else to survive the restore: `sessions` as
     // a view over a hidden table with an INSTEAD OF trigger turned the
     // purge below into a no-op and kept a planted login valid even past
@@ -1011,17 +1011,19 @@ async fn prepare_staged_database(path: &Path, sanitized: bool) -> Result<(), Res
     // its shadow tables are stored as `table`, so both the label and
     // what each table really is (`pragma_table_list`) are checked.
     let foreign_objects: i64 = sqlx::query_scalar(
-        "SELECT (SELECT COUNT(*) FROM sqlite_master WHERE lower(type) NOT IN ('table', 'index')) \
+        "SELECT (SELECT COUNT(*) FROM sqlite_master WHERE lower(type) NOT IN ('table', 'index') \
+                 AND NOT (type IS 'trigger' AND name IS 'series_clear_reviewed_offset' \
+                          AND tbl_name IS 'series' AND sql IS ('CREATE TRIGGER ' || ?))) \
               + (SELECT COUNT(*) FROM pragma_table_list WHERE schema = 'main' AND type != 'table')",
     )
+    .bind(crate::models::migrations::REVIEWED_OFFSET_TRIGGER)
     .fetch_one(&pool)
     .await
     .unwrap_or(1);
     if foreign_objects > 0 {
         pool.close().await;
         return Err(RestoreError::Invalid(
-            "ryokan.db holds views, triggers or virtual tables, which a Ryokan database never has"
-                .to_string(),
+            "ryokan.db holds unrecognized views, triggers or virtual tables".to_string(),
         ));
     }
     if sanitized && let Err(e) = crate::services::sanitize::clear_placeholders(&pool).await {
