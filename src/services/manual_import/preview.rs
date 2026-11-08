@@ -736,13 +736,13 @@ mod tests {
         );
         let v = project_group(&g, &ctx(&owned, &disk));
         assert_eq!(v.kind, GroupKind::New);
-        assert_eq!(v.folder_name, "Show_ The Series");
+        assert_eq!(v.folder_name, "Show - The Series");
         assert!(!v.folder_collision);
         assert_eq!(v.files[0].status, FileStatus::Import);
         assert_eq!(v.files[0].episode_label, "E01");
         assert_eq!(
             v.files[0].dest,
-            "Show_ The Series/Season 01/[G] Show - 01 [1080p].mkv"
+            "Show - The Series/Season 01/[G] Show - 01 [1080p].mkv"
         );
         assert_eq!(v.files[1].status, FileStatus::NoEpisodeNumber);
         assert!(v.files[1].dest.is_empty());

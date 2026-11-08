@@ -2064,10 +2064,18 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         } else {
             title.as_str()
         };
-        let folder = crate::services::media::sanitize_folder_name(best);
+        // This backfill reconstructs a path from an older library. Use the
+        // punctuation rules that originally generated that folder on disk.
+        let legacy = best.replace(
+            |c: char| {
+                matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control()
+            },
+            "_",
+        );
+        let folder = legacy.trim_matches(|c: char| c == '.' || c.is_whitespace());
         if !folder.is_empty() {
             let _ = sqlx::query("UPDATE series SET folder_name = ? WHERE id = ?")
-                .bind(&folder)
+                .bind(folder)
                 .bind(id)
                 .execute(db)
                 .await;
