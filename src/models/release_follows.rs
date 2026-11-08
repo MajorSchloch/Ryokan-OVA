@@ -37,8 +37,8 @@ pub async fn list<'e>(db: impl sqlx::SqliteExecutor<'e>) -> Result<Vec<Follow>, 
 pub async fn list_with_matches(db: &SqlitePool) -> Result<Vec<Follow>, sqlx::Error> {
     let mut tx = db.begin().await?;
     let mut follows = list(&mut *tx).await?;
-    let releases: Vec<MatchedRelease> = sqlx::query_as(
-        "SELECT r.follow_id, r.anilist_id, s.id AS series_id,
+    let releases: Vec<MatchedRelease> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "{} SELECT r.follow_id, r.anilist_id, s.id AS series_id,
             COALESCE(NULLIF(s.title,''), NULLIF(r.title,''),
                 CASE WHEN json_valid(p.detail_json) THEN COALESCE(
                     NULLIF(json_extract(p.detail_json,'$.title_romaji'),''),
@@ -46,10 +46,12 @@ pub async fn list_with_matches(db: &SqlitePool) -> Result<Vec<Follow>, sqlx::Err
                     NULLIF(json_extract(p.detail_json,'$.title_native'),'')) END,
                 'AniList #' || r.anilist_id) AS title
          FROM followed_releases r
-         LEFT JOIN series s ON s.anilist_id=r.anilist_id
+         LEFT JOIN local_anilist_ids l ON l.anilist_id=r.anilist_id
+         LEFT JOIN series s ON s.id=l.series_id
          LEFT JOIN provider_metadata_cache p ON p.provider_id=r.anilist_id
          ORDER BY r.follow_id, title COLLATE NOCASE, r.anilist_id",
-    )
+        series::LOCAL_ANILIST_IDS
+    )))
     .fetch_all(&mut *tx)
     .await?;
     tx.commit().await?;
