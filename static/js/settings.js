@@ -401,6 +401,17 @@ var DC_KIND_COPY = {
         label_label: 'Label',
         label_hint: "Sets the custom1 field on every added torrent (the ruTorrent label convention). Ryokan filters list_scoped by this tag.",
     },
+    nzbget: {
+        url_placeholder: "http://localhost:6789",
+        url_hint: "Enter the NZBGet web address. Ryokan appends /jsonrpc.",
+        username_visible: true,
+        username_hint: "Use a control or restricted account.",
+        password_label: "Password",
+        password_type: "password",
+        password_hint: "Enter the password for this NZBGet account.",
+        label_label: "Category",
+        label_hint: "Enter the NZBGet category for Ryokan jobs.",
+    },
     sabnzbd: {
         url_placeholder: 'http://localhost:8080',
         url_hint: "Point at SABnzbd's Web UI base. Ryokan appends /api. If your SAB has URL_BASE set (e.g. /sabnzbd), include it: http://host:8080/sabnzbd.",
@@ -421,7 +432,7 @@ var DC_KIND_COPY = {
 // `models::download_clients::protocol_for_kind` on the server side;
 // keep them in sync if a new kind lands.
 function dcProtocolForKind(kind) {
-    if (kind === 'sabnzbd') return 'usenet';
+    if (kind === 'sabnzbd' || kind === 'nzbget') return 'usenet';
     return 'torrent';
 }
 function applyDcKindCopy(form, kind) {

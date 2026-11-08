@@ -51,6 +51,12 @@ pub struct DownloadClientRow {
     pub remove_failed: bool,
 }
 
+impl DownloadClientRow {
+    pub fn is_usenet(&self) -> bool {
+        protocol_for_kind(&self.kind) == Some("usenet")
+    }
+}
+
 /// Insert/update payload — `&str` rather than `String` so the
 /// caller can pass borrowed slices without an extra clone. Same
 /// shape as the trait constructors expect.
@@ -70,11 +76,7 @@ const SELECT_COLS: &str = "id, name, kind, url, username, password, label, \
                            download_path, enabled, is_default, remove_completed, \
                            remove_failed";
 
-/// Wire-protocol family for a download-client kind. Mirrors
-/// `services::download_client::protocol_for_client_kind` — duplicated
-/// at the model layer because services depends on models, so we can't
-/// reach upward without a circular dep. Keep the two in sync; both
-/// derive from the same finite set of known kinds.
+/// Wire-protocol family for routing and client selection.
 ///
 /// Drives the per-protocol uniqueness invariant for `is_default`: at
 /// most one torrent client AND at most one usenet client may carry
@@ -82,10 +84,16 @@ const SELECT_COLS: &str = "id, name, kind, url, username, password, label, \
 /// the default of their own protocol (torznab → torrent default,
 /// newznab → usenet default).
 pub fn protocol_for_kind(kind: &str) -> Option<&'static str> {
-    match kind {
-        "qbittorrent" | "deluge" | "transmission" | "rtorrent" => Some("torrent"),
-        "sabnzbd" => Some("usenet"),
-        _ => None,
+    ["torrent", "usenet"]
+        .into_iter()
+        .find(|protocol| kinds_for_protocol(protocol).contains(&kind))
+}
+
+fn kinds_for_protocol(protocol: &str) -> &'static [&'static str] {
+    match protocol {
+        "torrent" => &["qbittorrent", "deluge", "transmission", "rtorrent"],
+        "usenet" => &["sabnzbd", "nzbget"],
+        _ => &[],
     }
 }
 
@@ -174,11 +182,10 @@ pub async fn get_default_for_protocol(
     db: &SqlitePool,
     protocol: &str,
 ) -> Result<Option<DownloadClientRow>, sqlx::Error> {
-    let kinds: &[&str] = match protocol {
-        "torrent" => &["qbittorrent", "deluge", "transmission", "rtorrent"],
-        "usenet" => &["sabnzbd"],
-        _ => return Ok(None),
-    };
+    let kinds = kinds_for_protocol(protocol);
+    if kinds.is_empty() {
+        return Ok(None);
+    }
     let placeholders = vec!["?"; kinds.len()].join(", ");
     let sql = format!(
         "SELECT {SELECT_COLS} FROM download_clients \
@@ -354,11 +361,7 @@ pub async fn delete(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     if let Some((flag, kind)) = row
         && flag != 0
     {
-        let kinds: &[&str] = match protocol_for_kind(&kind) {
-            Some("torrent") => &["qbittorrent", "deluge", "transmission", "rtorrent"],
-            Some("usenet") => &["sabnzbd"],
-            _ => &[],
-        };
+        let kinds = kinds_for_protocol(protocol_for_kind(&kind).unwrap_or_default());
         if !kinds.is_empty() {
             let placeholders = vec!["?"; kinds.len()].join(", ");
             let sql =
@@ -423,11 +426,10 @@ async fn clear_other_defaults_in_protocol(
     kind: &str,
     keep_id: Option<i64>,
 ) -> Result<(), sqlx::Error> {
-    let kinds: &[&str] = match protocol_for_kind(kind) {
-        Some("torrent") => &["qbittorrent", "deluge", "transmission", "rtorrent"],
-        Some("usenet") => &["sabnzbd"],
-        _ => return Ok(()),
-    };
+    let kinds = kinds_for_protocol(protocol_for_kind(kind).unwrap_or_default());
+    if kinds.is_empty() {
+        return Ok(());
+    }
     let placeholders = vec!["?"; kinds.len()].join(", ");
     let sql = match keep_id {
         Some(_) => format!(

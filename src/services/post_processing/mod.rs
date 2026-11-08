@@ -7,7 +7,7 @@ use crate::models::log::LogCategory;
 use crate::models::{
     config, episode_tags, grabbed_torrents, local_metadata, metadata_cache, series,
 };
-use crate::services::download_client::DownloadClient;
+use crate::services::download_client::{DownloadClient, DownloadItem, DownloadItemState};
 use crate::services::recycle::{self, RecycleKind};
 use crate::services::source::{self, SeriesContext};
 use crate::services::{logger, media, naming, nfo};
@@ -3760,6 +3760,15 @@ pub async fn run_once(state: &AppState) {
             continue;
         };
 
+        if torrent.state_kind == DownloadItemState::Removed {
+            if grab.hash.eq_ignore_ascii_case(&torrent.hash)
+                && let Err(e) = grabbed_torrents::cancel_pending_grab(&state.db, grab).await
+            {
+                tracing::warn!(grab_id = grab.id, error = %e, "could not reconcile cancelled grab");
+            }
+            continue;
+        }
+
         // Detect failed/error items and mark them. The detail line
         // surfaces both the client's native state string (`Failed`
         // for SAB, `error` for qBit, etc.) and Ryokan's normalized
@@ -3804,18 +3813,26 @@ pub async fn run_once(state: &AppState) {
                 &format!("state={} kind={:?}", torrent.state, torrent.state_kind),
             )
             .await;
-            let _ = grabbed_torrents::mark_failed_with_reason(
-                &state.db,
-                grab.id,
-                crate::services::redownload::CLIENT_ERROR_REASON,
-            )
-            .await;
-            let _ = episode_tags::mark_grab_failed_for_release(
-                &state.db,
-                grab.series_id,
-                &grab.torrent_name,
-            )
-            .await;
+            if is_skipped_nzbget_fetch(client.as_ref(), torrent) {
+                // A retry can already have the same title. Reconcile only the
+                // skipped job before running its configured failure actions.
+                if grab.hash != torrent.hash || !record_skipped_fetch(state, grab).await {
+                    continue;
+                }
+            } else {
+                let _ = grabbed_torrents::mark_failed_with_reason(
+                    &state.db,
+                    grab.id,
+                    crate::services::redownload::CLIENT_ERROR_REASON,
+                )
+                .await;
+                let _ = episode_tags::mark_grab_failed_for_release(
+                    &state.db,
+                    grab.series_id,
+                    &grab.torrent_name,
+                )
+                .await;
+            }
             crate::services::notifications::emit_import_failed(
                 state,
                 grab.series_id,
@@ -3825,9 +3842,6 @@ pub async fn run_once(state: &AppState) {
             )
             .await;
             crate::services::redownload::remove_failed_from_client(state, grab).await;
-            // Only the parent series' rows are failed; an auto-expanded
-            // batch's sibling routes keep theirs (the stall path has the
-            // same limit).
             if researched.insert(grab.series_id) {
                 crate::services::redownload::after_failed_download(
                     state,
@@ -3891,9 +3905,16 @@ pub async fn run_once(state: &AppState) {
             &torrent.save_path,
             local_download_path,
         );
+        // For Usenet the extracted job folder is the import root. A walk
+        // of the parent can assign another application's files to this grab.
+        let import_root = if client.protocol() == "usenet" && !client_path.is_empty() {
+            &client_path
+        } else {
+            &local_save_path
+        };
         let _ = grabbed_torrents::stamp_client_content_path(&state.db, grab.id, &client_path).await;
 
-        match import_torrent(state, &cfg, grab, &torrent.hash, &local_save_path, &client).await {
+        match import_torrent(state, &cfg, grab, &torrent.hash, import_root, &client).await {
             Ok(ImportOutcome::Protected {
                 imported_files,
                 skipped_files,
@@ -4183,6 +4204,24 @@ async fn escalate_if_stalled(
     .await;
 }
 
+// The NZBGet adapter maps only skipped URL history entries to this
+// combination of native status and normalized state.
+fn is_skipped_nzbget_fetch(client: &dyn DownloadClient, item: &DownloadItem) -> bool {
+    client.sonarr_impl_name() == "Nzbget"
+        && item.state_kind.is_errored()
+        && item.state == "WARNING/SKIPPED"
+}
+
+async fn record_skipped_fetch(state: &AppState, grab: &grabbed_torrents::GrabbedTorrent) -> bool {
+    match grabbed_torrents::fail_pending_fetch(&state.db, grab).await {
+        Ok(failed) => failed,
+        Err(e) => {
+            tracing::warn!(grab_id = grab.id, error = %e, "could not record failed URL fetch");
+            false
+        }
+    }
+}
+
 /// Lightweight variant of `run_once` used when post-processing is
 /// disabled (or media_root is unset). Advances a qBit-complete pending
 /// grab's state on `grabbed_torrents` and `episode_quality_tags` so the
@@ -4220,8 +4259,15 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
         return Ok(());
     }
     let mut all_torrents: Vec<crate::services::download_client::DownloadItem> = Vec::new();
+    let mut skipped_fetches = HashSet::new();
     for c in pool.clients.values() {
         if let Ok(items) = c.list_scoped().await {
+            skipped_fetches.extend(
+                items
+                    .iter()
+                    .filter(|item| is_skipped_nzbget_fetch(c.as_ref(), item))
+                    .map(|item| item.hash.clone()),
+            );
             all_torrents.extend(items);
         }
     }
@@ -4235,6 +4281,11 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
         .collect();
 
     for grab in &pending {
+        // Match the exact job key, even if an active retry has the same title.
+        if skipped_fetches.contains(&grab.hash) {
+            record_skipped_fetch(state, grab).await;
+            continue;
+        }
         // A migrated source needs its verified import plan. Completion in the
         // client alone must not mark old source numbers as library episodes.
         if !matches!(
@@ -4250,6 +4301,15 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
             by_name.get(&grab.torrent_name.to_lowercase()).copied()
         };
         let Some(torrent) = matched else { continue };
+
+        if torrent.state_kind == DownloadItemState::Removed {
+            if grab.hash.eq_ignore_ascii_case(&torrent.hash)
+                && let Err(e) = grabbed_torrents::cancel_pending_grab(&state.db, grab).await
+            {
+                tracing::warn!(grab_id = grab.id, error = %e, "could not reconcile cancelled grab");
+            }
+            continue;
+        }
 
         if !torrent.state_kind.is_complete() {
             continue;

@@ -32,6 +32,7 @@
                     <option value="deluge" {% if row.kind == "deluge" %}selected{% endif %}>Deluge</option>
                     <option value="transmission" {% if row.kind == "transmission" %}selected{% endif %}>Transmission</option>
                     <option value="rtorrent" {% if row.kind == "rtorrent" %}selected{% endif %}>rTorrent</option>
+                    <option value="nzbget" {% if row.kind == "nzbget" %}selected{% endif %}>NZBGet (Usenet)</option>
                     <option value="sabnzbd" {% if row.kind == "sabnzbd" %}selected{% endif %}>SABnzbd (Usenet)</option>
                 </select>
             </div>
@@ -96,7 +97,7 @@
                     <span class="setting-row-desc">Receives grabs from indexers without a client of their own. Torrent and usenet have separate defaults.</span>
                 </span>
                 <input type="checkbox" name="is_default"
-                       {% if row.is_default || (row.kind == "sabnzbd" && first_usenet_client) || (row.kind != "sabnzbd" && first_torrent_client) %}checked{% endif %}
+                       {% if row.is_default || (row.is_usenet() && first_usenet_client) || (!row.is_usenet() && first_torrent_client) %}checked{% endif %}
                        data-dc-default-checkbox
                        data-first-torrent="{% if first_torrent_client %}1{% else %}0{% endif %}"
                        data-first-usenet="{% if first_usenet_client %}1{% else %}0{% endif %}">

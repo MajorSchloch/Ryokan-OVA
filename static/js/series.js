@@ -292,6 +292,7 @@ var DL_PROGRESS_HTML_ZERO = '<div class="dl-progress-wrap"><div class="dl-progre
 // from the user's chair both are "the client is not moving this".
 function clientStateLabel(item) {
     const kind = item.state_kind || '';
+    if (kind === 'removed') return { key: 'removed', text: 'Removed' };
     if (kind === 'errored') return { key: 'error', text: 'Error' };
     if (kind === 'paused' || kind === 'paused-complete' || item.seeding_done) return { key: 'paused', text: 'Paused' };
     if (kind.startsWith('seeding') || kind === 'checking-seed') return { key: 'seeding', text: 'Seeding' };
@@ -633,7 +634,7 @@ function pollDownloadProgress() {
                     }
                     const kind = item.state_kind || '';
                     const isComplete = kind.startsWith('seeding') || kind === 'paused-complete'
-                        || kind === 'checking-seed' || item.progress >= 1.0;
+                        || kind === 'checking-seed' || (item.progress >= 1.0 && kind !== 'removed' && kind !== 'errored');
                     if (isComplete) {
                         if (window.POST_PROCESSING_ENABLED) {
                             // Torrent finished but post-processing hasn't imported

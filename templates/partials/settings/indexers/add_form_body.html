@@ -150,7 +150,7 @@
                 <option value="">(use default)</option>
                 {% for dc in download_clients %}
                 <option value="{{ dc.id }}"
-                    data-protocol="{% if dc.kind == "sabnzbd" %}usenet{% else %}torrent{% endif %}">
+                    data-protocol="{% if dc.is_usenet() %}usenet{% else %}torrent{% endif %}">
                     {{ dc.name }}{% if dc.is_default %} (default){% endif %}
                 </option>
                 {% endfor %}
