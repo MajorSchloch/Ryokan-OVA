@@ -43,6 +43,7 @@ function stateLabel(kind) {
         'checking-seed': 'Checking',
         'paused': 'Paused',
         'paused-complete': 'Paused',
+        'removed': 'Removed',
         'errored': 'Error',
     };
     if (map[kind] === undefined) {

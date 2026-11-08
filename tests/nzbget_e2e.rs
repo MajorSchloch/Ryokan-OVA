@@ -33,6 +33,20 @@ struct Daemon {
 }
 
 impl Daemon {
+    fn finish(&mut self, key: &str, kind: &str, status: &str) {
+        let index = self
+            .queue
+            .iter()
+            .position(|job| job["DupeKey"] == key)
+            .unwrap();
+        let mut job = self.queue.remove(index);
+        job["Kind"] = json!(kind);
+        job["Status"] = json!(status);
+        job["NZBName"] = json!(TITLE);
+        job["DestDir"] = json!(format!("/remote/ryokan/{TITLE}"));
+        self.history.push(job);
+    }
+
     fn rpc(&mut self, request: &Request) -> ResponseTemplate {
         if self.offline {
             return ResponseTemplate::new(503);
@@ -69,11 +83,12 @@ impl Daemon {
                     ])
                 );
                 self.adds += 1;
+                let id = self.adds + 9;
                 self.queue.push(
-                    json!({"NZBID":10,"Kind":"URL","Category":"ryokan","DupeKey":key,
+                    json!({"NZBID":id,"Kind":"URL","Category":"ryokan","DupeKey":key,
                     "URL":p[1],"Status":"FETCHING"}),
                 );
-                json!(10)
+                json!(id)
             }
             "editqueue" => {
                 self.edits.push(p.clone());
@@ -131,7 +146,26 @@ async fn configure(db: &SqlitePool, server: &str, mount: &Path, media: &Path, re
     }
 }
 
-async fn exercise(failed: bool, remove: bool) {
+// Cargo runs these fixtures in one process. Serialize only the calls that
+// share the production try_lock, so each fixture gets its requested tick.
+async fn tick(app: &AppState) {
+    static TICKS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = TICKS.lock().await;
+    post_processing::run_once(app).await;
+}
+
+struct Fixture {
+    _server: MockServer,
+    tmp: tempfile::TempDir,
+    daemon: Arc<Mutex<Daemon>>,
+    foreign: Vec<Value>,
+    db_url: String,
+    app: AppState,
+    release_url: String,
+    hash: String,
+}
+
+async fn fixture(remove: bool) -> Fixture {
     let server = MockServer::start().await;
     let release_url = format!("{}/release.nzb", server.uri());
     let rss = format!(
@@ -140,6 +174,7 @@ async fn exercise(failed: bool, remove: bool) {
     Mock::given(method("GET"))
         .and(query_param("t", "tvsearch"))
         .respond_with(ResponseTemplate::new(200).set_body_string(rss))
+        .expect(1)
         .mount(&server)
         .await;
     let daemon = Arc::new(Mutex::new(Daemon::default()));
@@ -218,6 +253,33 @@ async fn exercise(failed: bool, remove: bool) {
     assert_eq!(pending[0].hash, hash);
     assert_eq!(pending[0].episode_numbers, [7]);
     assert_eq!(pending[0].download_client_id, Some(2));
+    Fixture {
+        _server: server,
+        tmp,
+        daemon,
+        foreign,
+        db_url,
+        app,
+        release_url,
+        hash,
+    }
+}
+
+async fn exercise(failed: bool, remove: bool) {
+    let Fixture {
+        _server,
+        tmp,
+        daemon,
+        foreign,
+        db_url,
+        app,
+        release_url,
+        hash,
+    } = fixture(remove).await;
+    let mount = tmp.path().join("completed");
+    let media = tmp.path().join("library");
+    let sibling = mount.join("Sonarr");
+    let client = app.client_for_indexer(Some(1)).await.unwrap();
     let listed = client.list_scoped().await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].state, "FETCHING");
@@ -230,7 +292,7 @@ async fn exercise(failed: bool, remove: bool) {
     // Restart recovery must also work from a listing without the release URL.
     daemon.lock().unwrap().queue.last_mut().unwrap()["URL"] = json!("");
     daemon.lock().unwrap().offline = true;
-    post_processing::run_once(&app).await;
+    tick(&app).await;
     assert_eq!(
         grabbed_torrents::get_all_pending(&app.db)
             .await
@@ -256,19 +318,18 @@ async fn exercise(failed: bool, remove: bool) {
     fs::write(job.join("Space Brothers - 07.mkv"), b"episode seven").unwrap();
     {
         let mut d = daemon.lock().unwrap();
-        let mut entry = d.queue.pop().unwrap();
-        entry["Kind"] = json!("NZB");
-        entry["NZBID"] = json!(11);
-        entry["NZBName"] = json!(TITLE);
-        entry["Status"] = json!(if failed {
-            "FAILURE/PAR"
-        } else {
-            "SUCCESS/UNPACK"
-        });
-        entry["DestDir"] = json!(format!("/remote/ryokan/{TITLE}"));
-        d.history.push(entry);
+        d.finish(
+            &hash,
+            "NZB",
+            if failed {
+                "FAILURE/PAR"
+            } else {
+                "SUCCESS/UNPACK"
+            },
+        );
+        d.history.last_mut().unwrap()["NZBID"] = json!(11);
     }
-    post_processing::run_once(&app).await;
+    tick(&app).await;
     let (state, reason): (String, Option<String>) =
         sqlx::query_as("SELECT state,failure_reason FROM grabbed_torrents WHERE hash=?")
             .bind(&hash)
@@ -329,4 +390,108 @@ async fn failure_honors_remove_failed_on() {
 #[tokio::test]
 async fn failure_honors_remove_failed_off() {
     exercise(true, false).await;
+}
+
+#[tokio::test]
+async fn manual_deletion_clears_pending_episode_without_a_replacement() {
+    check_manual_deletion(true).await;
+    check_manual_deletion(false).await;
+}
+
+async fn check_manual_deletion(import_enabled: bool) {
+    let f = fixture(true).await;
+    sqlx::query("UPDATE config SET auto_redownload_failed=1, post_processing_enabled=?")
+        .bind(import_enabled)
+        .execute(&f.app.db)
+        .await
+        .unwrap();
+    // Another completed release for this episode keeps its history.
+    sqlx::query("INSERT INTO episode_grab_history(series_id,episode_number,release_title,state)
+                 SELECT series_id,episode_number,'Earlier release','completed' FROM episode_grab_history WHERE release_title=?")
+        .bind(TITLE).execute(&f.app.db).await.unwrap();
+    f.daemon
+        .lock()
+        .unwrap()
+        .finish(&f.hash, "NZB", "DELETED/MANUAL");
+    tick(&f.app).await;
+    tick(&f.app).await;
+    let grab: (String, Option<String>) =
+        sqlx::query_as("SELECT state,failure_reason FROM grabbed_torrents WHERE hash=?")
+            .bind(&f.hash)
+            .fetch_one(&f.app.db)
+            .await
+            .unwrap();
+    assert_eq!(grab.0, "removed");
+    assert!(grab.1.unwrap_or_default().is_empty());
+    let tags: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM episode_quality_tags WHERE episode_number=7")
+            .fetch_one(&f.app.db)
+            .await
+            .unwrap();
+    assert_eq!(tags, 0);
+    let history: Vec<(String, String)> = sqlx::query_as(
+        "SELECT release_title,state FROM episode_grab_history WHERE episode_number=7 ORDER BY id",
+    )
+    .fetch_all(&f.app.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        history,
+        [
+            (TITLE.into(), "removed".into()),
+            ("Earlier release".into(), "completed".into())
+        ]
+    );
+    let d = f.daemon.lock().unwrap();
+    assert_eq!(d.adds, 1);
+    assert_eq!(d.queue, f.foreign);
+    assert!(d.edits.is_empty());
+}
+
+#[tokio::test]
+async fn skipped_url_fetch_allows_one_new_submission() {
+    let f = fixture(false).await;
+    f.daemon
+        .lock()
+        .unwrap()
+        .finish(&f.hash, "URL", "WARNING/SKIPPED");
+    tick(&f.app).await;
+    let grab: (String, String) =
+        sqlx::query_as("SELECT state,failure_reason FROM grabbed_torrents WHERE hash=?")
+            .bind(&f.hash)
+            .fetch_one(&f.app.db)
+            .await
+            .unwrap();
+    assert_eq!(grab, ("failed".into(), "client_error".into()));
+
+    let form = serde_json::from_value(json!({
+        "url": f.release_url, "title": TITLE, "source_guid": "release-7", "indexer_id": 1
+    }))
+    .unwrap();
+    let Json(response) = grab_release(State(f.app.clone()), Json(form))
+        .await
+        .unwrap();
+    let new_key = response["hash"].as_str().unwrap();
+    assert_ne!(new_key, f.hash);
+    let pending = grabbed_torrents::get_all_pending(&f.app.db).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].hash, new_key);
+    assert_eq!(pending[0].episode_numbers, [7]);
+    let client = f.app.client_for_indexer(Some(1)).await.unwrap();
+    let replay = client
+        .add_torrent_returning_id(&f.release_url, "")
+        .await
+        .unwrap();
+    assert_eq!(
+        replay,
+        (
+            download_client::AddOutcome::AlreadyPresent,
+            new_key.to_owned()
+        )
+    );
+    let d = f.daemon.lock().unwrap();
+    assert_eq!(d.adds, 2);
+    assert_eq!(d.queue.len(), f.foreign.len() + 1);
+    assert!(d.queue.starts_with(&f.foreign));
+    assert!(d.edits.is_empty());
 }

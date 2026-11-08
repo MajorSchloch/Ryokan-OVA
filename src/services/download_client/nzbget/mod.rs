@@ -48,9 +48,12 @@ impl Job {
     fn state(&self, history: bool) -> DownloadItemState {
         use DownloadItemState::*;
         if history {
-            return match self.status.split('/').next() {
-                Some("SUCCESS") if self.kind == "NZB" => PausedComplete,
-                Some("FAILURE") => Errored,
+            let status = self.status.split_once('/').unwrap_or((&self.status, ""));
+            return match status {
+                ("DELETED", "MANUAL") => Removed,
+                ("WARNING", "SKIPPED") if self.kind == "URL" => Errored,
+                ("SUCCESS", _) if self.kind == "NZB" => PausedComplete,
+                ("FAILURE", _) => Errored,
                 _ => Warning,
             };
         }

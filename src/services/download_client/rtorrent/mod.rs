@@ -913,6 +913,7 @@ fn state_label(s: DownloadItemState) -> &'static str {
         Paused => "Paused",
         PausedComplete => "Paused (complete)",
         Warning => "Warning",
+        Removed => "Removed",
         Errored => "Errored",
     }
 }

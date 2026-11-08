@@ -518,8 +518,8 @@ pub async fn record_grab_series_routes(
 /// single-series grabs that predate Phase 2 — post-processing treats
 /// an empty result as "route all files to grab.series_id" in that
 /// case.
-pub async fn get_series_routes(
-    db: &SqlitePool,
+pub async fn get_series_routes<'e>(
+    db: impl sqlx::SqliteExecutor<'e>,
     grab_id: i64,
 ) -> Result<Vec<GrabSeriesRoute>, sqlx::Error> {
     // COALESCE on episode_offset keeps legacy rows (written before
@@ -1147,6 +1147,52 @@ pub async fn mark_all_pending_failed(db: &SqlitePool) -> Result<u64, sqlx::Error
             .execute(db)
             .await?;
     Ok(result.rows_affected())
+}
+
+/// Reconcile a client's explicit cancellation with its pending episode rows.
+/// A different release, a completed episode, or a manual tag must survive.
+pub async fn cancel_pending_grab(
+    db: &SqlitePool,
+    grab: &GrabbedTorrent,
+) -> Result<(), sqlx::Error> {
+    let mut tx = db.begin().await?;
+    let cancelled = sqlx::query(
+        "UPDATE grabbed_torrents SET state = 'removed' WHERE id = ? AND hash = ? AND state = 'pending'",
+    )
+    .bind(grab.id)
+    .bind(&grab.hash)
+    .execute(&mut *tx)
+    .await?;
+    if cancelled.rows_affected() == 0 {
+        return Ok(());
+    }
+    let routes = get_series_routes(&mut *tx, grab.id).await?;
+    let slots = std::iter::once((grab.series_id, &grab.episode_numbers))
+        .chain(routes.iter().map(|r| (r.series_id, &r.episode_numbers)));
+    for (series_id, episodes) in slots {
+        for episode in episodes {
+            super::episode_tags::finish_pending_attempt(
+                &mut tx,
+                series_id,
+                *episode,
+                &grab.torrent_name,
+                "removed",
+            )
+            .await?;
+            // A classification pinned during the download keeps its values.
+            sqlx::query(
+                "UPDATE episode_quality_tags SET state = '', updated_at = CURRENT_TIMESTAMP
+                 WHERE series_id = ? AND episode_number = ? AND release_title = ?
+                 AND state = 'grabbed' AND manual_override = 1",
+            )
+            .bind(series_id)
+            .bind(episode)
+            .bind(&grab.torrent_name)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    tx.commit().await
 }
 
 pub async fn mark_removed(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {

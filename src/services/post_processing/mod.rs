@@ -7,7 +7,7 @@ use crate::models::log::LogCategory;
 use crate::models::{
     config, episode_tags, grabbed_torrents, local_metadata, metadata_cache, series,
 };
-use crate::services::download_client::DownloadClient;
+use crate::services::download_client::{DownloadClient, DownloadItemState};
 use crate::services::recycle::{self, RecycleKind};
 use crate::services::source::{self, SeriesContext};
 use crate::services::{logger, media, naming, nfo};
@@ -3760,6 +3760,15 @@ pub async fn run_once(state: &AppState) {
             continue;
         };
 
+        if torrent.state_kind == DownloadItemState::Removed {
+            if grab.hash.eq_ignore_ascii_case(&torrent.hash)
+                && let Err(e) = grabbed_torrents::cancel_pending_grab(&state.db, grab).await
+            {
+                tracing::warn!(grab_id = grab.id, error = %e, "could not reconcile cancelled grab");
+            }
+            continue;
+        }
+
         // Detect failed/error items and mark them. The detail line
         // surfaces both the client's native state string (`Failed`
         // for SAB, `error` for qBit, etc.) and Ryokan's normalized
@@ -4257,6 +4266,15 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
             by_name.get(&grab.torrent_name.to_lowercase()).copied()
         };
         let Some(torrent) = matched else { continue };
+
+        if torrent.state_kind == DownloadItemState::Removed {
+            if grab.hash.eq_ignore_ascii_case(&torrent.hash)
+                && let Err(e) = grabbed_torrents::cancel_pending_grab(&state.db, grab).await
+            {
+                tracing::warn!(grab_id = grab.id, error = %e, "could not reconcile cancelled grab");
+            }
+            continue;
+        }
 
         if !torrent.state_kind.is_complete() {
             continue;
