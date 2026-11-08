@@ -360,7 +360,7 @@ fn get_session_token(req: &Request<Body>) -> Option<String> {
 }
 
 /// The value of cookie `name` in the request's `Cookie` header.
-fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+pub(crate) fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     let header = headers.get(header::COOKIE)?.to_str().ok()?;
     header
         .split(';')

@@ -3,7 +3,10 @@
 {% block content %}
 <div class="page-header recycle-header">
     <h2>Library groups</h2>
-    <a class="btn btn-secondary" href="/">Poster view</a>
+    <nav aria-label="Library views">
+        <a class="btn btn-secondary" href="/?view=poster">Poster view</a>
+        <a class="btn btn-secondary" href="/library/table">Table view</a>
+    </nav>
 </div>
 {% if groups.is_empty() %}
 <p>Your library is empty.</p>
