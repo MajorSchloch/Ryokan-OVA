@@ -251,6 +251,34 @@ pub struct RssItem {
     pub source: RssSource,
 }
 
+impl RssItem {
+    fn grab_url(&self) -> &str {
+        if !self.torrent.is_empty() {
+            &self.torrent
+        } else if !self.magnet.is_empty() {
+            &self.magnet
+        } else {
+            &self.link
+        }
+    }
+
+    /// Public Nyaa feeds can supply the v1 hash even when the only link is HTTPS.
+    /// The download client can use that hash without contacting the indexer.
+    fn nyaa_dispatch_magnet(&self) -> Option<String> {
+        if self.source != RssSource::Nyaa {
+            return None;
+        }
+        let feed_hash = crate::services::download_client::normalize_info_hash(&self.info_hash)
+            .filter(|hash| hash.len() == 40);
+        if let Some(hash) = crate::services::torrent_file::magnet_info_hash(&self.magnet)
+            && feed_hash.as_ref().is_none_or(|expected| expected == &hash)
+        {
+            return Some(self.magnet.clone());
+        }
+        feed_hash.map(|hash| crate::services::nyaa::public_magnet_uri(&hash, &self.title))
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SyncSummary {
     pub items_seen: i32,
@@ -836,7 +864,9 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         let single_entry = found.series.format == "MOVIE"
             || (matches!(found.series.format.as_str(), "SPECIAL" | "OVA" | "ONA")
                 && found.series.episodes == Some(1));
-        let source_url = if !item.magnet.is_empty() {
+        let source_url = if item.source == RssSource::Nyaa {
+            item.grab_url()
+        } else if !item.magnet.is_empty() {
             &item.magnet
         } else {
             &item.torrent
@@ -1326,15 +1356,12 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             continue;
         }
 
-        let grab_url = if !cand.item.torrent.is_empty() {
-            cand.item.torrent.clone()
-        } else if !cand.item.magnet.is_empty() {
-            cand.item.magnet.clone()
-        } else {
-            cand.item.link.clone()
-        };
+        let grab_url = cand.item.grab_url();
 
-        let info_hash = crate::services::nyaa::extract_hash(&grab_url);
+        // Keep the original source URL for reviewed release mappings.
+        let magnet = cand.item.nyaa_dispatch_magnet();
+        let client_url = magnet.as_deref().unwrap_or(grab_url);
+        let info_hash = crate::services::nyaa::extract_hash(client_url);
         // multi-rss commit F — resolve the dispatch client per-item
         // based on the source's pin (Nyaa pin / indexer pin /
         // direct-feed pin). A pin pointing at a deleted client
@@ -1410,7 +1437,10 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             .await;
             continue;
         }
-        match client.add_torrent_returning_id(&grab_url, &info_hash).await {
+        match client
+            .add_torrent_returning_id(client_url, &info_hash)
+            .await
+        {
             Ok((_outcome, canonical_id)) => {
                 grabbed += 1;
                 let action = if cand.is_upgrade { "upgrade" } else { "new" };
@@ -1462,7 +1492,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                     cand.release_mapping.as_ref(),
                     None,
                     crate::models::grabbed_torrents::source_replay::SourceRef {
-                        url: &grab_url,
+                        url: grab_url,
                         guid: &cand.item.guid,
                         indexer_id: match &cand.item.source {
                             RssSource::Indexer { id, .. } => Some(*id),
