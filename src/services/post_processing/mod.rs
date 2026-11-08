@@ -4236,8 +4236,19 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
         return Ok(());
     }
     let mut all_torrents: Vec<crate::services::download_client::DownloadItem> = Vec::new();
+    let mut skipped_fetches = HashSet::new();
     for c in pool.clients.values() {
         if let Ok(items) = c.list_scoped().await {
+            if c.sonarr_impl_name() == "Nzbget" {
+                // The adapter checks ownership and category. Only a skipped
+                // URL in history maps this native status to Errored.
+                skipped_fetches.extend(
+                    items
+                        .iter()
+                        .filter(|i| i.state_kind.is_errored() && i.state == "WARNING/SKIPPED")
+                        .map(|i| i.hash.clone()),
+                );
+            }
             all_torrents.extend(items);
         }
     }
@@ -4251,6 +4262,13 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
         .collect();
 
     for grab in &pending {
+        // Match the exact job key, even if an active retry has the same title.
+        if skipped_fetches.contains(&grab.hash) {
+            if let Err(e) = grabbed_torrents::fail_pending_fetch(&state.db, grab).await {
+                tracing::warn!(grab_id = grab.id, error = %e, "could not record failed URL fetch");
+            }
+            continue;
+        }
         // A migrated source needs its verified import plan. Completion in the
         // client alone must not mark old source numbers as library episodes.
         if !matches!(
