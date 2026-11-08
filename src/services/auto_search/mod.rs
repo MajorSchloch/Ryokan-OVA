@@ -3082,6 +3082,7 @@ mod tests {
             episodes: None,
             relation_type: relation.into(),
             season_year: None,
+            start_date: None,
             media_type: "ANIME".into(),
         }
     }

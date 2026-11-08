@@ -445,6 +445,7 @@ async fn fetch_relation_card_detail(mal_id: i64, fallback_name: &str) -> Related
         episodes: None,
         relation_type: String::new(),
         season_year: None,
+        start_date: None,
         media_type: "ANIME".to_string(),
     };
 
@@ -475,6 +476,7 @@ async fn fetch_relation_card_detail(mal_id: i64, fallback_name: &str) -> Related
             .and_then(|n| crate::services::anilist::plausible_episode_count(n.into())),
         relation_type: String::new(),
         season_year: anime.year,
+        start_date: None,
         media_type: "ANIME".to_string(),
     }
 }

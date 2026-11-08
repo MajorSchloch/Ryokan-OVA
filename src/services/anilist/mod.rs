@@ -833,6 +833,9 @@ pub struct RelatedEntry {
     pub episodes: Option<i32>,
     pub relation_type: String,
     pub season_year: Option<i32>,
+    /// Earliest possible first air date in the AniList relation.
+    #[serde(default)]
+    pub start_date: Option<String>,
     pub media_type: String,
 }
 
@@ -1091,6 +1094,15 @@ fn premiere_date(date: &serde_json::Value) -> Option<String> {
         .map(|d| d.to_string())
 }
 
+// A partial date proves eligibility only if the whole period is on or after
+// the follow date. An announced title can also qualify by its status.
+fn relation_start_date(value: &serde_json::Value) -> Option<String> {
+    let year = value["year"].as_i64()?.try_into().ok()?;
+    let month = value["month"].as_u64().unwrap_or(1).try_into().ok()?;
+    let day = value["day"].as_u64().unwrap_or(1).try_into().ok()?;
+    chrono::NaiveDate::from_ymd_opt(year, month, day).map(|d| d.to_string())
+}
+
 /// The `Media` field selection every single-entry detail fetch asks
 /// for, shared by the by-id and by-MAL-id query shapes.
 const MEDIA_DETAIL_FIELDS: &str = r#"
@@ -1326,6 +1338,7 @@ pub(crate) fn parse_media_node(m: &serde_json::Value) -> Option<AnimeDetail> {
                         episodes: node["episodes"].as_i64().and_then(plausible_episode_count),
                         relation_type: edge["relationType"].as_str().unwrap_or("").to_string(),
                         season_year: node["seasonYear"].as_i64().map(|y| y as i32),
+                        start_date: relation_start_date(&node["startDate"]),
                         media_type: node["type"].as_str().unwrap_or("").to_string(),
                     })
                 })
@@ -2065,6 +2078,38 @@ mod tests {
         ]);
         let arr = lists.as_array().unwrap();
         assert!(!all_buckets_are_custom_lists(arr));
+    }
+
+    #[test]
+    fn partial_premieres_keep_their_precision_and_follow_cutoff() {
+        use serde_json::json;
+
+        for (date, display, earliest) in [
+            (json!({}), None, None),
+            (json!({"year": 2026}), Some("2026"), Some("2026-01-01")),
+            (
+                json!({"year": 2026, "month": 5}),
+                Some("2026-05"),
+                Some("2026-05-01"),
+            ),
+            (
+                json!({"year": 2026, "month": 5, "day": 10}),
+                Some("2026-05-10"),
+                Some("2026-05-10"),
+            ),
+        ] {
+            let detail = parse_media_node(&json!({
+                "id": 1, "startDate": date,
+                "relations": {"edges": [{"relationType": "SEQUEL", "node": {
+                    "id": 2, "type": "ANIME", "startDate": date
+                }}]}
+            }))
+            .unwrap();
+            let sequel = &detail.relations[0];
+            assert_eq!(detail.release_date.as_deref(), display);
+            assert_eq!(sequel.release_date.as_deref(), display);
+            assert_eq!(sequel.start_date.as_deref(), earliest);
+        }
     }
 
     #[test]
