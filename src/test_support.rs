@@ -757,6 +757,7 @@ window.addEventListener('DOMContentLoaded', function () {
             // up each page's distinct `{% block page_css %}` link.
             // Phase D pentagon-nav test exercises every route here.
             .route("/", get(crate::handlers::library::pages::index))
+            .route("/library/table", get(crate::handlers::library::table::page))
             // First-run library step
             // (`tests/htmx_browser_e2e_setup_library.rs`).
             .route(

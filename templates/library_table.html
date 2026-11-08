@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %} - Library table{% endblock %}
+{% block content %}
+<section id="library-table">
+    <header class="page-header recycle-header">
+        <h2>Library table</h2>
+        <nav aria-label="Library views">
+            <a class="btn btn-secondary" href="/?view=poster">Poster view</a>
+            <a class="btn btn-secondary" href="/library/groups">Grouped view</a>
+        </nav>
+    </header>
+    <div class="table-controls">
+        <div class="table-filters">
+            <label>Title search<input class="library-search-input" type="search" data-filter="search" placeholder="Search titles"></label>
+            <label><span id="table-label-mode">Episode monitoring</span><select class="folder-select" aria-labelledby="table-label-mode" data-filter="mode">
+                <option value="">All modes</option><option value="monitored">Monitored</option>
+                <option value="all">All episodes</option><option value="future">Future episodes</option>
+                <option value="missing">Missing episodes</option><option value="existing">Existing episodes</option>
+                <option value="none">None</option>
+            </select></label>
+            <label><span id="table-label-follow">Future-release follow</span><select class="folder-select" aria-labelledby="table-label-follow" data-filter="follow">
+                <option value="">All titles</option><option value="yes">Following</option><option value="no">Not following</option>
+            </select></label>
+            <label><span id="table-label-files">Episode files</span><select class="folder-select" aria-labelledby="table-label-files" data-filter="files">
+                <option value="">All file states</option><option value="missing">Aired episodes missing</option>
+                <option value="empty">No files on disk</option><option value="unknown">File status unknown</option>
+            </select></label>
+        </div>
+        <div class="table-presets">
+            <label><span id="table-label-preset">Filter set</span><select class="folder-select" aria-labelledby="table-label-preset" id="table-preset">
+                <option value="">Custom filters</option>
+                <optgroup label="Quick filters">
+                    <option value="missing">Monitored with missing episodes</option>
+                    <option value="follows">Future follows without files</option>
+                </optgroup>
+                <optgroup label="Saved filters" id="table-saved"></optgroup>
+            </select></label>
+            <details><summary class="btn btn-secondary btn-sm">Save filters</summary>
+                <div class="table-panel">
+                    <label>Filter set name<input type="text" id="table-name" maxlength="80"></label>
+                    <button type="button" class="btn btn-primary btn-sm" id="table-save">Save filter set</button>
+                    <button type="button" class="btn btn-secondary btn-sm" id="table-delete" disabled>Delete selected set</button>
+                    <span role="status" id="table-save-status"></span>
+                </div>
+            </details>
+            <button class="btn btn-secondary btn-sm" id="table-clear">Clear filters</button>
+        </div>
+    </div>
+    <div class="table-results">
+        <strong id="table-count" role="status">{{ rows.len() }} entries</strong>
+        <details><summary class="btn btn-secondary btn-sm">Columns</summary>
+            <fieldset class="table-panel" id="table-columns"><legend>Visible columns</legend></fieldset>
+        </details>
+    </div>
+    <div class="library-table-scroll" role="region" aria-label="Library entries" tabindex="0">
+        <table>
+            <thead><tr>
+                <th data-key="title"><button>Title</button></th>
+                <th data-key="format"><button>Format</button></th>
+                <th data-key="status"><button>Release status</button></th>
+                <th data-key="mode"><button>Episode monitoring</button></th>
+                <th data-key="follow"><button>Future-release follow</button></th>
+                <th data-key="disk"><button>Episodes on disk</button></th>
+                <th data-key="missing"><button>Aired episodes missing</button></th>
+                <th data-key="total"><button>Total episodes</button></th>
+                <th data-key="next"><button>Next airing</button></th>
+                <th hidden>Open entry</th>
+            </tr></thead>
+            <tbody>
+            {% for row in rows %}
+            <tr data-aliases="{{ row.aliases }}" data-mode="{{ row.mode }}" data-follow="{% if row.followed %}yes{% else %}no{% endif %}">
+                <td data-value="{{ row.title }}"><a href="{{ row.href }}">{{ row.title }}</a>{% if row.follow_only %}<small>Follow only</small>{% endif %}</td>
+                <td>{% if row.format.is_empty() %}Unknown{% else %}{{ row.format }}{% endif %}</td>
+                <td>{% if row.status.is_empty() %}Unknown{% else %}{{ row.status }}{% endif %}</td>
+                <td class="table-mode">{% if row.follow_only %}—{% else %}{{ row.mode }}{% endif %}</td>
+                <td>{% if row.followed %}Following{% else %}No{% endif %}</td>
+                <td>{% if let Some(n) = row.disk %}{{ n }}{% else %}Unknown{% endif %}</td>
+                <td{% if row.missing.unwrap_or(0) > 0 %} class="table-missing"{% endif %}>{% if let Some(n) = row.missing %}{{ n }}{% else if row.follow_only %}—{% else %}Unknown{% endif %}</td>
+                <td>{% if let Some(n) = row.total %}{{ n }}{% else %}Unknown{% endif %}</td>
+                <td>{% if let Some(next) = row.next %}{{ next }}{% else %}—{% endif %}</td>
+                <td hidden><a href="{{ row.href }}" aria-label="Open {{ row.title }}">Open{% if row.follow_only %} follow{% endif %}</a></td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <p id="table-empty"{% if !rows.is_empty() %} hidden{% endif %}>No entries match these filters.</p>
+</section>
+{% endblock %}
+{% block page_js %}<script src="/static/js/library_table.js?v={{ crate::asset_version() }}" defer></script>{% endblock %}
