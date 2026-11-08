@@ -40,6 +40,8 @@
 //! page gates on the cookie `require_auth` middleware. Both call
 //! this same function.
 
+pub mod discovery;
+
 use sqlx::Row;
 use sqlx::SqlitePool;
 

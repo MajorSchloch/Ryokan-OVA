@@ -76,7 +76,19 @@ pub async fn add_series(
     State(state): State<AppState>,
     Json(form): Json<AddSeriesForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let (id, created) = series::upsert(
+    // A lone discovery card does not establish that AniList has only one part.
+    // Check an unresolved legacy match before taking SQLite's writer lock.
+    let mut verified = false;
+    if form.anilist_id > 0
+        && let Some(mid) = form.mal_id.filter(|id| *id > 0)
+        && series::needs_mal_verification(&state.db, form.anilist_id, mid)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        && let Ok(parts) = crate::services::anilist::find_anime_details_by_mal_id(mid).await
+    {
+        verified = matches!(parts.as_slice(), [part] if part.id == form.anilist_id && part.id_mal == Some(mid));
+    }
+    let (id, created) = series::upsert_with_promotion(
         &state.db,
         series::SeriesCore {
             anilist_id: form.anilist_id,
@@ -96,6 +108,7 @@ pub async fn add_series(
             // fetch lands.
             end_year: None,
         },
+        verified,
     )
     .await
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

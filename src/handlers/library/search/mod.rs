@@ -232,7 +232,7 @@ struct SearchResultRow {
     external_href: Option<String>,
     source_label: &'static str,
     /// Pre-serialized JSON of `entry`. Embedded into the `data-entry`
-    /// attribute on the Add button; `static/js/index.js::addSeries`
+    /// attribute on the Add button; `static/js/library_add.js::addSeries`
     /// reads it back via `JSON.parse(btn.dataset.entry)` to seed the
     /// monitor-mode modal without re-querying.
     data_entry_json: String,
@@ -245,7 +245,7 @@ struct AnilistSearchResultsPartial {
 }
 
 /// Pick the user-facing title for a result given a language hint. Mirrors
-/// `getTitleByLang` in `static/js/index.js`: native and romaji fall back
+/// `getTitleByLang` in `static/js/library_add.js`: native and romaji fall back
 /// through the same chain JS used; anything unknown coerces to english.
 fn pick_title<'a>(entry: &'a anilist::AnimeEntry, lang: &str) -> &'a str {
     let pick_first_non_empty = |a: &'a str, b: &'a str, c: &'a str| -> &'a str {

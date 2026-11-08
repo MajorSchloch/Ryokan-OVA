@@ -10,6 +10,16 @@ Three quick toggles at the top of the page:
 - **Next week**: same shape, for the seven days after that (days 8 to 14 from now).
 - **This month**: calendar grid view. Sun-to-Sat rows for the current month; each cell holds the episodes for that day.
 
+## Upcoming anime
+
+Select **Upcoming anime** to browse announced titles, including titles outside your library. The background job checks up to 200 upcoming AniList entries by popularity every 12 hours. It reads the anime's premiere date once per entry. A sequel has its own card.
+
+Exact dates appear in calendar order. The **Announced** section shows a month, season, year, or **Date TBA**, depending on what AniList supplies. A premiere date has no time zone.
+
+Choose a format or **Hide titles in my library**, then select **Apply filters**. **Open in library** opens the tracked entry. **Add to library** uses the library's monitoring dialog and your default upgrade setting. Browsing and filtering only read local data.
+
+The page shows the time of the last successful refresh. If a refresh fails, Ryokan keeps that snapshot and retries after 15 minutes. The iCal feed continues to show library episodes.
+
 ## What you'll see on each episode
 
 - The series cover thumbnail and title.

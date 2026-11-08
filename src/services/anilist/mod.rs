@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 use crate::services::jikan;
 
 pub mod airing_schedules;
+pub mod discovery;
 mod rate_limit;
 use crate::services::http_body::CappedBody;
 #[cfg(any(test, feature = "test-support"))]
@@ -735,38 +736,32 @@ pub async fn search_anime_with_options(
         }
     };
 
-    let entries: Vec<AnimeEntry> = media
-        .iter()
-        .filter_map(|m| {
-            // Drop entries with a missing/non-numeric id rather than
-            // collapsing them to 0. A 0-id record would slip past the
-            // `id > 0` filters elsewhere only by virtue of being equal
-            // to 0 (which is filtered out), but it can still leak into
-            // SEARCH_CACHE for SEARCH_CACHE_TTL and confuse the UI.
-            let id = m["id"].as_i64().filter(|&n| n > 0)?;
-            Some(AnimeEntry {
-                id,
-                id_mal: m["idMal"].as_i64(),
-                title_romaji: m["title"]["romaji"].as_str().unwrap_or("").to_string(),
-                title_english: m["title"]["english"].as_str().unwrap_or("").to_string(),
-                title_native: m["title"]["native"].as_str().unwrap_or("").to_string(),
-                cover_url: m["coverImage"]["large"].as_str().unwrap_or("").to_string(),
-                format: m["format"].as_str().unwrap_or("").to_string(),
-                status: m["status"].as_str().unwrap_or("").to_string(),
-                status_display: prettify_status(m["status"].as_str().unwrap_or("")),
-                episodes: m["episodes"].as_i64().and_then(plausible_episode_count),
-                season_year: m["seasonYear"].as_i64().map(|y| y as i32),
-                source: "anilist".to_string(),
-                average_score: m["averageScore"]
-                    .as_i64()
-                    .filter(|&n| n > 0)
-                    .map(|s| s as i32),
-            })
-        })
-        .collect();
+    let entries: Vec<AnimeEntry> = media.iter().filter_map(parse_search_entry).collect();
 
     search_cache_put(cache_key, entries.clone());
     Ok(entries)
+}
+
+fn parse_search_entry(m: &serde_json::Value) -> Option<AnimeEntry> {
+    let id = m["id"].as_i64().filter(|&n| n > 0)?;
+    Some(AnimeEntry {
+        id,
+        id_mal: m["idMal"].as_i64(),
+        title_romaji: m["title"]["romaji"].as_str().unwrap_or("").to_string(),
+        title_english: m["title"]["english"].as_str().unwrap_or("").to_string(),
+        title_native: m["title"]["native"].as_str().unwrap_or("").to_string(),
+        cover_url: m["coverImage"]["large"].as_str().unwrap_or("").to_string(),
+        format: m["format"].as_str().unwrap_or("").to_string(),
+        status: m["status"].as_str().unwrap_or("").to_string(),
+        status_display: prettify_status(m["status"].as_str().unwrap_or("")),
+        episodes: m["episodes"].as_i64().and_then(plausible_episode_count),
+        season_year: m["seasonYear"].as_i64().map(|y| y as i32),
+        source: "anilist".to_string(),
+        average_score: m["averageScore"]
+            .as_i64()
+            .filter(|&n| n > 0)
+            .map(|s| s as i32),
+    })
 }
 
 /// Shared fallback helper used when AniList is unavailable or force_mal_fallback is set.

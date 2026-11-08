@@ -149,6 +149,42 @@ mod tests {
     use crate::test_support::in_memory_pool;
 
     #[tokio::test]
+    async fn calendar_add_and_release_follow_share_one_entry_and_upgrade_default() {
+        let db = in_memory_pool().await;
+        start(&db, 10, "Original", true, true, false).await.unwrap();
+        let follow = list(&db).await.unwrap().remove(0);
+        let entry: RelatedEntry = serde_json::from_value(serde_json::json!({
+            "id":11,"id_mal":80,"title_romaji":"Sequel","title_english":"","title_native":"",
+            "cover_url":"","format":"TV","status":"NOT_YET_RELEASED","status_display":"Upcoming",
+            "episodes":1,"relation_type":"SEQUEL","media_type":"ANIME"
+        }))
+        .unwrap();
+        let core = series::SeriesCore {
+            anilist_id: entry.id,
+            mal_id: entry.id_mal,
+            title: &entry.title_romaji,
+            title_romaji: &entry.title_romaji,
+            title_english: "",
+            title_native: "",
+            cover_url: "",
+            format: &entry.format,
+            status: &entry.status,
+            episodes: entry.episodes,
+            season_year: None,
+            end_year: None,
+        };
+        let (manual, automatic) =
+            tokio::join!(series::upsert(&db, core), accept(&db, &follow, &entry));
+        let (id, created) = manual.unwrap();
+        assert_ne!(created, automatic.unwrap());
+        let rows = series::get_all(&db).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+        assert!(!rows[0].allow_upgrades);
+        assert!(!accept(&db, &follow, &entry).await.unwrap());
+    }
+
+    #[tokio::test]
     async fn release_follows_retry_exclusions_and_interrupted_adds_without_overriding_a_stop() {
         let db = in_memory_pool().await;
         start(&db, 1, "Source", true, false, false).await.unwrap();

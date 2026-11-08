@@ -270,6 +270,46 @@ pub async fn other_anilist_entry_on_mal_id(
         .find(|row| row.anilist_id > 0 && row.anilist_id != anilist_id))
 }
 
+// Include the current snapshot when upgrading a database that already has one.
+// A discovery page can reveal a split, but cannot prove that it lists every
+// part. Only a positive metadata record attached to the legacy row identifies
+// that row locally. Otherwise manual Add needs a complete MAL reverse lookup.
+const MAL_IDENTITIES: &str = "WITH library_mal_identity AS (
+    SELECT mal_id, CASE WHEN min(al)=max(al) THEN min(al) END AS unique_anilist_id FROM (
+        SELECT mal_id, anilist_id AS al FROM discovery_media_ids
+        UNION ALL SELECT item.value ->> '$.entry.id_mal', item.value ->> '$.entry.id'
+            FROM premiere_discovery, json_each(CASE WHEN json_valid(entries) THEN entries END) item
+            WHERE item.type='object' AND item.value ->> '$.entry.id'>0
+        UNION ALL SELECT mal_id, anilist_id FROM series WHERE anilist_id>0
+        UNION ALL SELECT mal_id, provider_id FROM provider_metadata_cache WHERE provider_id>0
+        UNION ALL SELECT mal_id, provider_id FROM series_metadata_cache WHERE provider_id>0
+    ) WHERE mal_id>0 GROUP BY mal_id
+), legacy_matches AS (
+    SELECT s.id,s.mal_id,m.unique_anilist_id AS candidate,
+           CASE WHEN c.provider_id=m.unique_anilist_id AND c.mal_id=s.mal_id
+                THEN c.provider_id END AS confirmed
+    FROM series s LEFT JOIN library_mal_identity m ON m.mal_id=s.mal_id
+    LEFT JOIN series_metadata_cache c ON c.series_id=s.id
+    WHERE s.anilist_id<0 AND (m.mal_id IS NULL OR m.unique_anilist_id IS NOT NULL)
+)";
+
+/// Batch membership for provider-backed library views. An exact Ryokan row
+/// takes precedence. A MAL-only row represents only its unique known AniList ID.
+pub(crate) async fn library_ids_by_anilist(
+    db: &SqlitePool,
+) -> Result<std::collections::HashMap<i64, i64>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, (i64, i64)>(sqlx::AssertSqlSafe(format!(
+        "{MAL_IDENTITIES} SELECT anilist_id,id FROM series WHERE anilist_id>0
+         UNION ALL SELECT confirmed,min(id) FROM legacy_matches
+         WHERE confirmed IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM series exact WHERE exact.anilist_id=legacy_matches.confirmed)
+         GROUP BY confirmed"
+    )))
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
 /// The library row an entry `(anilist_id, mal_id)` names through its
 /// MAL id. For an entry with a real AniList id only a MAL-fallback row
 /// (negative sentinel AniList id) counts: another positive AniList id
@@ -281,14 +321,27 @@ pub async fn get_by_mal_id_for_entry<'e>(
     anilist_id: i64,
     mal_id: i64,
 ) -> Result<Option<Series>, sqlx::Error> {
+    find_mal_match(db, anilist_id, mal_id, true).await
+}
+
+async fn find_mal_match<'e>(
+    db: impl sqlx::SqliteExecutor<'e>,
+    anilist_id: i64,
+    mal_id: i64,
+    allow_unconfirmed_match: bool,
+) -> Result<Option<Series>, sqlx::Error> {
     if mal_id <= 0 {
         return Ok(None);
     }
-    let row = sqlx::query(
-        "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, allow_pt_upgrades, custom_query_tokens, restrict_to_uploader, alternate_titles, cumulative_prior_episodes, monitor_mode_manual_override, user_score, is_adult, added_at FROM series WHERE mal_id = ? AND (? <= 0 OR anilist_id < 0) ORDER BY id LIMIT 1",
-    )
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "{MAL_IDENTITIES} SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, allow_pt_upgrades, custom_query_tokens, restrict_to_uploader, alternate_titles, cumulative_prior_episodes, monitor_mode_manual_override, user_score, is_adult, added_at FROM series WHERE mal_id=?1 AND (?2<=0 OR id IN (
+            SELECT id FROM legacy_matches WHERE mal_id=?1
+            AND (confirmed=?2 OR (?3 AND (candidate IS NULL OR candidate=?2)))
+        )) ORDER BY id LIMIT 1"
+    )))
     .bind(mal_id)
     .bind(anilist_id)
+    .bind(allow_unconfirmed_match)
     .fetch_optional(db)
     .await?;
 
@@ -411,6 +464,34 @@ pub fn unique_folder_among(
 /// AniList entry's own. Two AniList entries that share a MAL id stay
 /// two series (#292).
 pub async fn upsert(db: &SqlitePool, core: SeriesCore<'_>) -> Result<(i64, bool), sqlx::Error> {
+    upsert_with_promotion(db, core, true).await
+}
+
+/// A manual Add request is not itself proof of a provider mapping. Look up
+/// an unknown pair only if the request could actually promote a legacy row.
+pub(crate) async fn needs_mal_verification(
+    db: &SqlitePool,
+    anilist_id: i64,
+    mal_id: i64,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "{MAL_IDENTITIES} SELECT NOT EXISTS(SELECT 1 FROM series WHERE anilist_id=?2)
+        AND EXISTS(SELECT 1 FROM legacy_matches WHERE mal_id=?1 AND confirmed IS NULL
+                   AND (candidate IS NULL OR candidate=?2))"
+    )))
+    .bind(mal_id)
+    .bind(anilist_id)
+    .fetch_one(db)
+    .await
+}
+
+/// Existing provider-backed callers supply the identity in SeriesCore. The
+/// HTTP handler allows an otherwise unknown pair only after a reverse lookup.
+pub(crate) async fn upsert_with_promotion(
+    db: &SqlitePool,
+    core: SeriesCore<'_>,
+    allow_unconfirmed_match: bool,
+) -> Result<(i64, bool), sqlx::Error> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     if let Some(existing) = get_by_anilist_id(&mut *tx, core.anilist_id).await? {
         sqlx::query(
@@ -451,7 +532,8 @@ pub async fn upsert(db: &SqlitePool, core: SeriesCore<'_>) -> Result<(i64, bool)
     }
 
     if let Some(mid) = core.mal_id
-        && let Some(existing) = get_by_mal_id_for_entry(&mut *tx, core.anilist_id, mid).await?
+        && let Some(existing) =
+            find_mal_match(&mut *tx, core.anilist_id, mid, allow_unconfirmed_match).await?
     {
         if core.anilist_id <= 0 {
             tx.commit().await?;
