@@ -569,18 +569,6 @@ pub fn pick_best(entry: &SeaDexEntry, prefer_subs: bool) -> Option<&SeaDexTorren
 // Magnet construction
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Canonical Nyaa public-tracker set, hardcoded so we don't have to
-/// scrape a magnet link out of the view page. DHT bootstrap alone works
-/// but is slow (tens of seconds to first peer); these five trackers are
-/// stable and shave the cold-start delay.
-const NYAA_TRACKER_SET: &[&str] = &[
-    "http://nyaa.tracker.wf:7777/announce",
-    "udp://open.stealth.si:80/announce",
-    "udp://tracker.opentrackr.org:1337/announce",
-    "udp://exodus.desync.com:6969/announce",
-    "udp://tracker.torrent.eu.org:451/announce",
-];
-
 /// Synthesize a magnet URI from a SeaDex torrent record. All public
 /// `isBest=true` Nyaa entries in SeaDex carry a valid 40-char hex
 /// `infoHash` (verified in the plan's 2595-entry audit), so this never
@@ -595,16 +583,7 @@ const NYAA_TRACKER_SET: &[&str] = &[
 /// fetched; `tr[]` are the Nyaa public tracker set. Callers that only
 /// care about the hash can pass the URI to qBit unchanged.
 pub fn to_magnet_uri(torrent: &SeaDexTorrent) -> String {
-    let mut uri = format!("magnet:?xt=urn:btih:{}", torrent.info_hash);
-    if !torrent.release_group.is_empty() {
-        uri.push_str("&dn=");
-        uri.push_str(&urlencoding::encode(&torrent.release_group));
-    }
-    for tracker in NYAA_TRACKER_SET {
-        uri.push_str("&tr=");
-        uri.push_str(&urlencoding::encode(tracker));
-    }
-    uri
+    super::nyaa::public_magnet_uri(&torrent.info_hash, &torrent.release_group)
 }
 
 /// Return the torrent's Nyaa view URL for display / linking. Thin
@@ -1070,7 +1049,7 @@ mod tests {
         assert!(uri.starts_with("magnet:?xt=urn:btih:abcdef0123456789abcdef0123456789abcdef01"));
         assert!(uri.contains("&dn=MTBB"));
         // Every tracker should be URL-encoded and present.
-        for tr in NYAA_TRACKER_SET {
+        for tr in crate::services::nyaa::NYAA_TRACKER_SET {
             assert!(uri.contains(&urlencoding::encode(tr).into_owned()));
         }
     }
