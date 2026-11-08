@@ -23,3 +23,5 @@ pub mod radarr_compat;
 pub mod scoped_auth;
 pub mod sonarr_compat;
 pub mod webhook;
+
+pub mod release_follows;

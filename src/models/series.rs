@@ -187,8 +187,8 @@ pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<Series>, sqlx:
     Ok(row.map(map_series_row))
 }
 
-pub async fn get_by_anilist_id(
-    db: &SqlitePool,
+pub async fn get_by_anilist_id<'e>(
+    db: impl sqlx::SqliteExecutor<'e>,
     anilist_id: i64,
 ) -> Result<Option<Series>, sqlx::Error> {
     let row = sqlx::query(
@@ -276,8 +276,8 @@ pub async fn other_anilist_entry_on_mal_id(
 /// under the same MAL id is a different series, since AniList splits
 /// some MAL entries in two (#292). An entry that is itself a MAL
 /// fallback (`anilist_id <= 0`) matches any row of its MAL entry.
-pub async fn get_by_mal_id_for_entry(
-    db: &SqlitePool,
+pub async fn get_by_mal_id_for_entry<'e>(
+    db: impl sqlx::SqliteExecutor<'e>,
     anilist_id: i64,
     mal_id: i64,
 ) -> Result<Option<Series>, sqlx::Error> {
@@ -330,8 +330,8 @@ pub struct SeriesCore<'a> {
 /// SQLite's `lower()` does (ASCII only; compare with
 /// `to_ascii_lowercase`): on a case-folding filesystem (macOS, an SMB
 /// share) `Show` and `show` are one folder.
-async fn taken_folders(
-    db: &SqlitePool,
+async fn taken_folders<'e>(
+    db: impl sqlx::SqliteExecutor<'e>,
     except: Option<i64>,
 ) -> Result<std::collections::HashSet<String>, sqlx::Error> {
     let names: Vec<String> =
@@ -361,8 +361,8 @@ fn with_suffix(base: &str, suffix: &str) -> String {
 /// disk, so a series added back finds its old folder. `except` is a row
 /// whose own stored name is being replaced (empty or unusable) and so
 /// doesn't count; `None` for a new row.
-pub async fn unique_series_folder(
-    db: &SqlitePool,
+pub async fn unique_series_folder<'e>(
+    db: impl sqlx::SqliteExecutor<'e>,
     base: String,
     year: Option<i32>,
     except: Option<i64>,
@@ -411,7 +411,8 @@ pub fn unique_folder_among(
 /// AniList entry's own. Two AniList entries that share a MAL id stay
 /// two series (#292).
 pub async fn upsert(db: &SqlitePool, core: SeriesCore<'_>) -> Result<(i64, bool), sqlx::Error> {
-    if let Some(existing) = get_by_anilist_id(db, core.anilist_id).await? {
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    if let Some(existing) = get_by_anilist_id(&mut *tx, core.anilist_id).await? {
         sqlx::query(
             r#"
             UPDATE series
@@ -443,15 +444,17 @@ pub async fn upsert(db: &SqlitePool, core: SeriesCore<'_>) -> Result<(i64, bool)
         .bind(core.end_year)
         .bind(default_monitor_mode(core.status).as_str())
         .bind(existing.id)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         return Ok((existing.id, false));
     }
 
     if let Some(mid) = core.mal_id
-        && let Some(existing) = get_by_mal_id_for_entry(db, core.anilist_id, mid).await?
+        && let Some(existing) = get_by_mal_id_for_entry(&mut *tx, core.anilist_id, mid).await?
     {
         if core.anilist_id <= 0 {
+            tx.commit().await?;
             return Ok((existing.id, false));
         }
         sqlx::query(
@@ -487,16 +490,30 @@ pub async fn upsert(db: &SqlitePool, core: SeriesCore<'_>) -> Result<(i64, bool)
         .bind(core.end_year)
         .bind(default_monitor_mode(core.status).as_str())
         .bind(existing.id)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         return Ok((existing.id, false));
     }
 
+    let mode = default_monitor_mode(core.status);
+    let id = insert_new(&mut tx, core, mode).await?;
+    tx.commit().await?;
+    Ok((id, true))
+}
+
+/// All callers use the same naming rules and upgrade default. The writer
+/// transaction reserves the folder name until the new row is visible.
+pub(super) async fn insert_new(
+    db: &mut sqlx::SqliteConnection,
+    core: SeriesCore<'_>,
+    mode: MonitorMode,
+) -> Result<i64, sqlx::Error> {
     // Folder name from the series-folder template (#124), rendered in
     // the preferred title language. Applied once here and persisted;
     // later template or language changes never rename existing folders.
     let folder = {
-        let prefs = crate::models::config::get_naming_prefs(db).await;
+        let prefs = crate::models::config::get_naming_prefs(&mut *db).await;
         let names = crate::services::naming::SeriesNames {
             title: core.title,
             romaji: core.title_romaji,
@@ -510,7 +527,7 @@ pub async fn upsert(db: &SqlitePool, core: SeriesCore<'_>) -> Result<(i64, bool)
             &names,
         )
     };
-    let folder = unique_series_folder(db, folder, core.season_year, None).await?;
+    let folder = unique_series_folder(&mut *db, folder, core.season_year, None).await?;
 
     // Read the configured upgrade default in the INSERT itself. Every add
     // path uses this function; existing rows and MAL promotions return above
@@ -534,11 +551,11 @@ pub async fn upsert(db: &SqlitePool, core: SeriesCore<'_>) -> Result<(i64, bool)
     .bind(core.season_year)
     .bind(core.end_year)
     .bind(&folder)
-    .bind(default_monitor_mode(core.status).as_str())
+    .bind(mode.as_str())
     .execute(db)
     .await?;
 
-    Ok((result.last_insert_rowid(), true))
+    Ok(result.last_insert_rowid())
 }
 
 /// The TVDB show and season stored for a series (`set_tvdb_ids`), when
