@@ -73,3 +73,5 @@ pub mod source_groups;
 pub mod source_temporal;
 
 pub mod user_score;
+
+pub mod release_follows;

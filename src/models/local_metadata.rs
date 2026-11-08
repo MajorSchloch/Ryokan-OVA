@@ -265,6 +265,7 @@ pub async fn get_incoming_relations_for_provider(
                 episodes: row.get::<Option<i32>, _>("episodes"),
                 relation_type: reverse.to_string(),
                 season_year: row.get::<Option<i32>, _>("season_year"),
+                start_date: None,
                 media_type: row.get("media_type"),
             })
         })
@@ -285,6 +286,7 @@ fn row_to_related(row: sqlx::sqlite::SqliteRow) -> RelatedEntry {
         episodes: row.get::<Option<i32>, _>("episodes"),
         relation_type: row.get("relation_type"),
         season_year: row.get::<Option<i32>, _>("season_year"),
+        start_date: None,
         media_type: row.get("media_type"),
     }
 }

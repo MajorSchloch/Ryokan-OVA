@@ -431,7 +431,7 @@ pub struct NamingPrefs {
     pub series_folder_format: String,
 }
 
-pub async fn get_naming_prefs(db: &SqlitePool) -> NamingPrefs {
+pub async fn get_naming_prefs<'e>(db: impl sqlx::SqliteExecutor<'e>) -> NamingPrefs {
     let row: Option<(String, String)> =
         sqlx::query_as("SELECT title_language, series_folder_format FROM config WHERE id = 1")
             .fetch_optional(db)

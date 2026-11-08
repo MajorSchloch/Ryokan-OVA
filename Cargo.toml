@@ -61,6 +61,10 @@ path = "tests/htmx_grab_bag.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "release_follows_e2e"
+required-features = ["test-support"]
+
+[[test]]
 name = "external_sync_e2e"
 path = "tests/external_sync_e2e.rs"
 required-features = ["test-support"]
