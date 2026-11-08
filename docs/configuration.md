@@ -17,7 +17,7 @@ Saved passwords and keys for other services (download clients, indexers, Jellyfi
 
 ## Download Clients
 
-Pick one or more of qBittorrent, Deluge, Transmission, rTorrent, SABnzbd. Ryokan supports running multiple at once and routes per-grab. Per-client setup notes (URLs, credentials, common gotchas) live on the [Download clients](download-clients.md) page.
+Pick one or more of qBittorrent, Deluge, Transmission, rTorrent, SABnzbd, or NZBGet. Ryokan supports running multiple at once and routes per-grab. Per-client setup notes (URLs, credentials, common gotchas) live on the [Download clients](download-clients.md) page.
 
 The **Default client** checkbox is per-protocol, not global. You can have one default torrent client and one default usenet client coexisting; Nyaa and torznab indexer grabs route to the torrent default, and newznab indexer grabs route to the usenet default.
 

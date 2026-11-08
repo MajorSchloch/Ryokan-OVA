@@ -23,7 +23,7 @@ use crate::models::download_clients::{
 };
 use crate::models::log::LogCategory;
 use crate::services::download_client::{
-    DownloadClient, deluge, qbittorrent, rtorrent, sabnzbd, transmission,
+    DownloadClient, deluge, nzbget, qbittorrent, rtorrent, sabnzbd, transmission,
 };
 use crate::services::logger;
 
@@ -34,12 +34,18 @@ const KIND_QBITTORRENT: &str = "qbittorrent";
 const KIND_DELUGE: &str = "deluge";
 const KIND_TRANSMISSION: &str = "transmission";
 const KIND_RTORRENT: &str = "rtorrent";
+const KIND_NZBGET: &str = "nzbget";
 const KIND_SABNZBD: &str = "sabnzbd";
 
 fn is_known_kind(kind: &str) -> bool {
     matches!(
         kind,
-        KIND_QBITTORRENT | KIND_DELUGE | KIND_TRANSMISSION | KIND_RTORRENT | KIND_SABNZBD
+        KIND_QBITTORRENT
+            | KIND_DELUGE
+            | KIND_TRANSMISSION
+            | KIND_RTORRENT
+            | KIND_SABNZBD
+            | KIND_NZBGET
     )
 }
 
@@ -53,6 +59,7 @@ pub fn kind_label(kind: &str) -> &'static str {
         KIND_DELUGE => "Deluge",
         KIND_TRANSMISSION => "Transmission",
         KIND_RTORRENT => "rTorrent",
+        KIND_NZBGET => "NZBGet",
         KIND_SABNZBD => "SABnzbd",
         _ => "Unknown",
     }
@@ -117,6 +124,17 @@ pub fn copy_for_kind(kind: &str) -> DcKindCopy {
             password_hint: "HTTP Basic auth password matching the username above.",
             label_label: "Label",
             label_hint: "Sets the custom1 field on every added torrent (the ruTorrent label convention). Ryokan filters list_scoped by this tag.",
+        },
+        KIND_NZBGET => DcKindCopy {
+            url_placeholder: "http://localhost:6789",
+            url_hint: "Enter the NZBGet web address. Ryokan appends /jsonrpc.",
+            username_visible: true,
+            username_hint: "Use a control or restricted account.",
+            password_label: "Password",
+            password_type: "password",
+            password_hint: "Enter the password for this NZBGet account.",
+            label_label: "Category",
+            label_hint: "Enter the NZBGet category for Ryokan jobs.",
         },
         KIND_SABNZBD => DcKindCopy {
             url_placeholder: "http://localhost:8080",
@@ -411,7 +429,7 @@ pub struct DownloadClientIdForm {
     path = "/settings/download-clients/upsert",
     tag = "Settings",
     summary = "Create or update a download client",
-    description = "Form-driven upsert for the Connections → Downloads list. Creates a new row when `id` is omitted; updates the row identified by `id` otherwise. Validates kind ∈ {qbittorrent, deluge, transmission, rtorrent, sabnzbd}. Refreshes the in-process pool so the new/edited client is usable on the next grab without a process restart.",
+    description = "Form-driven upsert for the Connections → Downloads list. Creates a new row when `id` is omitted; updates the row identified by `id` otherwise. Validates kind ∈ {qbittorrent, deluge, transmission, rtorrent, sabnzbd, nzbget}. Refreshes the in-process pool so the new/edited client is usable on the next grab without a process restart.",
     responses(
         (status = 303, description = "Redirect back to the Connections tab"),
     ),
@@ -440,6 +458,12 @@ pub async fn settings_download_clients_upsert(
         return crate::handlers::responses::htmx_aware_redirect(
             is_htmx,
             "/settings?tab=downloads&err=Invalid+client+kind",
+        );
+    }
+    if form.kind == KIND_NZBGET && form.label.trim().is_empty() {
+        return crate::handlers::responses::htmx_aware_redirect(
+            is_htmx,
+            "/settings?tab=downloads&err=NZBGet+category+required",
         );
     }
     let url = form.url.trim();
@@ -821,6 +845,14 @@ pub async fn settings_download_clients_test(
             form.username.trim(),
             &password,
             form.label.trim(),
+        )),
+        KIND_NZBGET => std::sync::Arc::new(nzbget::NzbgetClient::new(
+            form.id.unwrap_or_default(),
+            url,
+            form.username.trim(),
+            &password,
+            &form.label,
+            "",
         )),
         KIND_SABNZBD => std::sync::Arc::new(sabnzbd::SabClient::new(
             url,

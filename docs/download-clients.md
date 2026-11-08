@@ -1,6 +1,6 @@
 # Download clients
 
-Ryokan supports five download clients: **qBittorrent**, **Deluge**, **Transmission**, **rTorrent**, and **SABnzbd**. You can run more than one at once and Ryokan routes per-grab; the bundled [quick start](quick-start.md) walks through deploying one alongside Ryokan and Jellyfin in a single compose.
+Ryokan supports **qBittorrent**, **Deluge**, **Transmission**, **rTorrent**, **SABnzbd**, and **NZBGet**. You can run more than one at once and Ryokan routes per-grab; the bundled [quick start](quick-start.md) walks through deploying one alongside Ryokan and Jellyfin in a single compose.
 
 This page is the deeper reference: per-client setup walkthroughs, the fields Ryokan needs, common gotchas, plus how Ryokan picks which client to send each grab to. Use it when you're connecting Ryokan to a client you already have running, or when you're trying to figure out why a connection isn't working.
 
@@ -104,6 +104,18 @@ Pick the tab for your client. Each one covers preparation steps inside the clien
     !!! tip "Disappearing downloads"
         If grabs "vanish" from Ryokan but you can see them downloading in SAB, the category Ryokan was configured to use probably doesn't exist in SAB. Click Test connection to auto-create it; the [troubleshooting page](troubleshooting.md#sab-downloads-disappear-from-ryokan-but-still-download-in-sab) has the full diagnosis.
 
+=== "NZBGet"
+
+    Create a category named `ryokan` in NZBGet. Give each download its own folder. Keep completed jobs in history until Ryokan imports them.
+
+    In **Settings → Download Clients**, add **NZBGet (Usenet)**. For example, enter `http://nzbget:6789`, the username and password for a restricted or control account, and category `ryokan`. Select **Test connection** and save the client. An add-only account cannot read the queue or history.
+
+    If the job ends in `/downloads/ryokan/Release` and Ryokan sees `/mnt/completed/Release`, enter `/mnt/completed` as the download path. Leave the field empty when both programs use the same paths. Ryokan imports from the job folder reported in history. Keep the job name as the folder name if you use a post-processing script.
+
+    Select NZBGet on a **Newznab** indexer to route its NZBs there. You can keep SABnzbd as the Usenet default. Ryokan checks the category and its own job key before it acts. The client’s **Remove completed downloads** and **Remove failed downloads** switches control automatic removal.
+
+    The client uses HTTP Basic authentication and JSON-RPC. [Official NZBGet API reference](https://nzbget.com/documentation/api/)
+
 ## Seeding rules and removal after import
 
 An indexer row can carry a **Seed Ratio** and a **Seed Time** (minutes). Ryokan passes them to the download client when it adds a grab from that indexer, and its own delete actions (deleting an episode, replacing it with an upgrade) leave such a torrent in the client so the client's rules decide when seeding ends. The one exception is a torrent imported in Move mode, which cannot seed once its file has moved. What the client does with the rules, and what "finished seeding" means to it, differs per client:
@@ -112,7 +124,7 @@ An indexer row can carry a **Seed Ratio** and a **Seed Time** (minutes). Ryokan 
 - **Transmission**: the ratio becomes a per-torrent ratio limit. Transmission has no total seeding-time limit, so Seed Time becomes its idle limit: the torrent stops after that many minutes without upload activity, which is never earlier than the same number of minutes of seeding and can be later while peers are still pulling. Finished means Transmission stopped the torrent at its ratio or idle limit.
 - **Deluge**: the ratio becomes a per-torrent stop ratio. Deluge has no seeding-time limit, so Seed Time is ignored. Finished means Deluge paused the torrent at its stop ratio.
 - **rTorrent**: has no per-torrent limits at all, so neither rule is applied and Ryokan logs a warning for each such grab. Configure a ratio group in `.rtorrent.rc` instead; the group's rules apply to every item in it. Finished means the ratio group closed the item. A torrent you stopped in ruTorrent stays open and is left alone.
-- **SABnzbd**: nothing seeds. A job leaves SAB's history as soon as Ryokan has imported it.
+- **SABnzbd and NZBGet** do not seed. Enable **Remove completed downloads** to remove an imported job from history.
 
 Each client row has a **Remove completed downloads** box, on by default. With it on, a torrent is removed from that client, files included, once it has been imported and the client reports it finished; usenet jobs and Move-mode torrents go right after import. Ryokan checks every five minutes. The library keeps its own copy in every mode. Partial and failed imports, and torrents you paused by hand, stay.
 

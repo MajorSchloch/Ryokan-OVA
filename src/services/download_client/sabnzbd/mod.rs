@@ -122,7 +122,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Deluge / Transmission UX) would land in reqwest as scheme=
 /// `localhost`, path=`8085` and the HTTP request builder would
 /// reject the eventual `/api` URL with a cryptic builder error.
-fn normalize_base_url(base_url: &str) -> String {
+pub(super) fn normalize_base_url(base_url: &str) -> String {
     let trimmed = base_url.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return String::new();
