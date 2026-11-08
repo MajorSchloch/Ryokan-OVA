@@ -3,6 +3,7 @@ use crate::services::anilist::AnimeDetail;
 
 fn detail_with_titles(english: &str, romaji: &str) -> AnimeDetail {
     AnimeDetail {
+        release_date: None,
         is_adult: false,
         id: 1,
         id_mal: None,
@@ -41,6 +42,7 @@ fn related(
     episodes: Option<i32>,
 ) -> RelatedEntry {
     RelatedEntry {
+        release_date: None,
         id,
         id_mal: None,
         title_romaji: romaji.to_string(),

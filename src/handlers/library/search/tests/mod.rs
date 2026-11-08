@@ -8,6 +8,7 @@ use crate::services::auto_expand::{AutoExpandGrabContext, expand_from_files};
 
 fn empty_anime_detail(id: i64, title_english: &str) -> anilist::AnimeDetail {
     anilist::AnimeDetail {
+        release_date: None,
         is_adult: false,
         id,
         id_mal: None,
@@ -48,6 +49,7 @@ fn test_grab_ctx() -> AutoExpandGrabContext {
 
 fn related_entry(id: i64, title_english: &str, episodes: Option<i32>) -> anilist::RelatedEntry {
     anilist::RelatedEntry {
+        release_date: None,
         id,
         id_mal: None,
         title_romaji: title_english.to_string(),

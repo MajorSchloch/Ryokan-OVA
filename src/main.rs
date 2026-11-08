@@ -770,6 +770,7 @@ async fn main() {
             "/library/review",
             get(handlers::library::pages::needs_review_page),
         )
+        .route("/library/groups", get(handlers::library::groups::page))
         .route("/library/recycle", get(handlers::library::recycle::page))
         // #122 manual import wizard. Form-POST + server render; the
         // per-group override controls swap a single card via HTMX.

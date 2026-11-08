@@ -850,6 +850,7 @@
         display: none;
     }
     .library-scope-tools {
+        flex-wrap: wrap;
         width: 100%;
         margin-left: 0;
     }
@@ -1146,3 +1147,48 @@
 
 /* The sort-direction button sits between a select and a text button;
    a circle there reads as a stray, so it takes the control radius. */
+
+/* The group controls change visibility locally, including without JavaScript. */
+.group-controls, .group-entry-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+}
+.group-controls { margin-bottom: 16px; }
+.library-group {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 12px;
+    overflow-wrap: anywhere;
+}
+.library-group summary { cursor: pointer; padding: 16px; }
+.library-group summary span, .group-entry-meta, .group-relation {
+    color: var(--text-dim);
+    font-size: 0.875rem;
+}
+.library-group summary span { margin-left: 8px; }
+.library-group ol { list-style: none; margin: 0; padding: 0 16px; }
+.library-group li { border-top: 1px solid var(--border); padding: 12px 0; }
+.group-entry-heading { justify-content: flex-start; }
+.group-entry-heading a { font-weight: 600; }
+.group-ownership {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    align-items: center;
+    margin: 6px 0;
+}
+.group-ownership strong {
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    background: var(--dim-bg);
+    font-size: 0.875rem;
+}
+.outside-entry > .group-ownership strong {
+    background: var(--yellow-bg);
+    color: var(--yellow);
+}
+.library-groups:not(:has(#group-missing:checked)) .outside-entry { display: none; }

@@ -253,6 +253,7 @@ pub async fn get_incoming_relations_for_provider(
                 return None;
             }
             Some(RelatedEntry {
+                release_date: None,
                 id: source_id,
                 id_mal: source_mal,
                 title_romaji: row.get("title_romaji"),
@@ -271,8 +272,9 @@ pub async fn get_incoming_relations_for_provider(
         .collect())
 }
 
-fn row_to_related(row: sqlx::sqlite::SqliteRow) -> RelatedEntry {
+pub(crate) fn row_to_related(row: sqlx::sqlite::SqliteRow) -> RelatedEntry {
     RelatedEntry {
+        release_date: None,
         id: row.get("related_provider_id"),
         id_mal: row.get::<Option<i64>, _>("related_mal_id"),
         title_romaji: row.get("title_romaji"),

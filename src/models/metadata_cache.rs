@@ -176,6 +176,7 @@ mod tests {
 
     fn detail(id: i64) -> AnimeDetail {
         AnimeDetail {
+            release_date: None,
             is_adult: false,
             id,
             id_mal: None,

@@ -77,6 +77,7 @@ fn nyaa_row(info_hash: &str, view_id: u64, title: &str, size: &str, seeders: i32
 
 fn detail_for(id: i64, romaji: &str) -> AnimeDetail {
     AnimeDetail {
+        release_date: None,
         is_adult: false,
         id,
         id_mal: None,
