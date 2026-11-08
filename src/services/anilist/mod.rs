@@ -830,6 +830,9 @@ pub struct RelatedEntry {
     pub episodes: Option<i32>,
     pub relation_type: String,
     pub season_year: Option<i32>,
+    /// Earliest possible first air date in the AniList relation.
+    #[serde(default)]
+    pub start_date: Option<String>,
     pub media_type: String,
 }
 
@@ -1073,6 +1076,15 @@ fn build_media_selector_variables(
     variables
 }
 
+// A partial date proves eligibility only if the whole period is on or after
+// the follow date. An announced title can also qualify by its status.
+fn relation_start_date(value: &serde_json::Value) -> Option<String> {
+    let year = value["year"].as_i64()?.try_into().ok()?;
+    let month = value["month"].as_u64().unwrap_or(1).try_into().ok()?;
+    let day = value["day"].as_u64().unwrap_or(1).try_into().ok()?;
+    chrono::NaiveDate::from_ymd_opt(year, month, day).map(|d| d.to_string())
+}
+
 /// The `Media` field selection every single-entry detail fetch asks
 /// for, shared by the by-id and by-MAL-id query shapes.
 const MEDIA_DETAIL_FIELDS: &str = r#"
@@ -1115,6 +1127,7 @@ const MEDIA_DETAIL_FIELDS: &str = r#"
                 episodes
                 coverImage { large }
                 type
+                startDate { year month day }
                 seasonYear
             }
         }
@@ -1305,6 +1318,7 @@ fn parse_media_node(m: &serde_json::Value) -> Option<AnimeDetail> {
                         episodes: node["episodes"].as_i64().and_then(plausible_episode_count),
                         relation_type: edge["relationType"].as_str().unwrap_or("").to_string(),
                         season_year: node["seasonYear"].as_i64().map(|y| y as i32),
+                        start_date: relation_start_date(&node["startDate"]),
                         media_type: node["type"].as_str().unwrap_or("").to_string(),
                     })
                 })
@@ -1486,6 +1500,7 @@ pub async fn get_anime_details_batch(ids: &[i64]) -> Result<HashMap<i64, AnimeDe
                                         episodes
                                         coverImage {{ large }}
                                         type
+                                        startDate {{ year month day }}
                                         seasonYear
                                     }}
                                 }}

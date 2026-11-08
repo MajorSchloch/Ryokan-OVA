@@ -288,6 +288,7 @@ fn default_relation() -> anilist::RelatedEntry {
         episodes: None,
         relation_type: String::new(),
         season_year: None,
+        start_date: None,
         media_type: String::new(),
     }
 }

@@ -30,3 +30,5 @@ pub mod user;
 pub mod migrations;
 
 pub use migrations::migrate;
+
+pub mod release_follows;

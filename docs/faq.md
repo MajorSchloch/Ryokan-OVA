@@ -17,6 +17,16 @@ No. Different language (Rust vs C#), different architecture, different release e
 
 No. Ryokan only manages anime in the current 1.x line. Manga, light novels, and webtoons were going to be the focus of 2.x, but that work has been pushed back to concentrate on making Ryokan a true Sonarr replacement for anime first. They need different metadata sources, naming conventions, and file layouts, so they won't be grafted on partially.
 
+## How do I follow future releases after I remove a series?
+
+Open the anime's details page. Select **Follow future releases**, choose the formats and relationships you want, and select **Start follow**. Open **Library → Release follows** to edit or stop a follow, even after you remove the series.
+
+Ryokan saves the UTC date when you start the follow. It checks AniList when you save, at startup, and every six hours. An upcoming sequel qualifies even if AniList announced it before you started the follow. For a sequel that has aired, its first air date must be on or after your follow date. If AniList gives only a month or year, the whole period must qualify.
+
+TV series, short TV series, and online series qualify by default. Movies and OVAs have separate switches. **Alternative versions** lets Ryokan follow that relationship. An alternative movie requires both **Movies** and **Alternative versions**. An excluded sequel movie can still lead Ryokan to a qualifying TV season.
+
+Ryokan monitors all episodes of each new entry and applies your default upgrade setting. It keeps the monitoring and upgrade settings of existing entries and skips titles on your sync exclusion list. A follow never searches the original episodes. RSS handles new releases. Episodes that aired during downtime are available for search on the Wanted page.
+
 ## Can I run multiple Ryokan instances?
 
 Technically yes, but they don't coordinate. Each instance has its own database, its own grab history, its own AniList / MAL link state. Two instances pointed at the same AniList account share that account's per-token rate-limit budget (which you'll trip), so this isn't a "scale horizontally" pattern; it's "two completely separate libraries that happen to share metadata sources".
