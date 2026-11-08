@@ -15,6 +15,7 @@ It monitors new entries that start on or after your follow date. Following a tit
     <h3><a href="/series/{{ follow.anilist_id }}?by=anilist">{{ follow.title }}</a></h3>
     {% if follow.id > 0 %}
     <div class="follow-check">
+        <a href="/library/groups/{{ follow.anilist_id }}/preview">Preview franchise</a>
         <p>Followed since <time datetime="{{ follow.started_on }}">{{ follow.started_on }}</time> (UTC)</p>
         {% if let Some(at) = follow.last_success_at %}
         <p>Last successful AniList check: <time datetime="{{ at.replace(" ", "T") }}Z">{{ at }} UTC</time></p>
