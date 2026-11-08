@@ -31,6 +31,7 @@ use super::{Episode, ErrorTemplate, IndexTemplate, RelationCard, RelationGroup, 
 
 #[derive(Default, serde::Deserialize)]
 pub struct LibraryIndexQuery {
+    pub view: Option<String>,
     /// #62 — `?list=<name>` filter. When present + non-empty,
     /// the index handler keeps only series whose
     /// `series_custom_lists` rows match. Echoed back to the
@@ -57,7 +58,20 @@ pub struct LibraryIndexQuery {
 pub async fn index(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<LibraryIndexQuery>,
-) -> Html<String> {
+    headers: axum::http::HeaderMap,
+    axum_htmx::HxRequest(boosted): axum_htmx::HxRequest,
+) -> axum::response::Response {
+    if q.view.is_none() && q.list.is_none() && q.sort.is_none() && q.search.is_none() {
+        let path = match crate::handlers::auth::cookie_value(&headers, "library_view") {
+            Some("groups") => Some("/library/groups"),
+            Some("table") => Some("/library/table"),
+            _ => None,
+        };
+        if let Some(path) = path {
+            return crate::handlers::responses::htmx_aware_redirect(boosted, path);
+        }
+    }
+
     // Fetch the library list and config concurrently — they're independent
     // and each was previously serialized on the other. `get_all` is the
     // larger query of the two so this shaves the smaller query's RTT off
@@ -371,7 +385,11 @@ pub async fn index(
         total_count,
         airing_count,
     };
-    Html(template.render().unwrap_or_default())
+    (
+        super::view_cookie("poster"),
+        Html(template.render().unwrap_or_default()),
+    )
+        .into_response()
 }
 
 /// `/library/review` used to render its own page. It's now a System

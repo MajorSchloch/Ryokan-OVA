@@ -3,13 +3,16 @@
 use crate::{
     models::{config, local_metadata, series},
     services::{
-        anilist::{AnimeDetail, RelatedEntry, plausible_episode_count},
+        anilist::{AnimeDetail, RelatedEntry},
         library_link::pick_title,
-        media,
     },
 };
 use askama::Template;
-use axum::{extract::State, http::StatusCode, response::Html};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{Html, IntoResponse, Response},
+};
 use futures_util::TryStreamExt;
 use sqlx::{Row, SqlitePool};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -310,43 +313,18 @@ async fn catalog(db: &SqlitePool, lang: &str) -> Result<Catalog, sqlx::Error> {
     Ok(catalog)
 }
 
-async fn file_status(
-    root: &str,
-    root_available: bool,
-    s: &series::Series,
-    aired: &[i32],
-) -> String {
-    use std::path::Path;
-    if !root_available || !media::usable_folder_name(&s.folder_name) {
+fn file_status(facts: &super::inventory::Inventory) -> String {
+    let Some(count) = facts.on_disk else {
         return "File status unknown".into();
-    }
-    let files = match tokio::fs::metadata(Path::new(root).join(&s.folder_name)).await {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Ok(_) => match media::scan_series_folder_checked(root, &s.folder_name).await {
-            Ok(files) => files,
-            Err(_) => return "File status unknown".into(),
-        },
-        Err(_) => return "File status unknown".into(),
     };
-    let have: HashSet<_> = files.iter().flat_map(|f| f.episodes()).collect();
-    let total = s.episodes.and_then(|n| plausible_episode_count(n.into()));
-    let missing: Vec<_> = match (s.status.as_str(), total) {
-        ("FINISHED" | "FINISHED_AIRING", Some(total)) => {
-            (1..=total).filter(|n| !have.contains(n)).collect()
-        }
-        _ => aired
-            .iter()
-            .copied()
-            .filter(|ep| !have.contains(ep))
-            .collect(),
-    };
-    if let [episode] = missing.as_slice() {
+    let missing = facts.missing.as_deref().unwrap_or_default();
+    if let [episode] = missing {
         return format!("Episode {episode} missing on disk");
     }
     if !missing.is_empty() {
         return format!("{} episodes missing on disk", missing.len());
     }
-    match have.len() {
+    match count {
         0 => "No episode files on disk".into(),
         1 => "1 episode on disk".into(),
         n => format!("{n} episodes on disk"),
@@ -357,19 +335,7 @@ async fn load(db: &SqlitePool) -> Result<GroupsPage, sqlx::Error> {
     let cfg = config::get_config(db).await?.unwrap_or_default();
     let mut catalog = catalog(db, &cfg.title_language).await?;
     let library = series::get_all(db).await?;
-    let root_available = tokio::fs::read_dir(&cfg.media_root).await.is_ok();
-    let mut aired: HashMap<i64, Vec<i32>> = HashMap::new();
-    for (id, ep) in sqlx::query_as::<_, (i64, i32)>(
-        "SELECT series_id, episode_number FROM series_episode_metadata
-        WHERE episode_number > 0 AND length(aired) >= 10 AND substr(aired,1,10) <= date('now')
-        UNION SELECT series_id, episode FROM episode_airings WHERE airing_at <= unixepoch()",
-    )
-    .fetch_all(db)
-    .await?
-    {
-        aired.entry(id).or_default().push(ep);
-    }
-
+    let inventory = super::inventory::load(db, &cfg.media_root, &library).await?;
     let positive: HashSet<_> = library
         .iter()
         .filter(|s| s.anilist_id > 0)
@@ -405,13 +371,7 @@ async fn load(db: &SqlitePool) -> Result<GroupsPage, sqlx::Error> {
         if e.date.is_empty() {
             e.date = date_label(None, s.season_year);
         }
-        e.files = file_status(
-            &cfg.media_root,
-            root_available,
-            &s,
-            aired.get(&s.id).map(Vec::as_slice).unwrap_or_default(),
-        )
-        .await;
+        e.files = file_status(&inventory[&s.id]);
     }
     Ok(GroupsPage {
         page: "library",
@@ -420,9 +380,7 @@ async fn load(db: &SqlitePool) -> Result<GroupsPage, sqlx::Error> {
     })
 }
 
-pub async fn page(
-    State(db): State<SqlitePool>,
-) -> Result<Html<String>, (StatusCode, &'static str)> {
+pub async fn page(State(db): State<SqlitePool>) -> Result<Response, (StatusCode, &'static str)> {
     let page = load(&db).await.map_err(|err| {
         tracing::error!("Cannot read library groups: {err}");
         (
@@ -430,12 +388,14 @@ pub async fn page(
             "Could not read library groups.",
         )
     })?;
-    page.render().map(Html).map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Could not display library groups.",
-        )
-    })
+    page.render()
+        .map(|html| (super::view_cookie("groups"), Html(html)).into_response())
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not display library groups.",
+            )
+        })
 }
 
 #[cfg(test)]

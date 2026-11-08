@@ -406,41 +406,79 @@ pub async fn scan_series_folder_checked(
     }
     let root = Path::new(media_root).join(folder_name);
     tokio::task::spawn_blocking(move || {
-        fn walk(
-            dir: &Path,
-            root: &Path,
-            depth: usize,
-            visited: &mut HashSet<PathBuf>,
-            files: &mut Vec<EpisodeFile>,
-        ) -> std::io::Result<()> {
-            let real = dir.canonicalize()?;
-            if !visited.insert(real) {
-                return Ok(());
-            }
-            if depth > MAX_SCAN_DEPTH {
-                return Err(std::io::Error::other("library scan depth exceeded"));
-            }
-            for entry in std::fs::read_dir(dir)? {
-                let path = entry?.path();
-                if path.metadata()?.is_dir() {
-                    walk(&path, root, depth + 1, visited, files)?;
-                } else if is_library_file(&path)
-                    && let Some(ep) = parse_episode_file(&path, root)
-                    && !ep.is_special
-                    && ep.is_own_season()
-                {
-                    files.push(ep);
-                }
-            }
-            Ok(())
-        }
-        let mut files = Vec::new();
-        walk(&root, &root, 0, &mut HashSet::new(), &mut files)
-            .map_err(|e| format!("Import protection: cannot scan {}: {e}", root.display()))?;
-        Ok(files)
+        scan_checked(&root)
+            .map_err(|e| format!("Import protection: cannot scan {}: {e}", root.display()))
     })
     .await
     .map_err(|e| format!("Import protection: library scan failed: {e}"))?
+}
+
+fn scan_checked(root: &Path) -> std::io::Result<Vec<EpisodeFile>> {
+    fn walk(
+        dir: &Path,
+        root: &Path,
+        depth: usize,
+        visited: &mut HashSet<PathBuf>,
+        files: &mut Vec<EpisodeFile>,
+    ) -> std::io::Result<()> {
+        let real = dir.canonicalize()?;
+        if !visited.insert(real) {
+            return Ok(());
+        }
+        if depth > MAX_SCAN_DEPTH {
+            return Err(std::io::Error::other("library scan depth exceeded"));
+        }
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.metadata()?.is_dir() {
+                walk(&path, root, depth + 1, visited, files)?;
+            } else if is_library_file(&path)
+                && let Some(ep) = parse_episode_file(&path, root)
+                && !ep.is_special
+                && ep.is_own_season()
+            {
+                files.push(ep);
+            }
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    walk(root, root, 0, &mut HashSet::new(), &mut files)?;
+    Ok(files)
+}
+
+/// Read only the named library folders. A missing folder under a readable root
+/// is empty. An incomplete directory listing leaves its slot count unknown.
+pub(crate) async fn library_slots(
+    root: String,
+    folders: HashSet<String>,
+) -> std::collections::HashMap<String, HashSet<i32>> {
+    tokio::task::spawn_blocking(move || {
+        let mut slots = std::collections::HashMap::new();
+        let root = Path::new(&root);
+        if std::fs::read_dir(root).is_err() {
+            return slots;
+        }
+        for folder in folders.into_iter().filter(|f| usable_folder_name(f)) {
+            let path = root.join(&folder);
+            let episodes = match path.symlink_metadata() {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
+                Ok(_) => match scan_checked(&path) {
+                    Ok(files) => files
+                        .iter()
+                        .flat_map(EpisodeFile::episodes)
+                        .filter(|n| *n > 0)
+                        .collect(),
+                    Err(_) => continue,
+                },
+                Err(_) => continue,
+            };
+            slots.insert(folder, episodes);
+        }
+        slots
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// Batch variant of `scan_series_folder` for the library index's
