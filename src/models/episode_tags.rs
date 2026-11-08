@@ -389,14 +389,28 @@ pub async fn skip_protected_import(
     release: &str,
 ) -> Result<(), sqlx::Error> {
     let mut tx = db.begin().await?;
+    finish_pending_attempt(&mut tx, series_id, ep, release, "skipped").await?;
+    tx.commit().await
+}
+
+/// End this release's pending episode attempt without disturbing completed
+/// files or tags that belong to another release.
+pub(super) async fn finish_pending_attempt(
+    db: &mut sqlx::SqliteConnection,
+    series_id: i64,
+    ep: i32,
+    release: &str,
+    history_state: &str,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "UPDATE episode_grab_history SET state = 'skipped'
+        "UPDATE episode_grab_history SET state = ?
         WHERE series_id = ? AND episode_number = ? AND release_title = ? AND state = 'grabbed'",
     )
+    .bind(history_state)
     .bind(series_id)
     .bind(ep)
     .bind(release)
-    .execute(&mut *tx)
+    .execute(&mut *db)
     .await?;
     sqlx::query(
         "DELETE FROM episode_quality_tags WHERE series_id = ? AND episode_number = ?
@@ -405,9 +419,9 @@ pub async fn skip_protected_import(
     .bind(series_id)
     .bind(ep)
     .bind(release)
-    .execute(&mut *tx)
+    .execute(&mut *db)
     .await?;
-    tx.commit().await
+    Ok(())
 }
 
 /// Only after placement succeeds may a preserved completed row describe the

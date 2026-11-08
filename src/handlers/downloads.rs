@@ -87,6 +87,7 @@ fn state_label(kind: DownloadItemState) -> &'static str {
         DownloadItemState::CheckingSeed => "Checking",
         DownloadItemState::Paused | DownloadItemState::PausedComplete => "Paused",
         DownloadItemState::Warning => "Warning",
+        DownloadItemState::Removed => "Removed",
         DownloadItemState::Errored => "Error",
     }
 }
@@ -103,7 +104,9 @@ fn state_badge_class(kind: DownloadItemState) -> &'static str {
         | DownloadItemState::SeedingStalled
         | DownloadItemState::PausedComplete => "log-badge-info",
         DownloadItemState::Errored => "log-badge-error",
-        DownloadItemState::CheckingDownload | DownloadItemState::CheckingSeed => "",
+        DownloadItemState::CheckingDownload
+        | DownloadItemState::CheckingSeed
+        | DownloadItemState::Removed => "",
     }
 }
 
@@ -454,7 +457,7 @@ mod tests {
                 Downloading | DownloadingStalled | DownloadingQueued | CheckingDownload => {}
                 Seeding | SeedingStalled | SeedingQueued | CheckingSeed => {}
                 Paused | PausedComplete => {}
-                Warning | Errored => {}
+                Warning | Removed | Errored => {}
             }
         }
         vec![
@@ -468,6 +471,7 @@ mod tests {
             (CheckingSeed, "Checking", "", false),
             (Paused, "Paused", "log-badge-warn", true),
             (PausedComplete, "Paused", "log-badge-info", true),
+            (Removed, "Removed", "", false),
             (Warning, "Warning", "log-badge-warn", false),
             (Errored, "Error", "log-badge-error", false),
         ]

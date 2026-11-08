@@ -487,6 +487,8 @@ pub enum DownloadItemState {
     /// waits on it (neither complete nor errored), so a dropped mount
     /// never turns into a blocklisted grab whose data is deleted.
     Warning,
+    /// The user cancelled the job in the download client.
+    Removed,
     /// The client's own failed-download verdict (SABnzbd `Failed`,
     /// qBittorrent `error`): the grab fails, the release is
     /// blocklisted, the item is removed with its data, and a
@@ -1041,6 +1043,7 @@ mod tests {
                 DownloadItemState::Paused => "paused",
                 DownloadItemState::PausedComplete => "paused-complete",
                 DownloadItemState::Warning => "warning",
+                DownloadItemState::Removed => "removed",
                 DownloadItemState::Errored => "errored",
             }
         }
@@ -1057,6 +1060,7 @@ mod tests {
             Paused,
             PausedComplete,
             Warning,
+            Removed,
             Errored,
         ];
         list.into_iter().map(|v| (v, _slug(v))).collect()
