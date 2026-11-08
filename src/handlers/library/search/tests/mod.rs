@@ -60,6 +60,7 @@ fn related_entry(id: i64, title_english: &str, episodes: Option<i32>) -> anilist
         episodes,
         relation_type: "SIDE_STORY".to_string(),
         season_year: Some(2014),
+        start_date: None,
         media_type: "ANIME".to_string(),
     }
 }

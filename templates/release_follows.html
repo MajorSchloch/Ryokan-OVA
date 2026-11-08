@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %} - Release follows{% endblock %}
+{% block content %}
+<div class="page-header recycle-header">
+    <h2>Release follows</h2>
+    <a href="/" class="btn btn-secondary">Back to library</a>
+</div>
+<p class="cf-section-desc">Ryokan checks AniList for sequels when you save a follow, at startup, and every six hours.
+It monitors new entries that start on or after your follow date. Following a title does not search its episodes.</p>
+{% if follows.is_empty() %}
+<p>To start a follow, open an anime and select <strong>Follow future releases</strong>.</p>
+{% endif %}
+{% for follow in follows %}
+<section class="cf-section">
+    <h3><a href="/series/{{ follow.anilist_id }}?by=anilist">{{ follow.title }}</a></h3>
+    {% if follow.id > 0 %}<p>Followed since <time datetime="{{ follow.started_on }}">{{ follow.started_on }}</time> (UTC)</p>{% endif %}
+    <form method="post" action="/library/follows{% if follow.id > 0 %}/{{ follow.id }}{% endif %}">
+        {% if follow.id == 0 %}
+        <input type="hidden" name="anilist_id" value="{{ follow.anilist_id }}">
+        <input type="hidden" name="title" value="{{ follow.title }}">
+        {% endif %}
+        <p id="options-{{ follow.id }}" class="settings-label">Include with TV and online series</p>
+        <div class="setting-rows" role="group" aria-labelledby="options-{{ follow.id }}">
+            <label class="setting-row">
+                <span class="setting-row-title">Movies</span>
+                <input type="checkbox" name="movies" value="true" {% if follow.movies %}checked{% endif %}>
+            </label>
+            <label class="setting-row">
+                <span class="setting-row-title">OVAs</span>
+                <input type="checkbox" name="ovas" value="true" {% if follow.ovas %}checked{% endif %}>
+            </label>
+            <label class="setting-row">
+                <span class="setting-row-title">Alternative versions</span>
+                <input type="checkbox" name="alternatives" value="true" {% if follow.alternatives %}checked{% endif %}>
+            </label>
+        </div>
+        <button class="btn btn-primary" type="submit">{% if follow.id == 0 %}Start follow{% else %}Save settings{% endif %}</button>
+        {% if follow.id > 0 %}<button class="btn btn-secondary" type="submit" form="stop-{{ follow.id }}">Stop following</button>{% endif %}
+    </form>
+    {% if follow.id > 0 %}<form id="stop-{{ follow.id }}" method="post" action="/library/follows/{{ follow.id }}/stop"></form>{% endif %}
+</section>
+{% endfor %}
+{% endblock %}

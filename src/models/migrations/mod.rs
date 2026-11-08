@@ -3066,6 +3066,29 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Follows survive removal of the source series. A receipt survives
+    // removal of a discovered series, so a later check respects the removal.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS release_follows (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        anilist_id INTEGER NOT NULL UNIQUE CHECK (anilist_id > 0),
+        title TEXT NOT NULL,
+        started_on TEXT NOT NULL DEFAULT (date('now')),
+        movies BOOLEAN NOT NULL, ovas BOOLEAN NOT NULL, alternatives BOOLEAN NOT NULL
+    )",
+    )
+    .execute(db)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS followed_releases (
+        follow_id INTEGER NOT NULL REFERENCES release_follows(id) ON DELETE CASCADE,
+        anilist_id INTEGER NOT NULL,
+        PRIMARY KEY (follow_id, anilist_id)
+    )",
+    )
+    .execute(db)
+    .await?;
+
     // Watch-list sync exclusions (Sonarr's import-list exclusions): a
     // series removed with "keep it off my watch-list sync" is not added
     // again by the AniList / MAL sync until the row is deleted.

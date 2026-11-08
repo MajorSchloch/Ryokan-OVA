@@ -53,6 +53,7 @@ fn related(
         episodes,
         relation_type: relation_type.to_string(),
         season_year: None,
+        start_date: None,
         media_type: "ANIME".to_string(),
     }
 }
