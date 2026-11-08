@@ -818,6 +818,9 @@ fn compose_search_error(anilist_reason: Option<&str>, jikan_err: &str) -> String
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RelatedEntry {
+    /// AniList premiere date, with the precision supplied by the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_date: Option<String>,
     pub id: i64,
     pub id_mal: Option<i64>,
     pub title_romaji: String,
@@ -864,6 +867,9 @@ fn de_plausible_count<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<i
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AnimeDetail {
+    /// AniList premiere date, with the precision supplied by the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_date: Option<String>,
     pub id: i64,
     pub id_mal: Option<i64>,
     pub title_romaji: String,
@@ -1073,6 +1079,18 @@ fn build_media_selector_variables(
     variables
 }
 
+fn premiere_date(date: &serde_json::Value) -> Option<String> {
+    let year = date["year"].as_u64().filter(|y| (1..=9999).contains(y))?;
+    let Some(month) = date["month"].as_u64().filter(|m| (1..=12).contains(m)) else {
+        return Some(format!("{year:04}"));
+    };
+    let Some(day) = date["day"].as_u64() else {
+        return Some(format!("{year:04}-{month:02}"));
+    };
+    chrono::NaiveDate::from_ymd_opt(year as i32, month as u32, day.try_into().ok()?)
+        .map(|d| d.to_string())
+}
+
 /// The `Media` field selection every single-entry detail fetch asks
 /// for, shared by the by-id and by-MAL-id query shapes.
 const MEDIA_DETAIL_FIELDS: &str = r#"
@@ -1089,6 +1107,7 @@ const MEDIA_DETAIL_FIELDS: &str = r#"
     duration
     season
     seasonYear
+    startDate { year month day }
     endDate { year }
     description(asHtml: true)
     genres
@@ -1115,6 +1134,7 @@ const MEDIA_DETAIL_FIELDS: &str = r#"
                 episodes
                 coverImage { large }
                 type
+                startDate { year month day }
                 seasonYear
             }
         }
@@ -1268,7 +1288,7 @@ async fn fetch_media_detail(selector: MediaSelector) -> Result<Vec<AnimeDetail>,
 /// missing or non-numeric — every downstream consumer requires `id > 0`,
 /// so a 0-id placeholder would just leak into caches and confuse later
 /// `id > 0` filters into thinking the entry is a Jikan-fallback row.
-fn parse_media_node(m: &serde_json::Value) -> Option<AnimeDetail> {
+pub(crate) fn parse_media_node(m: &serde_json::Value) -> Option<AnimeDetail> {
     let streaming_episodes = m["streamingEpisodes"]
         .as_array()
         .map(|arr| {
@@ -1290,6 +1310,7 @@ fn parse_media_node(m: &serde_json::Value) -> Option<AnimeDetail> {
                 .filter_map(|edge| {
                     let node = &edge["node"];
                     Some(RelatedEntry {
+                        release_date: premiere_date(&node["startDate"]),
                         id: node["id"].as_i64()?,
                         id_mal: node["idMal"].as_i64(),
                         title_romaji: node["title"]["romaji"].as_str().unwrap_or("").to_string(),
@@ -1314,6 +1335,7 @@ fn parse_media_node(m: &serde_json::Value) -> Option<AnimeDetail> {
 
     let id = m["id"].as_i64().filter(|&n| n > 0)?;
     Some(AnimeDetail {
+        release_date: premiere_date(&m["startDate"]),
         is_adult: m["isAdult"].as_bool().unwrap_or(false),
         id,
         id_mal: m["idMal"].as_i64(),
@@ -1468,6 +1490,7 @@ pub async fn get_anime_details_batch(ids: &[i64]) -> Result<HashMap<i64, AnimeDe
                             duration
                             season
                             seasonYear
+                            startDate {{ year month day }}
                             endDate {{ year }}
                             description(asHtml: true)
                             genres
@@ -1486,6 +1509,7 @@ pub async fn get_anime_details_batch(ids: &[i64]) -> Result<HashMap<i64, AnimeDe
                                         episodes
                                         coverImage {{ large }}
                                         type
+                                        startDate {{ year month day }}
                                         seasonYear
                                     }}
                                 }}

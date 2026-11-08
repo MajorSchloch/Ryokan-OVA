@@ -8,6 +8,7 @@ pub mod bulk;
 pub mod cleanup;
 pub mod crud;
 pub mod episodes;
+pub mod groups;
 pub mod misgrabs;
 pub mod pages;
 pub mod reconcile;
