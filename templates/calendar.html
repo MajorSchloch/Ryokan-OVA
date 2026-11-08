@@ -6,20 +6,23 @@
 {% block content %}
 <div class="page-header calendar-page-header">
     <h2>Calendar</h2>
-    {# Sonarr-style "iCal Link" icon button. Opens a modal with the
-       subscription URL helper. Hidden when no calendar-scoped key
-       exists (the create-key prompt lives inside the modal anyway,
-       but if the user has zero keys total there's nothing to
-       compose, so the button just routes them to the API Keys
-       tab). #}
-    <button type="button"
-            class="btn btn-ghost calendar-ical-btn"
-            id="calendar-ical-btn"
-            title="Subscribe by URL"
-            aria-label="iCal Link">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/></svg>
-        <span>iCal Link</span>
-    </button>
+    <div class="calendar-view-links">
+        <a class="btn btn-secondary" href="/calendar/upcoming">Upcoming anime</a>
+        {# Sonarr-style "iCal Link" icon button. Opens a modal with the
+           subscription URL helper. Hidden when no calendar-scoped key
+           exists (the create-key prompt lives inside the modal anyway,
+           but if the user has zero keys total there's nothing to
+           compose, so the button just routes them to the API Keys
+           tab). #}
+        <button type="button"
+                class="btn btn-ghost calendar-ical-btn"
+                id="calendar-ical-btn"
+                title="Subscribe by URL"
+                aria-label="iCal Link">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/></svg>
+            <span>iCal Link</span>
+        </button>
+    </div>
 </div>
 
 <div class="calendar-toolbar">

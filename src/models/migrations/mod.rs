@@ -3074,6 +3074,17 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Publish all pages of premiere discovery as a single snapshot. A failed
+    // refresh can update its status without replacing the last good data.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS premiere_discovery (
+        id INTEGER PRIMARY KEY CHECK (id=1),
+        entries TEXT, refreshed_at INTEGER, failed BOOLEAN NOT NULL DEFAULT 0
+    )",
+    )
+    .execute(db)
+    .await?;
+
     // Follows survive removal of the source series. A receipt survives
     // removal of a discovered series, so a later check respects the removal.
     sqlx::query(

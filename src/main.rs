@@ -1338,6 +1338,10 @@ async fn main() {
         // handler serves full-page renders and HTMX partial
         // swaps (it branches on HxRequest), so there's no
         // separate JSON route.
+        .route(
+            "/calendar/upcoming",
+            get(handlers::calendar::discovery::page),
+        )
         .route("/calendar", get(handlers::calendar::page))
         .route("/wanted", get(handlers::wanted::page))
         .route("/wanted/search-menu", get(handlers::wanted::search_menu))
@@ -1868,6 +1872,18 @@ async fn main() {
                         }
                     }
                 }
+            })
+            .await;
+        });
+    }
+
+    {
+        let db = db.clone();
+        let registry = state.tasks.clone();
+        tokio::spawn(async move {
+            supervise(&registry, "premiere_discovery", move || {
+                let db = db.clone();
+                async move { services::calendar::discovery::run(&db).await }
             })
             .await;
         });
