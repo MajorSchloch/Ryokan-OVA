@@ -1,0 +1,12 @@
+<li class="discovery-card" data-anilist-id="{{ card.id }}">
+    {% if !card.cover.is_empty() %}<img src="{{ card.cover }}" alt="" loading="lazy" width="44" height="62">{% endif %}
+    <div class="discovery-info">
+        <strong>{{ card.title }}</strong>
+        <small>{% if card.format.is_empty() %}Format unknown{% else %}{{ card.format }}{% endif %}{% if !card.date.is_empty() %} · {{ card.date }}{% endif %} · {% if card.library_id.is_some() %}In library{% else %}Outside library{% endif %}</small>
+    </div>
+    {% if let Some(id) = card.library_id %}
+    <a class="btn btn-secondary btn-sm" href="/series/{{ id }}">Open in library</a>
+    {% else %}
+    <button type="button" class="btn btn-primary btn-sm" onclick="addSeries({{ card.id }}, this)" data-entry="{{ card.add_json }}">Add to library</button>
+    {% endif %}
+</li>

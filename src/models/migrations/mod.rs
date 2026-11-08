@@ -3074,6 +3074,29 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Publish all pages of premiere discovery as a single snapshot. A failed
+    // refresh can update its status without replacing the last good data.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS premiere_discovery (
+        id INTEGER PRIMARY KEY CHECK (id=1),
+        entries TEXT, refreshed_at INTEGER, failed BOOLEAN NOT NULL DEFAULT 0
+    )",
+    )
+    .execute(db)
+    .await?;
+
+    // Keep the provider identities when a title leaves the bounded discovery
+    // snapshot. An Add button in an older tab can still refer to that title.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS discovery_media_ids (
+        anilist_id INTEGER PRIMARY KEY, mal_id INTEGER NOT NULL
+    )",
+    )
+    .execute(db)
+    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS discovery_media_by_mal ON discovery_media_ids(mal_id)")
+        .execute(db)
+        .await?;
     // Follows survive removal of the source series. A receipt survives
     // removal of a discovered series, so a later check respects the removal.
     sqlx::query(
