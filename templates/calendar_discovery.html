@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %} - Upcoming anime{% endblock %}
+{% block content %}
+<header class="page-header calendar-page-header">
+    <h2>Upcoming anime</h2>
+    <a class="btn btn-secondary" href="/calendar">Library episode calendar</a>
+</header>
+<div class="calendar-toolbar">
+    <form class="calendar-filters" action="/calendar/upcoming" method="get">
+        <label>Format <select class="folder-select" name="format">
+            <option value="">All formats</option>
+            {% for f in formats %}<option value="{{ f }}"{% if f.as_str() == filters.format %} selected{% endif %}>{{ f.replace("_", " ") }}</option>{% endfor %}
+        </select></label>
+        <label class="calendar-toggle-filter"><input type="checkbox" name="hide_tracked" value="true"{% if filters.hide_tracked %} checked{% endif %}> Hide titles in my library</label>
+        <button class="btn btn-secondary btn-sm" type="submit">Apply filters</button>
+    </form>
+    {% if let Some(at) = refreshed %}<small>Last refreshed {{ at }}</small>{% endif %}
+</div>
+<div id="discovery-results">
+{% if refreshed.is_none() %}
+    <p>Upcoming anime discovery is temporarily unavailable. Ryokan has no saved results yet.</p>
+{% else %}
+    {% if failed %}<p role="status">AniList is temporarily unavailable. Showing the last saved premieres.</p>{% endif %}
+    {% if days.is_empty() && announced.is_empty() %}<p>No upcoming titles match these filters.</p>{% endif %}
+    {% for day in days %}
+    <section class="discovery-day">
+        <h3 class="calendar-day-label"><time datetime="{{ day.date }}">{{ day.date.format("%A, %B %-d, %Y") }}</time></h3>
+        <ul class="discovery-cards">
+        {% for card in day.cards %}{% include "partials/calendar/discovery_card.html" %}{% endfor %}
+        </ul>
+    </section>
+    {% endfor %}
+    {% if !announced.is_empty() %}
+    <section class="discovery-announced">
+        <h3 class="calendar-day-label">Announced</h3>
+        <ul class="discovery-cards">
+        {% for card in announced %}{% include "partials/calendar/discovery_card.html" %}{% endfor %}
+        </ul>
+    </section>
+    {% endif %}
+{% endif %}
+</div>
+{% include "partials/library/monitor_picker.html" %}
+{% endblock %}
+{% block page_js %}<script src="/static/js/library_add.js?v={{ crate::asset_version() }}" defer></script>{% endblock %}

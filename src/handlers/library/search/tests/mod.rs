@@ -1390,7 +1390,7 @@ mod handler_endpoints {
     ///   - external href shape (AL vs MAL → different host + id),
     ///   - format / episode / status badges,
     ///   - the `data-entry` JSON parses back to the same `id`, which
-    ///     is what `addSeries(id, this)` in `static/js/index.js` reads.
+    ///     is what `addSeries(id, this)` in `static/js/library_add.js` reads.
     #[test]
     fn htmx_partial_renders_expected_markers_and_data_entry() {
         use crate::services::anilist::AnimeEntry;

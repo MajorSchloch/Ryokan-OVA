@@ -1,8 +1,3 @@
-// Server state handoff: window.initialTitleLanguage is set inline in
-// index.html before this file loads. Fall back to empty string so
-// `getTitleByLang` below still has something to compare against.
-var initialTitleLanguage = window.initialTitleLanguage || '';
-
 // Live client-side library search. The full library is in the DOM
 // after page load, so substring-matching titles + toggling display
 // is faster than a server round-trip and avoids the page reflow. We
@@ -137,17 +132,6 @@ function closeAddModal(e) {
     document.getElementById('anilist-query').value = '';
 }
 
-function getTitleByLang(entry, lang) {
-    if (lang === 'native') return entry.title_native || entry.title_romaji || entry.title_english || '';
-    if (lang === 'romaji') return entry.title_romaji || entry.title_english || entry.title_native || '';
-    return entry.title_english || entry.title_romaji || entry.title_native || '';
-}
-
-// Title-language switching for `.title-switcher` elements is handled by
-// CSS via the `html[data-title-language]` attribute that base.html sets
-// pre-paint. `getTitleByLang` above is still used by `addSeries` for the
-// monitor-mode modal title (rendered via textContent, not a switcher span).
-
 // Per-search provider override. Defaults to AniList; the user can flip
 // to MAL via the toggle in the Add Series modal. The selection is
 // remembered across modal opens within the page session, but resets on
@@ -172,80 +156,6 @@ function setSearchSource(btn) {
     if (input && (input.value || '').trim() && window.htmx) {
         window.htmx.trigger(input, 'ryokan:search');
     }
-}
-
-var _pendingSeriesId = null;
-var _selectedMonitorMode = 'all';
-
-function addSeries(anilistId, btn) {
-    const entry = JSON.parse(btn.dataset.entry);
-    btn.disabled = true;
-    btn.textContent = '...';
-
-    fetch('/api/library/add', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-            anilist_id: entry.id,
-            mal_id: entry.id_mal || null,
-            title: entry.title_english || entry.title_romaji || entry.title_native,
-            title_romaji: entry.title_romaji || '',
-            title_english: entry.title_english || '',
-            title_native: entry.title_native || '',
-            cover_url: entry.cover_url,
-            format: entry.format,
-            status: entry.status,
-            episodes: entry.episodes,
-        })
-    })
-    .then(async r => {
-        let data = {};
-        try { data = await r.json(); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || 'Add failed');
-        return data;
-    })
-    .then(data => {
-        btn.textContent = 'Added';
-        btn.classList.add('btn-success');
-        _pendingSeriesId = data.id;
-        _selectedMonitorMode = 'all';
-        const lang = localStorage.getItem('titleLanguage') || initialTitleLanguage || 'english';
-        const title = getTitleByLang(entry, lang) || entry.title_romaji || entry.title_english || 'this series';
-        document.getElementById('monitor-series-title').textContent = title;
-        // Reset mode buttons
-        document.querySelectorAll('.monitor-option-btn').forEach(b => b.classList.remove('active'));
-        const allBtn = document.querySelector('.monitor-option-btn[data-mode="all"]');
-        if (allBtn) allBtn.classList.add('active');
-        // Close add modal and show monitoring modal
-        document.getElementById('add-modal').style.display = 'none';
-        document.getElementById('monitor-modal').style.display = 'flex';
-    })
-    .catch(() => {
-        btn.textContent = 'Error';
-        btn.classList.add('btn-error');
-        btn.disabled = false;
-    });
-}
-
-function selectMonitorMode(btn) {
-    document.querySelectorAll('.monitor-option-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    _selectedMonitorMode = btn.dataset.mode;
-}
-
-// Issue #166 — confirmMonitoring moved to declarative hx-post on the
-// monitor-confirm-btn in templates/index.html. The button reads its
-// payload from `confirmMonitoringVals()` via `hx-vals='js:'`, and the
-// server returns `HX-Refresh: true` so htmx reloads the page on
-// success. The pre-migration fallback `if (!_pendingSeriesId)
-// location.reload()` is preserved by `hx-on::response:error="window.
-// location.reload()"` plus the 400 the handler issues on missing id.
-function confirmMonitoringVals() {
-    return {
-        series_id: _pendingSeriesId,
-        monitor_mode: _selectedMonitorMode,
-        auto_grab: true,
-    };
 }
 
 // ── Bulk select (issue #125) ────────────────────────────────────────

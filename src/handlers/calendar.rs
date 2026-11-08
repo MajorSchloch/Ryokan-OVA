@@ -49,6 +49,8 @@
 //! client's stored ones and the site-wide `no-store` default would
 //! otherwise land there.
 
+pub mod discovery;
+
 use askama::Template;
 use axum::{
     extract::{Query, State},
