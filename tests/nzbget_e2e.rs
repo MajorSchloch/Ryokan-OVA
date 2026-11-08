@@ -552,8 +552,15 @@ async fn check_skipped_url_retry(import_enabled: bool, empty_media_root: bool) {
 
 #[tokio::test]
 async fn skipped_fetch_polled_after_retry_preserves_the_new_episode_attempt() {
+    for import_enabled in [true, false] {
+        check_skipped_fetch_polled_after_retry(import_enabled).await;
+    }
+}
+
+async fn check_skipped_fetch_polled_after_retry(import_enabled: bool) {
     let f = fixture(true).await;
-    sqlx::query("UPDATE config SET post_processing_enabled=0 WHERE id=1")
+    sqlx::query("UPDATE config SET post_processing_enabled=? WHERE id=1")
+        .bind(import_enabled)
         .execute(&f.app.db)
         .await
         .unwrap();
@@ -563,9 +570,19 @@ async fn skipped_fetch_polled_after_retry_preserves_the_new_episode_attempt() {
         .finish(&f.hash, "URL", "WARNING/SKIPPED");
     let new_key = retry_release(&f).await;
     tick(&f.app).await;
-    let pending = grabbed_torrents::get_all_pending(&f.app.db).await.unwrap();
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].hash, new_key);
+    let grabs: Vec<(String, String)> =
+        sqlx::query_as("SELECT hash,state FROM grabbed_torrents ORDER BY id")
+            .fetch_all(&f.app.db)
+            .await
+            .unwrap();
+    assert_ne!(new_key, f.hash);
+    assert_eq!(
+        grabs,
+        [
+            (f.hash.clone(), "failed".into()),
+            (new_key.clone(), "pending".into())
+        ]
+    );
     assert_eq!(
         episode_history(&f).await,
         [(7, "failed".into()), (7, "grabbed".into())]
@@ -578,4 +595,14 @@ async fn skipped_fetch_polled_after_retry_preserves_the_new_episode_attempt() {
     .await
     .unwrap();
     assert_eq!(tag, "grabbed");
+    let daemon = f.daemon.lock().unwrap();
+    assert_eq!(daemon.adds, 2);
+    assert_eq!(daemon.queue.len(), f.foreign.len() + 1);
+    assert!(daemon.queue.starts_with(&f.foreign));
+    assert_eq!(daemon.queue.last().unwrap()["DupeKey"], new_key);
+    if import_enabled {
+        assert_eq!(daemon.edits, [json!(["HistoryFinalDelete", "", [10]])]);
+    } else {
+        assert!(daemon.edits.is_empty());
+    }
 }

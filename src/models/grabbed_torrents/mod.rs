@@ -937,7 +937,7 @@ pub async fn mark_failed_with_reason(
 pub(crate) async fn fail_pending_fetch(
     db: &SqlitePool,
     grab: &GrabbedTorrent,
-) -> Result<(), sqlx::Error> {
+) -> Result<bool, sqlx::Error> {
     let mut tx = db.begin().await?;
     let failed = sqlx::query(
         "UPDATE grabbed_torrents SET state='failed', failure_reason=?
@@ -949,7 +949,7 @@ pub(crate) async fn fail_pending_fetch(
     .execute(&mut *tx)
     .await?;
     if failed.rows_affected() == 0 {
-        return Ok(());
+        return Ok(false);
     }
     let mut slots: std::collections::BTreeSet<_> = grab
         .episode_numbers
@@ -987,7 +987,8 @@ pub(crate) async fn fail_pending_fetch(
         .execute(&mut *tx)
         .await?;
     }
-    tx.commit().await
+    tx.commit().await?;
+    Ok(true)
 }
 
 /// Import robustness (#205): record the first post-processing tick that
