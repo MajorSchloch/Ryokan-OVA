@@ -1,6 +1,6 @@
 //! The follow form and scheduled check share a real SQLite file across startup.
 use axum::{
-    body::Body,
+    body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
 use ryokan::{
@@ -23,6 +23,29 @@ fn edge(id: i64, format: &str, status: &str, year: i32) -> Value {
     }})
 }
 
+async fn page(db: &SqlitePool, server: &MockServer) -> String {
+    let requests = server.received_requests().await.unwrap().len();
+    let app = handlers::release_follows::routes()
+        .with_state(test_support::build_test_app_state(db.clone(), None));
+    let request = Request::get("/library/follows")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    assert_eq!(server.received_requests().await.unwrap().len(), requests);
+    String::from_utf8(html.to_vec()).unwrap()
+}
+
+fn section<'a>(html: &'a str, title: &str) -> &'a str {
+    html.split("<section ")
+        .skip(1)
+        .filter_map(|part| part.split_once("</section>"))
+        .map(|(section, _)| section)
+        .find(|section| section.contains(title))
+        .unwrap()
+}
+
 async fn form(db: &SqlitePool, path: &str, body: &str) {
     let app = handlers::release_follows::routes()
         .with_state(test_support::build_test_app_state(db.clone(), None));
@@ -41,6 +64,14 @@ async fn graph(server: &MockServer, phase: u8) {
         .and(body_string_contains("startDate { year month day }"))
         .respond_with(move |req: &MockRequest| {
             let body: Value = req.body_json().unwrap();
+            if phase == 4
+                && body["variables"]["ids"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(1))
+            {
+                return ResponseTemplate::new(503);
+            }
             let media: Vec<_> = body["variables"]["ids"]
                 .as_array()
                 .unwrap()
@@ -48,6 +79,10 @@ async fn graph(server: &MockServer, phase: u8) {
                 .map(|id| {
                     let edges = match (id.as_i64().unwrap(), phase) {
                         // No announced sequel when the first follow starts.
+                        (1, 3..) => vec![
+                            edge(2, "MOVIE", "FINISHED", 2026),
+                            edge(4, "TV", "NOT_YET_RELEASED", 2027),
+                        ],
                         (1, 1..) => vec![edge(2, "MOVIE", "FINISHED", 2026)],
                         (2, 2..) => vec![
                             edge(3, "TV", "FINISHED", 2026),
@@ -87,6 +122,9 @@ async fn release_follows_survive_restart_and_follow_sequels_across_an_excluded_m
         .create_if_missing(true);
     let db = SqlitePool::connect_with(options.clone()).await.unwrap();
     models::migrate(&db).await.unwrap();
+    let reader = SqlitePool::connect_with(options.clone().create_if_missing(false).read_only(true))
+        .await
+        .unwrap();
     let root = test_support::seed_series(&db, 1, "Finished TV").await;
     sqlx::query("UPDATE series SET status='FINISHED', episodes=12, monitor_mode='none' WHERE id=?")
         .bind(root)
@@ -95,6 +133,9 @@ async fn release_follows_survive_restart_and_follow_sequels_across_an_excluded_m
         .unwrap();
     graph(&server, 0).await;
     form(&db, "/library/follows", "anilist_id=1&title=Finished+TV").await;
+    let html = page(&reader, &server).await;
+    assert!(html.contains("Not checked yet"));
+    assert!(!html.contains("Last successful AniList check"));
     let follow = release_follows::list(&db).await.unwrap().remove(0);
     assert_eq!(
         follow.started_on,
@@ -106,6 +147,9 @@ async fn release_follows_survive_restart_and_follow_sequels_across_an_excluded_m
         .await
         .unwrap();
     assert_eq!(services::release_follows::refresh(&db).await.unwrap(), 0);
+    let html = page(&reader, &server).await;
+    assert!(html.contains("Last successful AniList check"));
+    assert!(html.contains("Checked — no matching releases yet."));
     graph(&server, 1).await;
     assert_eq!(services::release_follows::refresh(&db).await.unwrap(), 0);
     assert_eq!(
@@ -207,6 +251,43 @@ async fn release_follows_survive_restart_and_follow_sequels_across_an_excluded_m
             .unwrap(),
         vec![2]
     );
+    // A newly announced sequel belongs to the first follow; the second
+    // follow matched a title that the user already had in the library.
+    graph(&server, 3).await;
+    assert_eq!(services::release_follows::refresh(&db).await.unwrap(), 1);
+    assert_eq!(services::release_follows::refresh(&db).await.unwrap(), 0);
+    let announced = series::get_by_anilist_id(&db, 4).await.unwrap().unwrap();
+    let link = format!("href=\"/series/{}\">Title 4</a>", announced.id);
+    let html = page(&reader, &server).await;
+    assert_eq!(html.matches(&link).count(), 1);
+    let first = section(&html, ">Finished TV</a>");
+    assert!(first.contains(&link));
+    assert!(first.contains("Matched releases"));
+    assert!(first.contains("href=\"/series/3?by=anilist\">Title 3</a>"));
+    assert!(!first.contains("Existing sequel"));
+    let other = section(&html, ">Another series</a>");
+    assert!(other.contains(&format!("href=\"/series/{existing}\">Existing sequel</a>")));
+    assert!(!other.contains(&link));
+    let success = release_follows::list(&db)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|f| f.id == follow.id)
+        .unwrap()
+        .last_success_at
+        .unwrap();
+
+    graph(&server, 4).await;
+    assert!(services::release_follows::refresh(&db).await.is_err());
+    let html = page(&reader, &server).await;
+    let first = section(&html, ">Finished TV</a>");
+    assert!(first.contains(&format!("{success} UTC")));
+    assert!(first.contains("Latest AniList check failed"));
+    assert_eq!(first.matches(&link).count(), 1);
+    let other = section(&html, ">Another series</a>");
+    assert!(!other.contains("Latest AniList check failed"));
+    assert!(other.contains("Existing sequel"));
+
     let edit = format!("/library/follows/{}", follow.id);
     form(&db, &edit, "movies=true&alternatives=true").await;
     let follows = release_follows::list(&db).await.unwrap();
