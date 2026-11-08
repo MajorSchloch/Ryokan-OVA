@@ -932,6 +932,64 @@ pub async fn mark_failed_with_reason(
     Ok(())
 }
 
+/// Record a failed URL fetch and its episode attempts together. A retry can
+/// already have a second pending history row with the same release title.
+pub(crate) async fn fail_pending_fetch(
+    db: &SqlitePool,
+    grab: &GrabbedTorrent,
+) -> Result<(), sqlx::Error> {
+    let mut tx = db.begin().await?;
+    let failed = sqlx::query(
+        "UPDATE grabbed_torrents SET state='failed', failure_reason=?
+         WHERE id=? AND hash=? AND state='pending'",
+    )
+    .bind(crate::services::redownload::CLIENT_ERROR_REASON)
+    .bind(grab.id)
+    .bind(&grab.hash)
+    .execute(&mut *tx)
+    .await?;
+    if failed.rows_affected() == 0 {
+        return Ok(());
+    }
+    let mut slots: std::collections::BTreeSet<_> = grab
+        .episode_numbers
+        .iter()
+        .map(|&ep| (grab.series_id, ep))
+        .collect();
+    for route in get_series_routes(&mut *tx, grab.id).await? {
+        slots.extend(
+            route
+                .episode_numbers
+                .into_iter()
+                .map(|ep| (route.series_id, ep)),
+        );
+    }
+    for (series_id, ep) in slots {
+        sqlx::query(
+            "UPDATE episode_grab_history SET state='failed' WHERE id=(
+               SELECT id FROM episode_grab_history WHERE series_id=? AND episode_number=?
+               AND release_title=? AND state='grabbed' ORDER BY id LIMIT 1)",
+        )
+        .bind(series_id)
+        .bind(ep)
+        .bind(&grab.torrent_name)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE episode_quality_tags SET state='failed', updated_at=CURRENT_TIMESTAMP
+             WHERE series_id=?1 AND episode_number=?2 AND release_title=?3 AND state='grabbed'
+             AND NOT EXISTS (SELECT 1 FROM episode_grab_history WHERE series_id=?1
+                             AND episode_number=?2 AND release_title=?3 AND state='grabbed')",
+        )
+        .bind(series_id)
+        .bind(ep)
+        .bind(&grab.torrent_name)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await
+}
+
 /// Import robustness (#205): record the first post-processing tick that
 /// saw the download client report this grab complete. Idempotent
 /// (`WHERE completed_seen_at IS NULL`) so the stall timer measures the

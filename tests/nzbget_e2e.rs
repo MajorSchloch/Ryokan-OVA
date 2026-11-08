@@ -450,7 +450,48 @@ async fn check_manual_deletion(import_enabled: bool) {
 
 #[tokio::test]
 async fn skipped_url_fetch_allows_one_new_submission() {
-    let f = fixture(false).await;
+    check_skipped_url_retry(true, false).await;
+    check_skipped_url_retry(false, false).await;
+    check_skipped_url_retry(true, true).await;
+}
+
+async fn retry_release(f: &Fixture) -> String {
+    let form = serde_json::from_value(json!({
+        "url": f.release_url, "title": TITLE, "source_guid": "release-7", "indexer_id": 1
+    }))
+    .unwrap();
+    let Json(response) = grab_release(State(f.app.clone()), Json(form))
+        .await
+        .unwrap();
+    response["hash"].as_str().unwrap().to_owned()
+}
+
+async fn episode_history(f: &Fixture) -> Vec<(i32, String)> {
+    sqlx::query_as(
+        "SELECT episode_number,state FROM episode_grab_history WHERE release_title=? ORDER BY id",
+    )
+    .bind(TITLE)
+    .fetch_all(&f.app.db)
+    .await
+    .unwrap()
+}
+
+async fn check_skipped_url_retry(import_enabled: bool, empty_media_root: bool) {
+    let no_import = !import_enabled || empty_media_root;
+    // Enable removal in the no-import cases to catch accidental client cleanup.
+    let f = fixture(no_import).await;
+    let library = f.tmp.path().join("library");
+    let media_root = if empty_media_root {
+        ""
+    } else {
+        library.to_str().unwrap()
+    };
+    sqlx::query("UPDATE config SET post_processing_enabled=?, media_root=? WHERE id=1")
+        .bind(import_enabled)
+        .bind(media_root)
+        .execute(&f.app.db)
+        .await
+        .unwrap();
     f.daemon
         .lock()
         .unwrap()
@@ -464,19 +505,10 @@ async fn skipped_url_fetch_allows_one_new_submission() {
             .unwrap();
     assert_eq!(grab, ("failed".into(), "client_error".into()));
 
-    let form = serde_json::from_value(json!({
-        "url": f.release_url, "title": TITLE, "source_guid": "release-7", "indexer_id": 1
-    }))
-    .unwrap();
-    let Json(response) = grab_release(State(f.app.clone()), Json(form))
-        .await
-        .unwrap();
-    let new_key = response["hash"].as_str().unwrap();
+    assert_eq!(episode_history(&f).await, [(7, "failed".into())]);
+    let new_key = retry_release(&f).await;
     assert_ne!(new_key, f.hash);
-    let pending = grabbed_torrents::get_all_pending(&f.app.db).await.unwrap();
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].hash, new_key);
-    assert_eq!(pending[0].episode_numbers, [7]);
+    assert_eq!(retry_release(&f).await, new_key);
     let client = f.app.client_for_indexer(Some(1)).await.unwrap();
     let replay = client
         .add_torrent_returning_id(&f.release_url, "")
@@ -489,9 +521,61 @@ async fn skipped_url_fetch_allows_one_new_submission() {
             new_key.to_owned()
         )
     );
+    tick(&f.app).await;
+    let grabs: Vec<(String, String)> =
+        sqlx::query_as("SELECT hash,state FROM grabbed_torrents ORDER BY id")
+            .fetch_all(&f.app.db)
+            .await
+            .unwrap();
+    assert_eq!(
+        grabs,
+        [
+            (f.hash.clone(), "failed".into()),
+            (new_key, "pending".into())
+        ]
+    );
+    assert_eq!(
+        episode_history(&f).await,
+        [(7, "failed".into()), (7, "grabbed".into())]
+    );
+    assert!(library.read_dir().unwrap().next().is_none());
+    assert_eq!(
+        fs::read(f.tmp.path().join("completed/Sonarr/Other - 07.mkv")).unwrap(),
+        b"foreign"
+    );
     let d = f.daemon.lock().unwrap();
     assert_eq!(d.adds, 2);
     assert_eq!(d.queue.len(), f.foreign.len() + 1);
     assert!(d.queue.starts_with(&f.foreign));
     assert!(d.edits.is_empty());
+}
+
+#[tokio::test]
+async fn skipped_fetch_polled_after_retry_preserves_the_new_episode_attempt() {
+    let f = fixture(true).await;
+    sqlx::query("UPDATE config SET post_processing_enabled=0 WHERE id=1")
+        .execute(&f.app.db)
+        .await
+        .unwrap();
+    f.daemon
+        .lock()
+        .unwrap()
+        .finish(&f.hash, "URL", "WARNING/SKIPPED");
+    let new_key = retry_release(&f).await;
+    tick(&f.app).await;
+    let pending = grabbed_torrents::get_all_pending(&f.app.db).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].hash, new_key);
+    assert_eq!(
+        episode_history(&f).await,
+        [(7, "failed".into()), (7, "grabbed".into())]
+    );
+    let tag: String = sqlx::query_scalar(
+        "SELECT state FROM episode_quality_tags WHERE release_title=? AND episode_number=7",
+    )
+    .bind(TITLE)
+    .fetch_one(&f.app.db)
+    .await
+    .unwrap();
+    assert_eq!(tag, "grabbed");
 }
