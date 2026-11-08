@@ -98,8 +98,9 @@ pub async fn grab_batch_result(
     // part number. Franchise roots (JoJo S1) deliberately fall
     // through so the multi-series auto-expand path below can route
     // each sibling's files into its own library entry instead.
-    let wants_selective =
-        !info_hash.is_empty() && auto_search::has_selective_discriminator(&detail);
+    let wants_selective = qbit.protocol() == "torrent"
+        && !info_hash.is_empty()
+        && auto_search::has_selective_discriminator(&detail);
     // `effective_hash` is the id Ryokan persists on `grabbed_torrents.hash`
     // and uses to reconcile the grab against the client's later state. For
     // BT clients it equals the precomputed v1 infohash from the magnet/.torrent
@@ -407,8 +408,9 @@ pub async fn grab_interactive_result(
     // own subtitle return `false` here and fall through to the plain
     // `add_torrent` path — interactive single-episode grabs don't
     // auto-expand the library (that's `grab_batch_result`'s job).
-    let wants_selective =
-        !info_hash.is_empty() && auto_search::has_selective_discriminator(&detail);
+    let wants_selective = qbit.protocol() == "torrent"
+        && !info_hash.is_empty()
+        && auto_search::has_selective_discriminator(&detail);
     // See `grab_batch_result` above for why `add_torrent_returning_id`
     // matters. Same SAB-nzo_id capture rationale applies to the
     // single-episode interactive grab path.

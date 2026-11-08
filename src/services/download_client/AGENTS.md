@@ -1,11 +1,12 @@
 # services/download_client/AGENTS.md
 
-`DownloadClient` is the trait abstraction over **five supported clients**: four BT clients (qBittorrent, Deluge, Transmission, rTorrent) and one Usenet client (SABnzbd). Multiple clients can be configured simultaneously and routed per-grab. Concrete impls live in `qbittorrent/`, `deluge/`, `transmission/`, `rtorrent/`, `sabnzbd/`, each with a `wiremock_tests/` sibling directory of HTTP-mock tests (distinct from the env-gated `live_smoke` tests in the parent `mod.rs`).
+`DownloadClient` is the trait abstraction over **six supported clients**: four BT clients (qBittorrent, Deluge, Transmission, rTorrent) and two Usenet clients (SABnzbd and NZBGet). Multiple clients can be configured simultaneously and routed per-grab. Concrete impls live in `qbittorrent/`, `deluge/`, `transmission/`, `rtorrent/`, `sabnzbd/` and `nzbget/`, each with a `wiremock_tests/` sibling directory of HTTP-mock tests (distinct from the env-gated `live_smoke` tests in the parent `mod.rs`).
 
 ## Trait identity contract
 
 - BT clients address torrents by **v1 infohash, lowercase hex at the trait boundary** — each impl case-munges internally for its wire format.
 - SABnzbd has no infohash. SAB hands back an opaque **`nzo_id`** (e.g. `"SABnzbd_nzo_abc123def"`) when an NZB is added, and every subsequent op keys off that. There's no formula to derive `nzo_id` from the NZB URL.
+- NZBGet carries a Ryokan job key in `DupeKey` from URL submission through history. Resolve the current numeric `NZBID` before a queue action.
 - The trait method **`add_torrent_returning_id`** captures whatever opaque id the wire format uses and returns it — BT impls return the precomputed infohash unchanged; SAB returns the captured `nzo_id`. Callers persist the returned id on `grabbed_torrents.hash`. Subsequent ops receive that string as the trait's `info_hash` parameter and use it verbatim. Pattern lifted from Sonarr's `Download(...) -> string`.
 - The 40-char-hex contract only applies inside the four BT impls' add paths.
 - The `pick` callback in `add_torrent_with_file_filter` is `&mut dyn FnMut` (not generic) to keep the trait object-safe for `Arc<dyn DownloadClient>` storage on `AppState`.
@@ -24,7 +25,7 @@ Resolution helpers on `AppState`:
 - `client_for_nyaa(nyaa_pin)` — `config.nyaa_download_client_id` → torrent default. **Always falls back to torrent** (Nyaa items are magnets / .torrent URLs).
 - `default_download_client()` — returns the **torrent** default. Every internal default-only call site is torrent-flavored; usenet routing always goes through an indexer pin or its protocol default.
 - `client_by_id(id)` — direct lookup; returns None if the row was deleted from the pool mid-request.
-- `resolve_grab_client(download_client_id, hash)` — used by post-processing's per-grab routing. Three-layer fallback: stamped id → SAB hash-shape heuristic (`hash.starts_with("SABnzbd_nzo_")` routes to ANY usenet client in the pool) → torrent default. **The hash-shape heuristic is load-bearing** for grabs predating the `download_client_id` stamp migration: without it, a NULL-stamped SAB nzo_id falls through to qBit's `delete` endpoint, qBit silently 200s on unknown hashes, and the symptom is "delete-from-disk leaves the SAB job alive forever."
+- `resolve_grab_client(download_client_id, hash)` — used by post-processing's per-grab routing. An NZBGet key identifies its exact client row. Other jobs use the following fallback: stamped id → SAB hash-shape heuristic (`hash.starts_with("SABnzbd_nzo_")` routes to a SABnzbd client in the pool) → torrent default. **The hash-shape heuristic is load-bearing** for grabs predating the `download_client_id` stamp migration: without it, a NULL-stamped SAB nzo_id falls through to qBit's `delete` endpoint, qBit silently 200s on unknown hashes, and the symptom is "delete-from-disk leaves the SAB job alive forever."
 
 `grabbed_torrents.download_client_id` is stamped at grab time so post-processing routes back through the same client even after defaults change. Don't introduce a "current active client" abstraction — the single-slot pre-pool shape is gone deliberately.
 
@@ -40,6 +41,7 @@ Every impl has a distinct "things Ryokan added" filter so `list_scoped` never re
 - **Deluge**: Label plugin (auto-enabled on first connect; see Deluge quirks)
 - **Transmission**: native labels on 4.x, save-path prefix fallback on older
 - **rtorrent**: `custom1` field (the ruTorrent label convention)
+- **NZBGet**: the configured category and a Ryokan job key in `DupeKey`. Check both again before sending a single numeric `NZBID` to `editqueue`. The Ryokan key stays with the job after URL fetch and restart.
 - **SAB**: `cat=<label>` — same field doubles as the post-processing target directory selector; mirrors the qBit category convention
 
 Set at add-time, read at list-time. The label / category / custom1 string comes from the `download_clients` row, NOT a global setting — multi-client setups can give each client its own label.
@@ -64,11 +66,12 @@ Distinct from `services::auto_expand` (sibling-series detection inside a batch p
 
 ## `Warning` vs `Errored` (the client's failure report)
 
-`DownloadItemState::Errored` is the client's own failed-download verdict, Sonarr's `DownloadItemStatus::Failed`, and post-processing acts on it (the grab fails with `failure_reason = 'client_error'`, the release is blocklisted, the item is removed **with its data** when the client row's `remove_failed` switch is on (Sonarr's per-client Remove Failed Downloads, default on, `set_remove_failed`), a replacement is searched for; see the root AGENTS.md). Only two wire states earn it: SABnzbd `Failed` and qBittorrent `error`. Everything a client reports as a problem it may recover from is `DownloadItemState::Warning` (Sonarr's `Warning`): neither `is_complete` nor `is_errored`, so post-processing waits, the stall clock does not start, and the Downloads page shows the client's own state string. The mapping per client:
+`DownloadItemState::Errored` is the client's own failed-download verdict, Sonarr's `DownloadItemStatus::Failed`, and post-processing acts on it (the grab fails with `failure_reason = 'client_error'`, the release is blocklisted, the item is removed **with its data** when the client row's `remove_failed` switch is on (Sonarr's per-client Remove Failed Downloads, default on, `set_remove_failed`), a replacement is searched for; see the root AGENTS.md). NZBGet history `FAILURE/*`, SABnzbd `Failed`, and qBittorrent `error` earn it. Everything a client reports as a problem it may recover from is `DownloadItemState::Warning` (Sonarr's `Warning`): neither `is_complete` nor `is_errored`, so post-processing waits, the stall clock does not start, and the Downloads page shows the client's own state string. The mapping per client:
 
 | Client | `Errored` | `Warning` |
 |---|---|---|
 | qBittorrent | `error` | `missingFiles` (what every torrent flips to when the download path is unmounted) |
+| NZBGet | history `FAILURE/*` | history warnings and unverified output folders |
 | SABnzbd | history `Failed` | none; an unknown history status is `PausedComplete` so the import runs and the #205 stall timer is the backstop (it used to be `CheckingDownload`, which never completes and so never started that clock) |
 | Transmission | never | `error == 3`, a local error ("No data found! Ensure your drives are connected", disk full, permissions). Tracker warnings and errors (1, 2) map by status as usual, and `tx_seeding_done` uses the same split: class 3 holds the finished-seed sweep back, a tracker warning does not |
 | Deluge | never | `Error` |
@@ -86,6 +89,7 @@ A new state that Sonarr does not fail belongs in `Warning`; the errored branch d
 | Transmission | `seedRatioMode=1` + `seedRatioLimit` | `seedIdleMode=1` + `seedIdleLimit`, which is **inactivity** minutes, not total seed time (never stops earlier than N minutes, can stop later) | `isFinished` (requested in the `torrent-get` field list), **or** stopped + complete + `uploadRatio` at the effective ratio limit (`seedRatioMode` 1 → `seedRatioLimit`, 0 → the daemon's `seedRatioLimit` from a best-effort `session-get`, 2 → never). 4.x sets `finished` for idle **or** ratio stops; 3.x only for idle, hence the ratio arithmetic (`tx_seeding_done`) |
 | Deluge | `stop_at_ratio=true` + `stop_ratio` | not supported (debug log) | `Paused` + `is_finished` + `stop_at_ratio` + `ratio >= stop_ratio`; Deluge copies the global `stop_seed_*` config into each torrent's options at add time so these are effective values |
 | rTorrent | **not supported**: the only per-item ratio command is the read-only `d.ratio`; ratio handling is per group in `.rtorrent.rc` (`group.seeding.ratio.enable`, `group2.seeding.ratio.max.set`, action in `group.seeding.ratio.command`). `set_seed_rules` returns `Err` without an RPC call (the earlier `d.ratio.max.set` did not exist and faulted on every grab) | same | `d.complete && !d.is_open && !d.is_active && d.ignore_commands && d.message == ""`: the default group action is `d.try_close= ; d.ignore_commands.set=1`, and the ignore flag is what tells a ratio close from a ruTorrent Stop (open) or a restart (closed, no flag); an item with a message is the errored shape. `d.ignore_commands=` is the optional 14th multicall column |
+| NZBGet | n/a | n/a | always `false`; Usenet jobs leave after import |
 | SAB | n/a | n/a | always `false`; usenet leaves at import |
 
 `DownloadItem::seeding_done` is what post-processing's finished-seed sweep acts on; it must only be true when the client itself ended seeding, never for a plain user pause or stop, because the sweep deletes the item with files. The switch is per client: `download_clients.remove_completed` (default on), set through `set_remove_completed` rather than the upsert form.
@@ -163,5 +167,6 @@ Each impl ships a `#[ignore]`d `live_smoke` test that exercises the full trait s
 | `RYOKAN_TRANSMISSION_E2E=1` | settings creds |
 | `RYOKAN_RTORRENT_E2E=1` | (no auth) |
 | `RYOKAN_SAB_E2E=1` | `RYOKAN_SAB_URL=http://localhost:8080`, `RYOKAN_SAB_API_KEY=<key>`, `RYOKAN_SAB_CAT=ryokan-test` (no usable default for the API key — SAB requires one) |
+| `RYOKAN_NZBGET_E2E_PORT=<port>` | Disposable localhost daemon with account `test`, password `fixture`, category `ryokan-test` and a local news server holding the fixture article in progress. |
 
 CI never runs these — they're for hand-validation when touching a client impl.

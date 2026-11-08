@@ -401,7 +401,7 @@ impl AppState {
     ///      default sends an nzo_id to qBit's `delete` endpoint, which
     ///      silently 200s on unknown hashes — the user's symptom is
     ///      "delete-from-disk leaves the SAB job alive forever." Route
-    ///      SAB-shaped hashes to ANY usenet client in the pool instead.
+    ///      SAB-shaped hashes to a SABnzbd client in the pool.
     ///   3. The torrent default (the legacy fall-through; correct for
     ///      BT v1 infohashes — 40-char hex, no SAB-style prefix).
     pub async fn resolve_grab_client(
@@ -422,6 +422,14 @@ impl AppState {
         hash: &str,
     ) -> Option<(i64, Arc<dyn DownloadClient>)> {
         let pool = self.download_clients.read().await.clone();
+        // The key includes the originating client row, even for an unlinked
+        // manual grab. Never send it to another daemon after a settings change.
+        if let Some(key) = hash.strip_prefix("nzbget-") {
+            let (id, _) = key.split_once('-')?;
+            let id = id.parse().ok()?;
+            let client = pool.clients.get(&id)?;
+            return (client.sonarr_impl_name() == "Nzbget").then(|| (id, client.clone()));
+        }
         if let Some(id) = download_client_id
             && let Some(client) = pool.clients.get(&id)
         {
@@ -429,10 +437,11 @@ impl AppState {
         }
         if hash.starts_with("SABnzbd_nzo_") {
             for (id, c) in &pool.clients {
-                if c.protocol() == "usenet" {
+                if c.sonarr_impl_name() == "Sabnzbd" {
                     return Some((*id, c.clone()));
                 }
             }
+            return None;
         }
         let id = pool.default_torrent_id?;
         let client = pool.clients.get(&id)?.clone();
@@ -500,7 +509,11 @@ mod resolve_grab_client_tests {
             Ok(())
         }
         fn sonarr_impl_name(&self) -> &'static str {
-            self.0
+            if self.0 == "usenet" {
+                "Sabnzbd"
+            } else {
+                self.0
+            }
         }
         fn protocol(&self) -> &'static str {
             self.0

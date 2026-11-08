@@ -44,7 +44,7 @@
                    usenet pin would fail at the client's add path. The
                    handler refuses one too. #}
                 {% for dc in download_clients %}
-                {% if dc.kind != "sabnzbd" %}
+                {% if !dc.is_usenet() %}
                 <option value="{{ dc.id }}"
                     {% if let Some(pin) = config.nyaa_download_client_id %}{% if *pin == dc.id %}selected{% endif %}{% endif %}>
                     {{ dc.name }}{% if dc.is_default %} (default){% endif %}

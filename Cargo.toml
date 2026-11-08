@@ -61,6 +61,11 @@ path = "tests/htmx_grab_bag.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "nzbget_e2e"
+path = "tests/nzbget_e2e.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "calendar_discovery"
 path = "tests/calendar_discovery.rs"
 required-features = ["test-support"]

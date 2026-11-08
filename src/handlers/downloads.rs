@@ -151,6 +151,7 @@ fn client_kind_display(kind: &str) -> &'static str {
         "transmission" => "Transmission",
         "rtorrent" => "rTorrent",
         "sabnzbd" => "SABnzbd",
+        "nzbget" => "NZBGet",
         _ => "download client",
     }
 }

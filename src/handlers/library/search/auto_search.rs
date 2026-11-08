@@ -637,7 +637,7 @@ async fn run_auto_search_targets_with_upgrades(
                 // post-processing reconcile loop marks them removed after
                 // 30s when `list_scoped` can't match them.
                 let selective_outcome: Result<(Option<Vec<usize>>, String), String> =
-                    if wants_selective {
+                    if wants_selective && qbit.protocol() == "torrent" {
                         let detail_clone = detail.clone();
                         let info_hash_clone = result.info_hash.clone();
                         let mut pick = move |files: &[String]| {
