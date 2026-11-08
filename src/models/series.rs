@@ -187,6 +187,31 @@ pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<Series>, sqlx:
     Ok(row.map(map_series_row))
 }
 
+/// Local series IDs for AniList links. Prefer an exact ID, then a legacy
+/// row's own cached ID, then a unique AniList ID for its MAL entry.
+/// A cached link must also identify just one local series.
+pub(crate) const LOCAL_ANILIST_IDS: &str = "
+    WITH candidates(mal_id, anilist_id) AS (
+        SELECT mal_id, provider_id FROM provider_metadata_cache WHERE provider_id > 0
+        UNION SELECT mal_id, provider_id FROM series_metadata_cache WHERE provider_id > 0
+        UNION SELECT mal_id, anilist_id FROM series WHERE anilist_id > 0
+    ), unique_mal AS (
+        SELECT mal_id, MIN(anilist_id) AS anilist_id FROM candidates
+        WHERE mal_id > 0 GROUP BY mal_id HAVING COUNT(*) = 1
+    ), legacy AS (
+        SELECT s.id, COALESCE(m.provider_id, u.anilist_id) AS anilist_id FROM series s
+        LEFT JOIN series_metadata_cache m ON m.series_id = s.id AND m.provider_id > 0
+        LEFT JOIN unique_mal u ON u.mal_id = s.mal_id
+        WHERE s.anilist_id < 0
+    ), local_anilist_ids(series_id, anilist_id) AS (
+        SELECT id, anilist_id FROM series WHERE anilist_id > 0
+        UNION ALL
+        SELECT MIN(id), anilist_id FROM legacy
+        WHERE anilist_id IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM series s WHERE s.anilist_id = legacy.anilist_id)
+        GROUP BY anilist_id HAVING COUNT(*) = 1
+    )";
+
 pub async fn get_by_anilist_id<'e>(
     db: impl sqlx::SqliteExecutor<'e>,
     anilist_id: i64,

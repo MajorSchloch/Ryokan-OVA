@@ -81,7 +81,7 @@ async fn page(
     State(state): State<AppState>,
     Query(selection): Query<Selection>,
 ) -> Result<Html<String>, (StatusCode, &'static str)> {
-    let mut follows = release_follows::list(&state.db)
+    let mut follows = release_follows::list_with_matches(&state.db)
         .await
         .map_err(internal_error)?;
     if selection.valid() {
@@ -101,6 +101,7 @@ async fn page(
                     movies: false,
                     ovas: false,
                     alternatives: false,
+                    ..Follow::default()
                 },
             );
         }
@@ -166,4 +167,101 @@ async fn stop(
         .await
         .map_err(internal_error)?;
     Ok(htmx_aware_redirect(htmx, "/library/follows"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{build_test_app_state, seed_series};
+    use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
+
+    async fn matched_sequel() -> (SqlitePool, i64) {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let local_id = seed_series(&db, -800, "Library sequel").await;
+        sqlx::raw_sql(
+            "UPDATE series SET mal_id=800 WHERE anilist_id=-800;
+             INSERT INTO release_follows(anilist_id,title,movies,ovas,alternatives) VALUES (10,'Original',0,0,0);
+             INSERT INTO followed_releases(follow_id,anilist_id,title)
+                 SELECT id,12,'Matched sequel' FROM release_follows;
+             INSERT INTO provider_metadata_cache(provider_id,mal_id,detail_json)
+                 VALUES (12,800,'{}');",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        (db, local_id)
+    }
+
+    async fn render_read_only(db: &SqlitePool) -> String {
+        sqlx::query("PRAGMA query_only=ON")
+            .execute(db)
+            .await
+            .unwrap();
+        let state = build_test_app_state(db.clone(), None);
+        page(State(state), Query(Selection::default()))
+            .await
+            .unwrap()
+            .0
+    }
+
+    #[tokio::test]
+    async fn matched_release_links_to_the_mal_entry_with_a_unique_cached_mapping() {
+        let (db, local_id) = matched_sequel().await;
+        let html = render_read_only(&db).await;
+        assert!(html.contains(&format!("href=\"/series/{local_id}\">Library sequel</a>")));
+    }
+
+    #[tokio::test]
+    async fn matched_release_keeps_the_anilist_link_when_two_parts_share_a_mal_id() {
+        let (db, local_id) = matched_sequel().await;
+        sqlx::query("INSERT INTO provider_metadata_cache(provider_id,mal_id,detail_json) VALUES (13,800,'{}')")
+            .execute(&db).await.unwrap();
+        let html = render_read_only(&db).await;
+        assert!(html.contains("href=\"/series/12?by=anilist\">Matched sequel</a>"));
+        assert!(!html.contains(&format!("href=\"/series/{local_id}\"")));
+    }
+
+    #[tokio::test]
+    async fn matched_release_keeps_one_lookup_link_when_two_local_entries_claim_it() {
+        let (db, first) = matched_sequel().await;
+        let second = seed_series(&db, -801, "Other local entry").await;
+        sqlx::query("INSERT INTO series_metadata_cache(series_id,provider_id,detail_json) VALUES (?,12,'{}')")
+            .bind(second).execute(&db).await.unwrap();
+        let html = render_read_only(&db).await;
+        assert_eq!(
+            html.matches("href=\"/series/12?by=anilist\">Matched sequel</a>")
+                .count(),
+            1
+        );
+        for id in [first, second] {
+            assert!(!html.contains(&format!("href=\"/series/{id}\"")));
+        }
+    }
+
+    #[tokio::test]
+    async fn matched_release_uses_the_local_series_cache_to_identify_a_part() {
+        let (db, local_id) = matched_sequel().await;
+        sqlx::query("INSERT INTO provider_metadata_cache(provider_id,mal_id,detail_json) VALUES (13,800,'{}')")
+            .execute(&db).await.unwrap();
+        sqlx::query("INSERT INTO series_metadata_cache(series_id,provider_id,mal_id,detail_json) VALUES (?,12,800,'{}')")
+            .bind(local_id).execute(&db).await.unwrap();
+        let html = render_read_only(&db).await;
+        assert!(html.contains(&format!("href=\"/series/{local_id}\">Library sequel</a>")));
+    }
+
+    #[tokio::test]
+    async fn matched_release_prefers_the_exact_entry_to_a_cached_local_link() {
+        let (db, mal_entry) = matched_sequel().await;
+        let exact = seed_series(&db, 12, "Exact sequel").await;
+        sqlx::query("INSERT INTO series_metadata_cache(series_id,provider_id,mal_id,detail_json) VALUES (?,12,800,'{}')")
+            .bind(mal_entry).execute(&db).await.unwrap();
+        let html = render_read_only(&db).await;
+        assert!(html.contains(&format!("href=\"/series/{exact}\">Exact sequel</a>")));
+        assert!(!html.contains(&format!("href=\"/series/{mal_entry}\"")));
+    }
 }
