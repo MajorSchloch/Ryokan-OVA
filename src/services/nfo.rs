@@ -451,6 +451,7 @@ mod tests {
 
     fn detail_with_everything() -> AnimeDetail {
         AnimeDetail {
+            release_date: None,
             is_adult: false,
             id: 12345,
             id_mal: Some(67890),

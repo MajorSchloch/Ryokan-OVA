@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %} - Library groups{% endblock %}
+{% block content %}
+<div class="page-header recycle-header">
+    <h2>Library groups</h2>
+    <a class="btn btn-secondary" href="/">Poster view</a>
+</div>
+{% if groups.is_empty() %}
+<p>Your library is empty.</p>
+{% else %}
+<div class="library-groups">
+    <div class="group-controls">
+        <strong>Release order · Oldest first</strong>
+        <label class="checkbox-row"><input type="checkbox" role="switch" id="group-missing"> Show missing entries</label>
+    </div>
+    {% for group in groups %}
+    <details class="library-group">
+        <summary><strong>{{ group.title }}</strong> <span>{{ group.tracked }} in library{% if group.outside > 0 %} · {{ group.outside }} outside library{% endif %}</span></summary>
+        <ol>
+        {% for entry in group.entries %}
+            <li{% if entry.series_id.is_none() %} class="outside-entry"{% endif %}>
+                <div class="group-entry-heading">
+                    {% if let Some(id) = entry.series_id %}<a href="/series/{{ id }}">{{ entry.title }}</a>{% else %}<strong>{{ entry.title }}</strong>{% endif %}
+                    <span class="tag tag-res">{% if !entry.format.is_empty() %}{{ entry.format.replace("_", " ") }}{% else %}Format unknown{% endif %}</span>
+                </div>
+                <div class="group-entry-meta">
+                    {% if entry.date.is_empty() %}Release date unknown{% else if entry.date.len() == 4 && !entry.season.is_empty() %}{{ entry.season }} {{ entry.date }}{% else %}<time datetime="{{ entry.date }}">{{ entry.date }}</time>{% endif %}
+                    {% if let Some(n) = entry.episodes %}{% if *n == 1 %} · Episode 1{% else if *n > 1 %} · Episodes 1–{{ n }}{% endif %}{% endif %}
+                </div>
+                <div class="group-ownership">
+                    {% if entry.series_id.is_some() %}<strong>In library</strong><span>{{ entry.files }}</span>{% else %}<strong>Outside library</strong>{% endif %}
+                </div>
+                {% for link in entry.links %}
+                <div class="group-relation{% if link.outside %} outside-entry{% endif %}">{{ link.label }} {{ link.peer }}</div>
+                {% endfor %}
+            </li>
+        {% endfor %}
+        </ol>
+    </details>
+    {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

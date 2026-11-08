@@ -21,6 +21,7 @@ I built this because Sonarr doesn't always work well for anime. The RSS sync for
 ## Screenshots
 
 <img width="1920" height="1080" alt="Library: series cards with cover art, format, episode count, and completeness" src=".github/screenshots/library.webp" />
+<img width="1100" height="850" alt="Fate library group in release order, with episode 13 missing from the second part and Sunny Day outside the library" src=".github/screenshots/library-groups.webp" />
 <img width="1920" height="1080" alt="Series page: hero banner, metadata, and related entries" src=".github/screenshots/series.webp" />
 <img width="1920" height="1080" alt="Series page: monitoring, upgrades, and the episode table with per-episode quality" src=".github/screenshots/episodes.webp" />
 <img width="1920" height="1080" alt="Search: Nyaa results scored and ranked, with one-click Grab" src=".github/screenshots/search.webp" />

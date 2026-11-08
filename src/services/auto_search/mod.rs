@@ -3032,6 +3032,7 @@ mod tests {
 
     fn detail(id: i64, romaji: &str, english: &str, native: &str) -> AnimeDetail {
         AnimeDetail {
+            release_date: None,
             is_adult: false,
             id,
             id_mal: None,
@@ -3068,6 +3069,7 @@ mod tests {
         english: &str,
     ) -> crate::services::anilist::RelatedEntry {
         crate::services::anilist::RelatedEntry {
+            release_date: None,
             id: 1,
             id_mal: None,
             title_romaji: romaji.into(),
