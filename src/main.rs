@@ -770,6 +770,7 @@ async fn main() {
             "/library/review",
             get(handlers::library::pages::needs_review_page),
         )
+        .merge(handlers::release_follows::routes())
         .route("/library/recycle", get(handlers::library::recycle::page))
         // #122 manual import wizard. Form-POST + server render; the
         // per-group override controls swap a single card via HTMX.
@@ -1827,6 +1828,46 @@ async fn main() {
                     }
                 },
             )
+            .await;
+        });
+    }
+
+    {
+        let db = db.clone();
+        let registry = state.tasks.clone();
+        let key = "release_follows";
+        let _ = models::scheduled_tasks::touch_definition(
+            &db,
+            key,
+            "Follow future releases",
+            "Every 6 hours",
+            true,
+        )
+        .await;
+        tokio::spawn(async move {
+            supervise(&registry, key, move || {
+                let db = db.clone();
+                async move {
+                    loop {
+                        let _ = models::scheduled_tasks::mark_started(
+                            &db,
+                            key,
+                            "Checking AniList sequels",
+                        )
+                        .await;
+                        let (status, detail) = match services::release_follows::refresh(&db).await {
+                            Ok(n) => ("ok", format!("Added {n} releases")),
+                            Err(err) => ("error", err),
+                        };
+                        let _ =
+                            models::scheduled_tasks::mark_finished(&db, key, status, &detail).await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(6 * 3600)) => {},
+                            _ = services::release_follows::SETTINGS_CHANGED.notified() => {},
+                        }
+                    }
+                }
+            })
             .await;
         });
     }

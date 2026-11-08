@@ -122,6 +122,8 @@ pub(crate) fn search_has_no_source(nyaa_enabled: bool, indexer_count: usize) -> 
 struct SeriesTemplate {
     page: String,
     route_id: i64,
+    follow_anilist_id: i64,
+    follow_title: String,
     detail: anilist::AnimeDetail,
     is_tracked: bool,
     db_id: Option<i64>,
