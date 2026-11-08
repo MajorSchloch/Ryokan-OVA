@@ -40,9 +40,9 @@ function addSeries(anilistId, btn) {
     })
     .then(data => {
         if (!btn.isConnected) return;
-        if (!data.created && btn.closest('#discovery-results')) {
+        if (!data.created && list) {
             // Another tab or a follow already added it. Keep its monitoring.
-            window.location.reload();
+            window.location.assign('/series/' + data.id);
             return;
         }
         btn.textContent = 'Added';

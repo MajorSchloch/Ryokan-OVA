@@ -1,6 +1,6 @@
 //! Calendar premiere list. All reads are local, including library membership.
 use crate::{
-    models::config,
+    models::{config, series},
     services::{anilist::discovery::Premiere, calendar::discovery, library_link::pick_title},
 };
 use askama::Template;
@@ -12,7 +12,7 @@ use axum::{
 use chrono::{NaiveDate, Utc};
 use serde::Deserialize;
 use sqlx::SqlitePool;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
@@ -75,32 +75,9 @@ fn announced_date(item: &Premiere) -> String {
 async fn load(db: &SqlitePool, filters: Filters) -> Result<DiscoveryPage, String> {
     let snapshot = discovery::read(db).await?;
     let lang = config::get_naming_prefs(db).await.title_language;
-    let library = sqlx::query_as::<_, (i64, i64, Option<i64>)>(
-        "SELECT id, anilist_id, mal_id FROM series ORDER BY id",
-    )
-    .fetch_all(db)
-    .await
-    .map_err(|e| e.to_string())?;
-    let mut tracked = HashMap::new();
-    let mut legacy = HashMap::new();
-    let mut parts = HashMap::<i64, HashSet<i64>>::new();
-    for (id, al, mal) in library {
-        if al > 0 {
-            tracked.insert(al, id);
-            if let Some(mal) = mal {
-                parts.entry(mal).or_default().insert(al);
-            }
-        } else if let Some(mal) = mal {
-            legacy.entry(mal).or_insert(id);
-        }
-    }
-    // A legacy negative-ID row can stand for a single known AniList entry.
-    // A shared MAL ID cannot decide which of two parts the user already owns.
-    for item in &snapshot.entries {
-        if let Some(mal) = item.entry.id_mal {
-            parts.entry(mal).or_default().insert(item.entry.id);
-        }
-    }
+    let tracked = series::library_ids_by_anilist(db)
+        .await
+        .map_err(|e| e.to_string())?;
     let today = Utc::now().date_naive();
     let mut dated = BTreeMap::<NaiveDate, Vec<Card>>::new();
     let mut announced = Vec::new();
@@ -114,14 +91,7 @@ async fn load(db: &SqlitePool, filters: Filters) -> Result<DiscoveryPage, String
         if !entry.format.is_empty() {
             formats.insert(entry.format.clone());
         }
-        let id = tracked.get(&entry.id).copied().or_else(|| {
-            let mal = entry.id_mal?;
-            if parts.get(&mal)?.len() == 1 {
-                legacy.get(&mal).copied()
-            } else {
-                None
-            }
-        });
+        let id = tracked.get(&entry.id).copied();
         if (filters.hide_tracked && id.is_some())
             || (!filters.format.is_empty() && filters.format != entry.format)
         {

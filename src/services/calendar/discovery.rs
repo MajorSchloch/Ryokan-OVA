@@ -38,9 +38,22 @@ pub async fn refresh(db: &SqlitePool) -> Result<(), String> {
     match discovery::fetch().await {
         Ok(items) => {
             let json = serde_json::to_string(&items).map_err(|e| e.to_string())?;
+            let mut tx = db
+                .begin_with("BEGIN IMMEDIATE")
+                .await
+                .map_err(|e| e.to_string())?;
+            // Save identities from the outgoing snapshot, including snapshots
+            // published before this table existed. Older tabs can still post them.
+            sqlx::query("INSERT INTO discovery_media_ids(anilist_id, mal_id)
+                SELECT item.value ->> '$.entry.id', item.value ->> '$.entry.id_mal'
+                FROM premiere_discovery, json_each(CASE WHEN json_valid(entries) THEN entries END) item
+                WHERE item.type='object' AND item.value ->> '$.entry.id'>0 AND item.value ->> '$.entry.id_mal'>0
+                ON CONFLICT(anilist_id) DO UPDATE SET mal_id=excluded.mal_id")
+                .execute(&mut *tx).await.map_err(|e| e.to_string())?;
             sqlx::query("INSERT INTO premiere_discovery(id,entries,refreshed_at,failed) VALUES(1,?,unixepoch(),0)
                 ON CONFLICT(id) DO UPDATE SET entries=excluded.entries,refreshed_at=excluded.refreshed_at,failed=0")
-                .bind(json).execute(db).await.map_err(|e| e.to_string())?;
+                .bind(json).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+            tx.commit().await.map_err(|e| e.to_string())?;
             Ok(())
         }
         Err(err) => {
