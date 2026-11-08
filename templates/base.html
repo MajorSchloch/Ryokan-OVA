@@ -31,7 +31,7 @@
        on a dark page during the flash window between first paint and
        full external CSS application. #}
     <meta name="color-scheme" content="dark">
-    <title>Ryokan{% block title %}{% endblock %}</title>
+    <title>Ryokan OVA{% block title %}{% endblock %}</title>
     {# Critical inline CSS — paint background + base text color + body
        font on the *very first paint*, before any external stylesheet
        has finished arriving. Five render-blocking `<link>` tags + a
@@ -140,7 +140,7 @@
     })();
     </script>
     <nav class="nav">
-        <a href="/" class="nav-brand"><span class="brand-kanji">旅館</span><span class="brand-latin">Ryokan</span></a>
+        <a href="/" class="nav-brand" aria-label="旅館 Ryokan OVA home"><span class="brand-kanji">旅館</span><span class="brand-latin">Ryokan OVA</span></a>
         <div class="nav-links">
             <a href="/" class="{% if page == "library" %}active{% endif %}">Library</a>
             {# The bulk-select toggle used to live here (library-only,

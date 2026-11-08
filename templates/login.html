@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ryokan - Login</title>
+    <title>Ryokan OVA - Login</title>
     <link rel="stylesheet" href="/static/css/base.css?v={{ crate::asset_version() }}">
     <link rel="stylesheet" href="/static/css/forms.css?v={{ crate::asset_version() }}">
     <link rel="stylesheet" href="/static/css/pages/auth.css?v={{ crate::asset_version() }}">
 </head>
 <body class="auth-page">
     <div class="auth-container">
-        <h1 class="auth-brand">旅館 Ryokan</h1>
+        <h1 class="auth-brand">旅館 Ryokan OVA</h1>
         <p class="auth-sub">Sign in to continue</p>
         {% if let Some(err) = error %}
             <div class="alert alert-error">{{ err }}</div>
