@@ -11,10 +11,36 @@ It monitors new entries that start on or after your follow date. Following a tit
 <p>To start a follow, open an anime and select <strong>Follow future releases</strong>.</p>
 {% endif %}
 {% for follow in follows %}
-<section class="cf-section">
+<section class="cf-section release-follow">
     <h3><a href="/series/{{ follow.anilist_id }}?by=anilist">{{ follow.title }}</a></h3>
-    {% if follow.id > 0 %}<p>Followed since <time datetime="{{ follow.started_on }}">{{ follow.started_on }}</time> (UTC)</p>{% endif %}
-    <form method="post" action="/library/follows{% if follow.id > 0 %}/{{ follow.id }}{% endif %}">
+    {% if follow.id > 0 %}
+    <div class="follow-check">
+        <p>Followed since <time datetime="{{ follow.started_on }}">{{ follow.started_on }}</time> (UTC)</p>
+        {% if let Some(at) = follow.last_success_at %}
+        <p>Last successful AniList check: <time datetime="{{ at.replace(" ", "T") }}Z">{{ at }} UTC</time></p>
+        {% endif %}
+        {% if follow.check_status.as_deref() == Some("failed") %}
+        <p class="follow-check-failed">Latest AniList check failed{% if let Some(at) = follow.last_checked_at %} · <time datetime="{{ at.replace(" ", "T") }}Z">{{ at }} UTC</time>{% endif %}</p>
+        {% endif %}
+    </div>
+    <h4 class="settings-label">Matched releases</h4>
+    {% if !follow.matches.is_empty() %}
+    <ul class="follow-matches">
+        {% for release in follow.matches %}
+        <li><a href="{% if let Some(id) = release.series_id %}/series/{{ id }}{% else %}/series/{{ release.anilist_id }}?by=anilist{% endif %}">{{ release.title }}</a></li>
+        {% endfor %}
+    </ul>
+    {% else if follow.check_status.as_deref() == Some("pending") %}
+    <p>Not checked yet</p>
+    {% else if follow.last_success_at.is_some() %}
+    <p>Checked — no matching releases yet.</p>
+    {% else if follow.check_status.is_none() %}
+    <p>No check history recorded.</p>
+    {% else %}
+    <p>No successful check recorded.</p>
+    {% endif %}
+    {% endif %}
+    <form class="follow-options" method="post" action="/library/follows{% if follow.id > 0 %}/{{ follow.id }}{% endif %}">
         {% if follow.id == 0 %}
         <input type="hidden" name="anilist_id" value="{{ follow.anilist_id }}">
         <input type="hidden" name="title" value="{{ follow.title }}">

@@ -1233,3 +1233,12 @@
     #library-table .page-header { align-items: start; flex-direction: column; }
     .table-controls { padding: .75rem; }
 }
+
+/* Release follows share the library page styles and card layout. */
+.release-follow { overflow-wrap: anywhere; }
+.follow-check { color: var(--text-dim); font-size: 0.875rem; }
+.follow-check time { display: inline-block; }
+.follow-options { margin-top: 1rem; }
+.follow-check-failed { color: var(--orange); }
+.follow-matches { padding-inline-start: 1.4rem; }
+.follow-matches li + li { margin-top: 0.25rem; }

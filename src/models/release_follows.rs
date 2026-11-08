@@ -3,7 +3,7 @@ use sqlx::SqlitePool;
 use super::{monitoring::MonitorMode, series};
 use crate::services::{anilist::RelatedEntry, library_link::pick_title};
 
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Default, Debug, Clone, sqlx::FromRow)]
 pub struct Follow {
     pub id: i64,
     pub anilist_id: i64,
@@ -12,12 +12,81 @@ pub struct Follow {
     pub movies: bool,
     pub ovas: bool,
     pub alternatives: bool,
+    pub check_status: Option<String>,
+    pub last_checked_at: Option<String>,
+    pub last_success_at: Option<String>,
+    #[sqlx(skip)]
+    pub matches: Vec<MatchedRelease>,
 }
 
-pub async fn list(db: &SqlitePool) -> Result<Vec<Follow>, sqlx::Error> {
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct MatchedRelease {
+    pub follow_id: i64,
+    pub anilist_id: i64,
+    pub title: String,
+    pub series_id: Option<i64>,
+}
+
+pub async fn list<'e>(db: impl sqlx::SqliteExecutor<'e>) -> Result<Vec<Follow>, sqlx::Error> {
     sqlx::query_as("SELECT * FROM release_follows ORDER BY title COLLATE NOCASE, id")
         .fetch_all(db)
         .await
+}
+
+/// Render from local records. Use the receipt title if the series was removed.
+pub async fn list_with_matches(db: &SqlitePool) -> Result<Vec<Follow>, sqlx::Error> {
+    let mut tx = db.begin().await?;
+    let mut follows = list(&mut *tx).await?;
+    let releases: Vec<MatchedRelease> = sqlx::query_as(
+        "SELECT r.follow_id, r.anilist_id, s.id AS series_id,
+            COALESCE(NULLIF(s.title,''), NULLIF(r.title,''),
+                CASE WHEN json_valid(p.detail_json) THEN COALESCE(
+                    NULLIF(json_extract(p.detail_json,'$.title_romaji'),''),
+                    NULLIF(json_extract(p.detail_json,'$.title_english'),''),
+                    NULLIF(json_extract(p.detail_json,'$.title_native'),'')) END,
+                'AniList #' || r.anilist_id) AS title
+         FROM followed_releases r
+         LEFT JOIN series s ON s.anilist_id=r.anilist_id
+         LEFT JOIN provider_metadata_cache p ON p.provider_id=r.anilist_id
+         ORDER BY r.follow_id, title COLLATE NOCASE, r.anilist_id",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    let mut by_follow = std::collections::HashMap::<_, Vec<_>>::new();
+    for release in releases {
+        by_follow
+            .entry(release.follow_id)
+            .or_default()
+            .push(release);
+    }
+    for follow in &mut follows {
+        follow.matches = by_follow.remove(&follow.id).unwrap_or_default();
+    }
+    Ok(follows)
+}
+
+pub(crate) async fn record_check(
+    db: &SqlitePool,
+    follow: &Follow,
+    succeeded: bool,
+) -> Result<(), sqlx::Error> {
+    // Ignore a result from a check that used settings the user has since changed.
+    sqlx::query(
+        "UPDATE release_follows SET
+        check_status = CASE WHEN ?1 THEN 'success' ELSE 'failed' END,
+        last_checked_at = CURRENT_TIMESTAMP,
+        last_success_at = CASE WHEN ?1 THEN CURRENT_TIMESTAMP ELSE last_success_at END
+        WHERE id=?2 AND movies=?3 AND ovas=?4 AND alternatives=?5",
+    )
+    .bind(succeeded)
+    .bind(follow.id)
+    .bind(follow.movies)
+    .bind(follow.ovas)
+    .bind(follow.alternatives)
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 pub async fn start(
@@ -29,8 +98,8 @@ pub async fn start(
     alternatives: bool,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO release_follows (anilist_id, title, movies, ovas, alternatives)
-        VALUES (?, ?, ?, ?, ?) ON CONFLICT(anilist_id) DO NOTHING",
+        "INSERT INTO release_follows (anilist_id, title, movies, ovas, alternatives, check_status)
+        VALUES (?, ?, ?, ?, ?, 'pending') ON CONFLICT(anilist_id) DO NOTHING",
     )
     .bind(root)
     .bind(title)
@@ -76,14 +145,21 @@ pub(crate) async fn accept(
 ) -> Result<bool, sqlx::Error> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     // Settings or the follow itself may have changed during the AniList request.
+    let title = pick_title(
+        "romaji",
+        &entry.title_english,
+        &entry.title_romaji,
+        &entry.title_native,
+    );
     let receipt = sqlx::query(
-        "INSERT INTO followed_releases (follow_id, anilist_id)
-        SELECT id, ? FROM release_follows WHERE id = ? AND movies = ? AND ovas = ? AND alternatives = ?
+        "INSERT INTO followed_releases (follow_id, anilist_id, title)
+        SELECT id, ?, ? FROM release_follows WHERE id = ? AND movies = ? AND ovas = ? AND alternatives = ?
           AND NOT EXISTS (SELECT 1 FROM external_sync_exclusions WHERE anilist_id = ?
                           OR (anilist_id IS NULL AND mal_id = ?))
         ON CONFLICT DO NOTHING",
     )
     .bind(entry.id)
+    .bind(title)
     .bind(follow.id)
     .bind(follow.movies)
     .bind(follow.ovas)
@@ -93,6 +169,10 @@ pub(crate) async fn accept(
     .execute(&mut *tx)
     .await?;
     if receipt.rows_affected() == 0 {
+        // Older receipts may outlive both the library entry and its cached metadata.
+        sqlx::query("UPDATE followed_releases SET title=? WHERE follow_id=? AND anilist_id=? AND title IS NULL")
+            .bind(title).bind(follow.id).bind(entry.id).execute(&mut *tx).await?;
+        tx.commit().await?;
         return Ok(false);
     }
     // A positive AniList ID owns its own season, even when two share a MAL ID.
@@ -111,12 +191,6 @@ pub(crate) async fn accept(
         return Ok(false);
     }
 
-    let title = pick_title(
-        "romaji",
-        &entry.title_english,
-        &entry.title_romaji,
-        &entry.title_native,
-    );
     let core = series::SeriesCore {
         anilist_id: entry.id,
         mal_id: entry.id_mal,
@@ -147,6 +221,41 @@ pub(crate) async fn accept(
 mod tests {
     use super::*;
     use crate::test_support::in_memory_pool;
+
+    #[tokio::test]
+    async fn migration_preserves_legacy_matches_without_inventing_check_dates() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql("
+            CREATE TABLE release_follows (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                anilist_id INTEGER NOT NULL UNIQUE, title TEXT NOT NULL, started_on TEXT NOT NULL,
+                movies BOOLEAN NOT NULL, ovas BOOLEAN NOT NULL, alternatives BOOLEAN NOT NULL);
+            CREATE TABLE followed_releases (follow_id INTEGER NOT NULL REFERENCES release_follows(id)
+                ON DELETE CASCADE, anilist_id INTEGER NOT NULL, PRIMARY KEY(follow_id, anilist_id));
+            INSERT INTO release_follows VALUES (1,10,'Original','2024-01-02',1,0,0);
+            INSERT INTO followed_releases VALUES (1,11);
+        ").execute(&db).await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let id = crate::test_support::seed_series(&db, 11, "Existing sequel").await;
+        let follow = list_with_matches(&db).await.unwrap().remove(0);
+        assert!(follow.check_status.is_none());
+        assert!(follow.last_success_at.is_none() && follow.last_checked_at.is_none());
+        assert_eq!(follow.started_on, "2024-01-02");
+        assert!(follow.movies);
+        assert_eq!(follow.matches.len(), 1);
+        assert_eq!(follow.matches[0].title, "Existing sequel");
+        assert_eq!(follow.matches[0].series_id, Some(id));
+
+        record_check(&db, &follow, false).await.unwrap();
+        let failed = list_with_matches(&db).await.unwrap().remove(0);
+        assert!(failed.last_success_at.is_none());
+        assert!(failed.last_checked_at.is_some());
+        assert_eq!(failed.check_status.as_deref(), Some("failed"));
+        record_check(&db, &follow, true).await.unwrap();
+        let recovered = list_with_matches(&db).await.unwrap().remove(0);
+        assert_eq!(recovered.check_status.as_deref(), Some("success"));
+        assert!(recovered.last_success_at.is_some());
+        assert_eq!(recovered.matches.len(), 1);
+    }
 
     #[tokio::test]
     async fn calendar_add_and_release_follow_share_one_entry_and_upgrade_default() {

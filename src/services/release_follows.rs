@@ -40,6 +40,7 @@ async fn check_follow(
     let mut visited = HashSet::from([follow.anilist_id]);
     let mut frontier = vec![follow.anilist_id];
     let mut added = 0;
+    let mut incomplete = false;
     while !frontier.is_empty() {
         let missing: Vec<_> = frontier
             .iter()
@@ -53,7 +54,11 @@ async fn check_follow(
         }
         let mut next = Vec::new();
         for id in frontier {
-            for entry in graph.get(&id).into_iter().flatten() {
+            let Some(entries) = graph.get(&id) else {
+                incomplete = true;
+                continue;
+            };
+            for entry in entries {
                 if !follow.follows_edge(entry) || !visited.insert(entry.id) {
                     continue;
                 }
@@ -70,6 +75,9 @@ async fn check_follow(
         }
         frontier = next;
     }
+    if incomplete {
+        return Err("AniList did not return all requested entries".into());
+    }
     Ok(added)
 }
 
@@ -79,7 +87,14 @@ pub async fn refresh(db: &SqlitePool) -> Result<usize, String> {
     let mut added = 0;
     let mut errors = Vec::new();
     for follow in follows {
-        match check_follow(db, &follow, &mut graph).await {
+        let result = check_follow(db, &follow, &mut graph).await;
+        if let Err(e) = release_follows::record_check(db, &follow, result.is_ok()).await {
+            errors.push(format!(
+                "Could not save check for AniList {}: {e}",
+                follow.anilist_id
+            ));
+        }
+        match result {
             Ok(n) => added += n,
             Err(e) => errors.push(format!("AniList {}: {e}", follow.anilist_id)),
         }
@@ -105,6 +120,7 @@ mod tests {
             movies: false,
             ovas: false,
             alternatives: false,
+            ..Follow::default()
         };
         let mut entry: RelatedEntry = serde_json::from_value(serde_json::json!({
             "id":2, "title_romaji":"Related", "title_english":"", "title_native":"", "cover_url":"",
