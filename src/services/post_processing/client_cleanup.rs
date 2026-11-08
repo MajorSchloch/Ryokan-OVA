@@ -353,7 +353,7 @@ async fn remove_from_client(
             let removed = remove_stamped_source_paths(&outside_library).await;
             if !removed.is_empty() {
                 detail.push_str(&format!(
-                    "; unlinked {} source file(s) SAB left behind",
+                    "; unlinked {} source file(s) left by the Usenet client",
                     removed.len()
                 ));
             }

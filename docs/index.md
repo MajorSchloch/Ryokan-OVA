@@ -14,7 +14,7 @@ If you've used Sonarr for TV, the shape is the same. Ryokan is just the anime-tu
 - **Pick the best release automatically.** A quality profile, [TRaSH-Guides](https://trash-guides.info)-compatible Custom Formats (the same scoring rules Sonarr uses), and optional [SeaDex](https://releases.moe) picks (a community-curated list of best anime releases) decide what gets grabbed.
 - **Re-grab when something better lands.** Set a quality cutoff and Ryokan keeps watching for higher-quality uploads, replacing older grabs as higher-scoring releases show up.
 - **See what's airing this week.** A built-in [Calendar](calendar.md) shows upcoming episodes for the shows in your library, as a list or a month grid. You can also subscribe to it from your phone or laptop's calendar app.
-- **Use the download client you already have.** qBittorrent, Deluge, Transmission, rTorrent, or SABnzbd. Run more than one at once and Ryokan routes per-grab.
+- **Use the download client you already have.** qBittorrent, Deluge, Transmission, rTorrent, SABnzbd, or NZBGet. Run more than one at once and Ryokan routes per-grab.
 - **Land files in your library automatically.** Hardlink (default; keeps the torrent seeding), copy, or move.
 - **Import the anime you already have.** Point the [import wizard](manual-import.md) at a folder; it matches each series on AniList and lands the files in place.
 - **Undo a deletion.** With a recycle bin configured, deleted episodes and series folders wait there until you restore or purge them.
@@ -33,7 +33,7 @@ If you'd rather build the stack yourself, work through these in order:
 1. **[Quick start](quick-start.md)**: get Ryokan running and grabbing in about 10 minutes. Hands-held end to end.
 2. **[Docker installation](install.md)**: the Docker-only details. Skip if the Stack builder generated your compose for you.
 3. **[Configuration](configuration.md)**: the tabs in Settings, what each does, what to leave alone.
-4. **[Download clients](download-clients.md)**: per-client setup notes (qBit, Deluge, Transmission, rTorrent, SABnzbd).
+4. **[Download clients](download-clients.md)**: per-client setup notes (qBit, Deluge, Transmission, rTorrent, SABnzbd, NZBGet).
 5. **[External accounts](external-accounts.md)**: link AniList or MAL so your watch list pulls into Ryokan automatically.
 
 ## When something's wrong

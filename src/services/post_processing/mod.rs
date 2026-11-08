@@ -3891,9 +3891,16 @@ pub async fn run_once(state: &AppState) {
             &torrent.save_path,
             local_download_path,
         );
+        // For Usenet the extracted job folder is the import root. A walk
+        // of the parent can assign another application's files to this grab.
+        let import_root = if client.protocol() == "usenet" && !client_path.is_empty() {
+            &client_path
+        } else {
+            &local_save_path
+        };
         let _ = grabbed_torrents::stamp_client_content_path(&state.db, grab.id, &client_path).await;
 
-        match import_torrent(state, &cfg, grab, &torrent.hash, &local_save_path, &client).await {
+        match import_torrent(state, &cfg, grab, &torrent.hash, import_root, &client).await {
             Ok(ImportOutcome::Protected {
                 imported_files,
                 skipped_files,

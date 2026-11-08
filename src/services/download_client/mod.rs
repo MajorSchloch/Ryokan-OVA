@@ -41,6 +41,7 @@ pub mod rtorrent;
 
 pub mod transmission;
 
+pub mod nzbget;
 pub mod sabnzbd;
 
 /// Refuse a release URL that isn't `magnet:`, `http://` or `https://`
@@ -115,7 +116,7 @@ pub trait DownloadClient: Send + Sync {
     /// IS the canonical id at the wire level. Only impls whose wire
     /// id can't be derived from the URL alone need to override —
     /// SAB returns the `nzo_id` from the queue add response;
-    /// hypothetical NZBGet would return its `NzbId`.
+    /// NZBGet returns its persistent Ryokan job key.
     async fn add_torrent_returning_id(
         &self,
         url: &str,
@@ -595,11 +596,7 @@ pub fn translate_client_path(
 /// unknown kinds at instantiation time, so an unrecognized kind
 /// here just means the indexer-pin save path won't second-guess.
 pub fn protocol_for_client_kind(kind: &str) -> Option<&'static str> {
-    match kind {
-        "qbittorrent" | "deluge" | "transmission" | "rtorrent" => Some("torrent"),
-        "sabnzbd" => Some("usenet"),
-        _ => None,
-    }
+    crate::models::download_clients::protocol_for_kind(kind)
 }
 
 /// Mirror for `indexers.kind`. Torznab indexers surface torrent
@@ -671,6 +668,14 @@ pub async fn rebuild_clients_cache(cache: &crate::DownloadClientsCache, db: &sql
                 &row.username,
                 &row.password,
                 &row.label,
+            ))),
+            "nzbget" if !row.url.is_empty() => Some(Arc::new(nzbget::NzbgetClient::new(
+                row.id,
+                &row.url,
+                &row.username,
+                &row.password,
+                &row.label,
+                &row.download_path,
             ))),
             // SAB takes (url, username, api_key, category).
             // The `download_clients.password` column carries the SAB
