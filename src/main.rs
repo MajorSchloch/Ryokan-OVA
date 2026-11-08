@@ -770,6 +770,7 @@ async fn main() {
             "/library/review",
             get(handlers::library::pages::needs_review_page),
         )
+        .route("/library/table", get(handlers::library::table::page))
         .route("/library/groups", get(handlers::library::groups::page))
         .merge(handlers::release_follows::routes())
         .route("/library/recycle", get(handlers::library::recycle::page))

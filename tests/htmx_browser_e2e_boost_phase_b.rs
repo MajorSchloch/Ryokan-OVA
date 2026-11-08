@@ -419,3 +419,89 @@ async fn data_ts_rebinds_after_boosted_nav() {
 
     let _ = client.close().await;
 }
+
+#[tokio::test]
+async fn saved_future_follows_filter_survives_a_library_reload() {
+    let client = match try_connect_browser().await {
+        Ok(c) => c,
+        Err(msg) => {
+            eprintln!("[skip] {msg}");
+            return;
+        }
+    };
+    let db = in_memory_pool().await;
+    ryokan::test_support::seed_series(&db, 11, "Tracked title").await;
+    ryokan::models::release_follows::start(&db, 22, "Follow without files", false, false, false)
+        .await
+        .unwrap();
+    let session = seed_user_session(&db).await;
+    let addr = spawn_app(build_test_app_state(db, None)).await;
+    open_with_session(&client, addr, &session, "/")
+        .await
+        .unwrap();
+    client
+        .find(Locator::Css("a[href='/library/table']"))
+        .await
+        .unwrap()
+        .click()
+        .await
+        .unwrap();
+    let wait = Duration::from_secs(5);
+    wait_for_js_truthy(
+        &client,
+        "document.querySelector('#library-table')?.dataset.bound === 'true'",
+        wait,
+    )
+    .await
+    .unwrap();
+    client
+        .find(Locator::Css("#table-preset"))
+        .await
+        .unwrap()
+        .select_by_value("follows")
+        .await
+        .unwrap();
+    client
+        .find(Locator::Css(".table-presets summary"))
+        .await
+        .unwrap()
+        .click()
+        .await
+        .unwrap();
+    client
+        .find(Locator::Css("#table-name"))
+        .await
+        .unwrap()
+        .send_keys("Later seasons")
+        .await
+        .unwrap();
+    client
+        .find(Locator::Css("#table-save"))
+        .await
+        .unwrap()
+        .click()
+        .await
+        .unwrap();
+    client.goto(&format!("http://{addr}/")).await.unwrap();
+    wait_for_js_truthy(
+        &client,
+        "document.querySelector('#table-preset')?.value === 'user:Later seasons'",
+        wait,
+    )
+    .await
+    .unwrap();
+    let titles = client
+        .find_all(Locator::Css("tbody tr:not([hidden]) td:first-child"))
+        .await
+        .unwrap();
+    assert_eq!(titles.len(), 1);
+    assert!(titles[0].text().await.unwrap().contains("Follow only"));
+    assert!(
+        titles[0]
+            .text()
+            .await
+            .unwrap()
+            .contains("Follow without files")
+    );
+    client.close().await.unwrap();
+}

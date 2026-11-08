@@ -9,11 +9,22 @@ pub mod cleanup;
 pub mod crud;
 pub mod episodes;
 pub mod groups;
+mod inventory;
 pub mod misgrabs;
 pub mod pages;
 pub mod reconcile;
 pub mod recycle;
 pub mod search;
+pub mod table;
+
+/// Keep the preferred landing page in this browser. The index checks this
+/// before loading poster metadata or scanning any folders.
+fn view_cookie(view: &str) -> [(axum::http::HeaderName, String); 1] {
+    [(
+        axum::http::header::SET_COOKIE,
+        format!("library_view={view}; Path=/; Max-Age=31536000; SameSite=Lax; HttpOnly"),
+    )]
+}
 
 /// Per-card completeness summary for the library grid's status bar.
 /// Answers exactly one question — "do I have what's aired?" — in

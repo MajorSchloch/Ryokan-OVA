@@ -1192,3 +1192,44 @@
     color: var(--yellow);
 }
 .library-groups:not(:has(#group-missing:checked)) .outside-entry { display: none; }
+
+/* Library table. On a phone only the data region scrolls sideways. */
+#library-table nav, .table-presets, .table-results { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.table-controls { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; }
+.table-filters { display: grid; grid-template-columns: 1.5fr repeat(3, 1fr); gap: .8rem; }
+.table-controls label { display: grid; gap: .3rem; font-size: .82rem; font-weight: 600; }
+.table-controls input, .table-controls select { min-width: 0; max-width: none; width: 100%; height: 2.45rem; }
+#table-name { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: .5rem; }
+.table-presets { margin-top: .8rem; align-items: end; }
+.table-results { justify-content: space-between; margin: 1rem 0 .6rem; }
+#library-table details { position: relative; }
+#library-table summary { cursor: pointer; }
+.table-panel { position: absolute; top: 100%; z-index: 3; background: var(--bg-card); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: .85rem; width: 15rem; display: grid; gap: .55rem; }
+#table-columns { right: 0; margin: 0; }
+#table-columns legend { float: left; font-weight: 600; }
+#table-columns label { cursor: pointer; }
+.library-table-scroll { overflow-x: auto; max-width: 100%; border: 1px solid var(--border); border-radius: var(--radius); }
+.library-table-scroll table { border-collapse: collapse; width: 100%; background: var(--bg-card); font-size: .88rem; }
+.library-table-scroll th, .library-table-scroll td { text-align: left; border-bottom: 1px solid var(--border); padding: .75rem .7rem; }
+.library-table-scroll th { min-width: 4.5rem; background: var(--bg-elevated); font-size: .78rem; }
+.library-table-scroll th button { display: inline-flex; align-items: center; gap: .25rem; padding: 0; text-align: left; border: 0; background: transparent; color: inherit; font: inherit; font-weight: 600; cursor: pointer; }
+.library-table-scroll th[aria-sort] button { color: var(--accent); }
+.library-table-scroll th[aria-sort="ascending"] button::after { content: '↑' / ''; }
+.library-table-scroll th[aria-sort="descending"] button::after { content: '↓' / ''; }
+.library-table-scroll td { font-variant-numeric: tabular-nums; }
+.library-table-scroll th[data-key="next"] { min-width: 8rem; }
+.library-table-scroll td:first-child { min-width: 12rem; font-weight: 600; }
+.library-table-scroll td small { display: block; font-weight: normal; color: var(--text-dim); }
+.library-table-scroll tbody tr:last-child td { border-bottom: 0; }
+.library-table-scroll tbody tr:hover, .library-table-scroll tbody tr:focus-within { background: var(--bg-elevated); }
+.table-mode { text-transform: capitalize; }
+.table-missing { color: var(--yellow); font-weight: 700; }
+#library-table :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 800px) {
+    .table-filters { grid-template-columns: repeat(2, minmax(0,1fr)); }
+    .table-presets > label { flex-basis: 100%; }
+}
+@media (max-width: 480px) {
+    #library-table .page-header { align-items: start; flex-direction: column; }
+    .table-controls { padding: .75rem; }
+}

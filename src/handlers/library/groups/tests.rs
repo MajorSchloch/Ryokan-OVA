@@ -127,7 +127,11 @@ async fn grouped_library_fate_release_order_ownership_and_local_numbers_are_read
             .iter()
             .any(|l| l.label == "Alternative to" && l.peer == SECOND_TITLE)
     );
-    let Html(html) = page(State(db.clone())).await.unwrap();
+    let response = page(State(db.clone())).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8(bytes.to_vec()).unwrap();
     let doc = scraper::Html::parse_document(&html);
     let select = |s| scraper::Selector::parse(s).unwrap();
     assert_eq!(doc.select(&select("details.library-group li")).count(), 3);
