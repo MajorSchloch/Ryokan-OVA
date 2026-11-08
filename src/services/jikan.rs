@@ -432,6 +432,7 @@ fn normalize_enum_label(raw: Option<String>) -> (String, String) {
 
 async fn fetch_relation_card_detail(mal_id: i64, fallback_name: &str) -> RelatedEntry {
     let fallback = || RelatedEntry {
+        release_date: None,
         id: -mal_id,
         id_mal: Some(mal_id),
         title_romaji: fallback_name.to_string(),
@@ -460,6 +461,7 @@ async fn fetch_relation_card_detail(mal_id: i64, fallback_name: &str) -> Related
     let (format, _) = normalize_enum_label(anime.anime_type);
     let (status, status_display) = normalize_enum_label(anime.status);
     RelatedEntry {
+        release_date: None,
         id: -anime.mal_id,
         id_mal: Some(anime.mal_id),
         title_romaji: non_empty(anime.title.as_deref().unwrap_or(""), fallback_name),
@@ -662,6 +664,7 @@ pub async fn get_anime_detail(mal_id: i64) -> Result<AnimeDetail, String> {
     let relations = enrich_relations(anime.relations.take().unwrap_or_default()).await;
 
     Ok(AnimeDetail {
+        release_date: None,
         is_adult: is_adult_rating(anime.rating.as_deref()),
         id: -anime.mal_id,
         id_mal: Some(anime.mal_id),

@@ -818,6 +818,9 @@ fn compose_search_error(anilist_reason: Option<&str>, jikan_err: &str) -> String
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RelatedEntry {
+    /// AniList premiere date, with the precision supplied by the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_date: Option<String>,
     pub id: i64,
     pub id_mal: Option<i64>,
     pub title_romaji: String,
@@ -867,6 +870,9 @@ fn de_plausible_count<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<i
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AnimeDetail {
+    /// AniList premiere date, with the precision supplied by the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_date: Option<String>,
     pub id: i64,
     pub id_mal: Option<i64>,
     pub title_romaji: String,
@@ -1076,6 +1082,18 @@ fn build_media_selector_variables(
     variables
 }
 
+fn premiere_date(date: &serde_json::Value) -> Option<String> {
+    let year = date["year"].as_u64().filter(|y| (1..=9999).contains(y))?;
+    let Some(month) = date["month"].as_u64().filter(|m| (1..=12).contains(m)) else {
+        return Some(format!("{year:04}"));
+    };
+    let Some(day) = date["day"].as_u64() else {
+        return Some(format!("{year:04}-{month:02}"));
+    };
+    chrono::NaiveDate::from_ymd_opt(year as i32, month as u32, day.try_into().ok()?)
+        .map(|d| d.to_string())
+}
+
 // A partial date proves eligibility only if the whole period is on or after
 // the follow date. An announced title can also qualify by its status.
 fn relation_start_date(value: &serde_json::Value) -> Option<String> {
@@ -1101,6 +1119,7 @@ const MEDIA_DETAIL_FIELDS: &str = r#"
     duration
     season
     seasonYear
+    startDate { year month day }
     endDate { year }
     description(asHtml: true)
     genres
@@ -1281,7 +1300,7 @@ async fn fetch_media_detail(selector: MediaSelector) -> Result<Vec<AnimeDetail>,
 /// missing or non-numeric — every downstream consumer requires `id > 0`,
 /// so a 0-id placeholder would just leak into caches and confuse later
 /// `id > 0` filters into thinking the entry is a Jikan-fallback row.
-fn parse_media_node(m: &serde_json::Value) -> Option<AnimeDetail> {
+pub(crate) fn parse_media_node(m: &serde_json::Value) -> Option<AnimeDetail> {
     let streaming_episodes = m["streamingEpisodes"]
         .as_array()
         .map(|arr| {
@@ -1303,6 +1322,7 @@ fn parse_media_node(m: &serde_json::Value) -> Option<AnimeDetail> {
                 .filter_map(|edge| {
                     let node = &edge["node"];
                     Some(RelatedEntry {
+                        release_date: premiere_date(&node["startDate"]),
                         id: node["id"].as_i64()?,
                         id_mal: node["idMal"].as_i64(),
                         title_romaji: node["title"]["romaji"].as_str().unwrap_or("").to_string(),
@@ -1328,6 +1348,7 @@ fn parse_media_node(m: &serde_json::Value) -> Option<AnimeDetail> {
 
     let id = m["id"].as_i64().filter(|&n| n > 0)?;
     Some(AnimeDetail {
+        release_date: premiere_date(&m["startDate"]),
         is_adult: m["isAdult"].as_bool().unwrap_or(false),
         id,
         id_mal: m["idMal"].as_i64(),
@@ -1482,6 +1503,7 @@ pub async fn get_anime_details_batch(ids: &[i64]) -> Result<HashMap<i64, AnimeDe
                             duration
                             season
                             seasonYear
+                            startDate {{ year month day }}
                             endDate {{ year }}
                             description(asHtml: true)
                             genres
@@ -2056,6 +2078,38 @@ mod tests {
         ]);
         let arr = lists.as_array().unwrap();
         assert!(!all_buckets_are_custom_lists(arr));
+    }
+
+    #[test]
+    fn partial_premieres_keep_their_precision_and_follow_cutoff() {
+        use serde_json::json;
+
+        for (date, display, earliest) in [
+            (json!({}), None, None),
+            (json!({"year": 2026}), Some("2026"), Some("2026-01-01")),
+            (
+                json!({"year": 2026, "month": 5}),
+                Some("2026-05"),
+                Some("2026-05-01"),
+            ),
+            (
+                json!({"year": 2026, "month": 5, "day": 10}),
+                Some("2026-05-10"),
+                Some("2026-05-10"),
+            ),
+        ] {
+            let detail = parse_media_node(&json!({
+                "id": 1, "startDate": date,
+                "relations": {"edges": [{"relationType": "SEQUEL", "node": {
+                    "id": 2, "type": "ANIME", "startDate": date
+                }}]}
+            }))
+            .unwrap();
+            let sequel = &detail.relations[0];
+            assert_eq!(detail.release_date.as_deref(), display);
+            assert_eq!(sequel.release_date.as_deref(), display);
+            assert_eq!(sequel.start_date.as_deref(), earliest);
+        }
     }
 
     #[test]

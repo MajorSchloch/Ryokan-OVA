@@ -18,6 +18,7 @@ fn unique_media_root(suffix: &str) -> std::path::PathBuf {
 
 fn empty_anime_detail(id: i64, title_english: &str, episodes: Option<i32>) -> anilist::AnimeDetail {
     anilist::AnimeDetail {
+        release_date: None,
         is_adult: false,
         id,
         id_mal: None,
@@ -276,6 +277,7 @@ async fn build_episodes_surfaces_grab_tags_beyond_ep_count_without_disk_file() {
 /// pinned, not on a wall of empty positional args.
 fn default_relation() -> anilist::RelatedEntry {
     anilist::RelatedEntry {
+        release_date: None,
         id: 1,
         id_mal: None,
         title_romaji: String::new(),
