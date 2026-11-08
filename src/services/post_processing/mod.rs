@@ -4061,16 +4061,21 @@ pub async fn run_once(state: &AppState) {
                 // under the same unresolved numbering. Do not run the generic
                 // import-stall timer for this explicit mapping hold.
                 if e.starts_with("Episode mapping:") || e.starts_with("Import protection:") {
-                    logger::warn(
-                        &state.db,
-                        LogCategory::PostProcess,
-                        &format!(
-                            "Import held for '{}': review is required",
-                            grab.torrent_name
-                        ),
-                        &e,
-                    )
-                    .await;
+                    // Keep retrying every tick. A new reason needs immediate attention,
+                    // but an unchanged hold only needs an hourly reminder in System.
+                    let key = format!("import-hold:{}:{e}", grab.id);
+                    if logger::first_in_window(&key, std::time::Duration::from_secs(3600)) {
+                        logger::warn(
+                            &state.db,
+                            LogCategory::PostProcess,
+                            &format!(
+                                "Import held for '{}': review is required",
+                                grab.torrent_name
+                            ),
+                            &e,
+                        )
+                        .await;
+                    }
                     continue;
                 }
                 logger::error(
