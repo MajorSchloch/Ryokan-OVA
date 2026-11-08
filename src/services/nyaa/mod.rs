@@ -387,6 +387,31 @@ pub async fn enrich_results_with_group_map(db: &sqlx::SqlitePool, results: &mut 
     }
 }
 
+/// Canonical Nyaa public-tracker set, hardcoded so we don't have to
+/// scrape a magnet link out of the view page. DHT bootstrap alone works
+/// but is slow (tens of seconds to first peer); these five trackers are
+/// stable and shave the cold-start delay.
+pub(super) const NYAA_TRACKER_SET: &[&str] = &[
+    "http://nyaa.tracker.wf:7777/announce",
+    "udp://open.stealth.si:80/announce",
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://exodus.desync.com:6969/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+];
+
+pub(super) fn public_magnet_uri(hash: &str, display_name: &str) -> String {
+    let mut uri = format!("magnet:?xt=urn:btih:{hash}");
+    if !display_name.is_empty() {
+        uri.push_str("&dn=");
+        uri.push_str(&urlencoding::encode(display_name));
+    }
+    for tracker in NYAA_TRACKER_SET {
+        uri.push_str("&tr=");
+        uri.push_str(&urlencoding::encode(tracker));
+    }
+    uri
+}
+
 /// Extract the 40-char lowercase-hex info-hash from a magnet URI.
 /// Returns an empty string when the magnet doesn't carry a `btih:`
 /// URN. Handles both the 40-char hex form and the 32-char

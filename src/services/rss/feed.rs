@@ -694,6 +694,50 @@ mod parser_tests {
     use super::*;
 
     #[test]
+    fn nyaa_rss_uses_the_feed_hash_for_the_client() {
+        let hash = "abcdef0123abcdef0123abcdef0123abcdef0123";
+        let xml = format!(
+            "<item><title>Series - 07</title><link>https://nyaa.si/download/1.torrent</link>\
+             <nyaa:infoHash>{hash}</nyaa:infoHash></item>"
+        );
+        let mut item = parse_feed(&xml, RssSource::Nyaa).remove(0);
+        let magnet = item.nyaa_dispatch_magnet().unwrap();
+        assert_eq!(
+            crate::services::torrent_file::magnet_info_hash(&magnet).as_deref(),
+            Some(hash)
+        );
+        assert!(magnet.contains("&tr="));
+        assert_eq!(item.grab_url(), "https://nyaa.si/download/1.torrent");
+
+        item.magnet = format!("magnet:?xt=urn:btih:{hash}&dn=original");
+        assert_eq!(
+            item.nyaa_dispatch_magnet().as_deref(),
+            Some(item.magnet.as_str())
+        );
+        item.magnet = format!("magnet:?xt=urn:btih:{}", "b".repeat(40));
+        assert_eq!(item.nyaa_dispatch_magnet(), Some(magnet));
+
+        item.source = RssSource::Indexer {
+            id: 1,
+            name: "Private tracker".into(),
+            kind: "torznab".into(),
+        };
+        assert!(item.nyaa_dispatch_magnet().is_none());
+        item.source = RssSource::UserFeed {
+            id: 1,
+            name: "Private".into(),
+        };
+        assert!(item.nyaa_dispatch_magnet().is_none());
+
+        item.source = RssSource::Nyaa;
+        item.magnet.clear();
+        item.info_hash = "all".into();
+        assert!(item.nyaa_dispatch_magnet().is_none());
+        item.info_hash = "a".repeat(64);
+        assert!(item.nyaa_dispatch_magnet().is_none());
+    }
+
+    #[test]
     fn a_title_over_the_release_title_cap_is_dropped() {
         let long = "1".repeat(crate::services::media::MAX_RELEASE_TITLE_BYTES + 1);
         let xml = format!(
