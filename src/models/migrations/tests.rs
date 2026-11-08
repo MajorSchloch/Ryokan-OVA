@@ -1,6 +1,25 @@
 use super::*;
 
 #[tokio::test]
+async fn legacy_folder_backfill_recovers_the_original_underscore_path() {
+    let db = crate::test_support::in_memory_pool().await;
+    sqlx::query(
+        "INSERT INTO series (anilist_id, title, folder_name) VALUES
+         (9911, 'Fate/stay night: UBW', ''), (9912, 'Re:Zero', 'My_Chosen_Folder')",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    migrate(&db).await.unwrap();
+    let folders: Vec<String> =
+        sqlx::query_scalar("SELECT folder_name FROM series ORDER BY anilist_id")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+    assert_eq!(folders, ["Fate_stay night_ UBW", "My_Chosen_Folder"]);
+}
+
+#[tokio::test]
 async fn new_series_upgrade_default_migration_keeps_existing_choices() {
     let db = crate::test_support::in_memory_pool().await;
     crate::models::config::save_config(&db, &Default::default())

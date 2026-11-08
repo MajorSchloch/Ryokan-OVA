@@ -232,21 +232,34 @@ fn parse_dot_delimited_episode(lower: &str) -> Option<i32> {
     })
 }
 
-/// Sanitize a string for use as a folder name on disk.
-/// Replaces filesystem-unsafe characters and trims leading/trailing dots and whitespace.
+/// Format one path component with Sonarr v4's Smart Replace punctuation rules.
 pub fn sanitize_folder_name(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            c if c.is_control() => '_',
-            c => c,
+    let mut name: String = s
+        .replace(": ", " - ")
+        .chars()
+        .filter_map(|c| match c {
+            '/' | '\\' => Some('+'),
+            ':' | '*' => Some('-'),
+            '?' => Some('!'),
+            '"' | '<' | '>' | '|' => None,
+            c if c.is_control() => None,
+            c => Some(c),
         })
-        .collect::<String>()
-        // Dots and whitespace in one pass: trimming dots first and
-        // whitespace second turned " .. " into "..", a provider title
-        // that named the media root's parent as a series folder.
-        .trim_matches(|c: char| c == '.' || c.is_whitespace())
-        .to_string()
+        .collect();
+    // Removing or replacing punctuation can leave adjacent spaces or dashes.
+    // Already valid names, including user-selected folder names, pass through.
+    if name != s {
+        let mut previous = None;
+        name.retain(|c| {
+            let repeat = matches!(c, ' ' | '-') && previous == Some(c);
+            previous = Some(c);
+            !repeat
+        });
+    }
+    // Trim dots and whitespace together so a value such as " .. " cannot
+    // resolve to the media root or its parent.
+    name.trim_matches(|c: char| c == '.' || c.is_whitespace())
+        .to_owned()
 }
 
 /// Longest input handed to anitomy. Its number parser runs a C++
@@ -1290,9 +1303,26 @@ mod folder_name_tests {
         ] {
             assert_eq!(sanitize_folder_name(title), "", "{title:?}");
         }
-        assert_eq!(sanitize_folder_name(".hack//Sign"), "hack__Sign");
+        assert_eq!(sanitize_folder_name(".hack//Sign"), "hack++Sign");
         assert_eq!(sanitize_folder_name(" Show. "), "Show");
         assert_eq!(sanitize_folder_name("Dr. Stone"), "Dr. Stone");
+    }
+
+    #[test]
+    fn sonarr_smart_replace_formats_unsafe_punctuation_only() {
+        for (input, want) in [
+            (r"A/B\C: D:E? F*G", "A+B+C - D-E! F-G"),
+            ("A \"<B>\" | C", "A B C"),
+            ("Re:Zero", "Re-Zero"),
+            ("A::B", "A-B"),
+            ("A__B...C", "A__B...C"),
+            ("物語：序章", "物語：序章"),
+            ("A\0B", "AB"),
+            (" <..> ", ""),
+        ] {
+            assert_eq!(sanitize_folder_name(input), want);
+            assert_eq!(sanitize_folder_name(want), want);
+        }
     }
 
     #[test]

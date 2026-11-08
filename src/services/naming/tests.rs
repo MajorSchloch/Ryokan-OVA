@@ -154,7 +154,7 @@ fn path_illegal_characters_are_sanitized_in_values_and_literals() {
     s.episode_title = "What Is Lost?".to_string();
     assert_eq!(
         ep(DEFAULT_EPISODE_FILE_FORMAT, &s),
-        "Re_Zero kara Hajimeru Isekai Seikatsu - S01E07 - What Is Lost_.mkv"
+        "Re-Zero kara Hajimeru Isekai Seikatsu - S01E07 - What Is Lost.mkv"
     );
     // A colon typed into the template itself is replaced too.
     assert_eq!(
@@ -162,7 +162,24 @@ fn path_illegal_characters_are_sanitized_in_values_and_literals() {
             "{series.title}: {episode.number:00}{ext}",
             &sample_context()
         ),
-        "Sousou no Frieren_ 07.mkv"
+        "Sousou no Frieren - 07.mkv"
+    );
+}
+
+#[test]
+fn smart_replace_keeps_series_punctuation_and_trims_only_the_episode_title_suffix() {
+    let mut ctx = sample_context();
+    ctx.series_title = "Fate/stay night: Unlimited Blade Works".into();
+    ctx.episode_title = "Who? Me? ...".into();
+    assert_eq!(
+        ep(DEFAULT_EPISODE_FILE_FORMAT, &ctx),
+        "Fate+stay night - Unlimited Blade Works - S01E07 - Who! Me.mkv"
+    );
+    ctx.series_title = "Can You Hear Me?".into();
+    ctx.episode_title = "???".into();
+    assert_eq!(
+        ep(DEFAULT_EPISODE_FILE_FORMAT, &ctx),
+        "Can You Hear Me! - S01E07.mkv"
     );
 }
 
@@ -369,7 +386,7 @@ fn preferred_title_follows_the_language_with_fallbacks() {
     // The folder helper sanitizes the colon the English title carries.
     assert_eq!(
         series_folder(DEFAULT_SERIES_FOLDER_FORMAT, "english", &names),
-        "Frieren_ Beyond Journey's End"
+        "Frieren - Beyond Journey's End"
     );
     assert_eq!(
         series_folder("{series.title} ({series.year})", "romaji", &names),
