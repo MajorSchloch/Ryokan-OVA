@@ -18,7 +18,7 @@
     border-bottom: 1px solid var(--border);
 }
 
-/* Two-span brand mark: 旅館 at Murecho 500 + Ryokan at Murecho 600,
+/* Two-span brand mark: 旅館 at Murecho 500 + Ryokan OVA at Murecho 600,
  * both tracked (0.08em kanji, 0.05em Latin). Mixed case, inline.
  * The kanji and Latin halves each live in a dedicated span so the
  * weight + tracking can diverge without the whole mark inheriting
@@ -27,6 +27,7 @@
     display: inline-flex;
     align-items: baseline;
     gap: 8px;
+    white-space: nowrap;
     font-family: var(--font-display);
     font-size: 18px;
     color: var(--text-bright);
@@ -73,19 +74,10 @@
     cursor: pointer;
 }
 
-/* The 641-900px band: too narrow for the full-size nav (7 links at
-   14px/14px-padding overflow the right edge and clip Logout off the
-   viewport entirely), too wide for the mobile tabbar takeover at
-   640px. Compress instead of clipping: drop the Latin half of the
-   brand (the kanji mark stands alone), tighten link padding + gap,
-   and step the font down a notch. Verified to fit all seven links
-   at 641px. */
-@media (max-width: 900px) and (min-width: 641px) {
+/* Tighten the desktop controls until the mobile tab bar takes over. */
+@media (max-width: 940px) and (min-width: 641px) {
     .nav {
         padding: 0 12px;
-    }
-    .nav-brand .brand-latin {
-        display: none;
     }
     .nav-links {
         gap: 2px;
@@ -94,6 +86,16 @@
     .nav-links button {
         padding: 6px 8px;
         font-size: 13px;
+    }
+}
+
+@media (min-width: 641px) and (max-width: 735px) {
+    .nav-links {
+        gap: 1px;
+    }
+    .nav-links a,
+    .nav-links button {
+        padding-inline: 3px;
     }
 }
 
