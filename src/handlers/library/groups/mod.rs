@@ -1,5 +1,7 @@
 //! Read-only library groups. Provider IDs connect the graph. Library row IDs
 //! identify folders and links, and never double as provider IDs.
+pub mod preview;
+
 use crate::{
     models::{config, local_metadata, series},
     services::{
@@ -23,6 +25,7 @@ struct GroupsPage {
     page: &'static str,
     title_language: String,
     groups: Vec<Group>,
+    media_root: String,
 }
 
 struct Group {
@@ -34,6 +37,8 @@ struct Group {
 
 #[derive(Default)]
 struct Entry {
+    provider_id: i64,
+    folder_name: String,
     title: String,
     format: String,
     episodes: Option<i32>,
@@ -45,6 +50,8 @@ struct Entry {
 }
 
 struct RelationLabel {
+    franchise_relation: bool,
+    peer_id: i64,
     label: String,
     peer: String,
     outside: bool,
@@ -54,7 +61,7 @@ struct RelationLabel {
 struct Catalog {
     entries: BTreeMap<i64, Entry>,
     // The label describes the first entry's relationship to its neighbor.
-    neighbors: HashMap<i64, BTreeSet<(i64, &'static str)>>,
+    neighbors: HashMap<i64, BTreeSet<(i64, &'static str, bool)>>,
     // A MAL-only library row can stand for a single known AniList title.
     // Two AniList parts sharing a MAL ID must remain separate.
     by_mal: HashMap<i64, BTreeSet<i64>>,
@@ -125,6 +132,18 @@ impl Catalog {
             "" => return,
             _ => ("Related to", "Related to"),
         };
+        let franchise_relation = matches!(
+            rel.relation_type.as_str(),
+            "PREQUEL"
+                | "SEQUEL"
+                | "ALTERNATIVE"
+                | "SIDE_STORY"
+                | "SPIN_OFF"
+                | "PARENT"
+                | "PARENT_STORY"
+                | "SUMMARY"
+                | "FULL_STORY"
+        );
         self.remember(
             rel.id,
             rel.id_mal,
@@ -145,21 +164,21 @@ impl Catalog {
         self.neighbors
             .entry(owner)
             .or_default()
-            .insert((rel.id, owner_label));
+            .insert((rel.id, owner_label, franchise_relation));
         self.neighbors
             .entry(rel.id)
             .or_default()
-            .insert((owner, target_label));
+            .insert((owner, target_label, franchise_relation));
     }
 
-    fn group(mut self) -> Vec<Group> {
+    fn group(mut self, follow_seed: Option<i64>) -> Vec<Group> {
         let mut groups = Vec::new();
         let mut seen = HashSet::new();
         // Start only at tracked entries. Provider caches can contain unrelated titles.
         let seeds: Vec<_> = self
             .entries
             .iter()
-            .filter(|(_, e)| e.series_id.is_some())
+            .filter(|(id, e)| e.series_id.is_some() || follow_seed == Some(**id))
             .map(|(&id, _)| id)
             .collect();
         for seed in seeds {
@@ -170,7 +189,7 @@ impl Catalog {
             let mut members = Vec::new();
             while let Some(id) = pending.pop() {
                 members.push(id);
-                for &(other, _) in self.neighbors.get(&id).into_iter().flatten() {
+                for &(other, _, _) in self.neighbors.get(&id).into_iter().flatten() {
                     if self.entries.contains_key(&other) && seen.insert(other) {
                         pending.push(other);
                     }
@@ -192,9 +211,11 @@ impl Catalog {
                     .get(&id)
                     .into_iter()
                     .flatten()
-                    .filter_map(|(peer, label)| {
+                    .filter_map(|(peer, label, franchise_relation)| {
                         let other = self.entries.get(peer)?;
                         Some(RelationLabel {
+                            peer_id: *peer,
+                            franchise_relation: *franchise_relation,
                             label: (*label).into(),
                             peer: other.title.clone(),
                             outside: other.series_id.is_none(),
@@ -202,7 +223,9 @@ impl Catalog {
                     })
                     .collect();
                 links.sort_by(|a, b| (&a.label, &a.peer).cmp(&(&b.label, &b.peer)));
-                self.entries.get_mut(&id).unwrap().links = links;
+                let entry = self.entries.get_mut(&id).unwrap();
+                entry.provider_id = id;
+                entry.links = links;
             }
             let rows: Vec<_> = members
                 .into_iter()
@@ -212,7 +235,7 @@ impl Catalog {
             let title = rows
                 .iter()
                 .find(|e| e.series_id.is_some())
-                .unwrap()
+                .unwrap_or(&rows[0])
                 .title
                 .clone();
             groups.push(Group {
@@ -332,10 +355,22 @@ fn file_status(facts: &super::inventory::Inventory) -> String {
 }
 
 async fn load(db: &SqlitePool) -> Result<GroupsPage, sqlx::Error> {
+    load_groups(db, true, None).await
+}
+
+async fn load_groups(
+    db: &SqlitePool,
+    include_disk_status: bool,
+    follow_seed: Option<&crate::models::release_follows::Follow>,
+) -> Result<GroupsPage, sqlx::Error> {
     let cfg = config::get_config(db).await?.unwrap_or_default();
     let mut catalog = catalog(db, &cfg.title_language).await?;
     let library = series::get_all(db).await?;
-    let inventory = super::inventory::load(db, &cfg.media_root, &library).await?;
+    let inventory = if include_disk_status {
+        super::inventory::load(db, &cfg.media_root, &library).await?
+    } else {
+        HashMap::new()
+    };
     let positive: HashSet<_> = library
         .iter()
         .filter(|s| s.anilist_id > 0)
@@ -353,6 +388,7 @@ async fn load(db: &SqlitePool) -> Result<GroupsPage, sqlx::Error> {
         }
         let e = catalog.entries.entry(id).or_default();
         e.series_id = Some(s.id);
+        e.folder_name = s.folder_name;
         let title = pick_title(
             &cfg.title_language,
             &s.title_english,
@@ -371,12 +407,21 @@ async fn load(db: &SqlitePool) -> Result<GroupsPage, sqlx::Error> {
         if e.date.is_empty() {
             e.date = date_label(None, s.season_year);
         }
-        e.files = file_status(&inventory[&s.id]);
+        if let Some(facts) = inventory.get(&s.id) {
+            e.files = file_status(facts);
+        }
+    }
+    if let Some(follow) = follow_seed {
+        let entry = catalog.entries.entry(follow.anilist_id).or_default();
+        if entry.title.is_empty() {
+            entry.title.clone_from(&follow.title);
+        }
     }
     Ok(GroupsPage {
         page: "library",
         title_language: cfg.title_language,
-        groups: catalog.group(),
+        groups: catalog.group(follow_seed.map(|f| f.anilist_id)),
+        media_root: cfg.media_root,
     })
 }
 

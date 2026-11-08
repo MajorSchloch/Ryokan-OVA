@@ -772,6 +772,10 @@ async fn main() {
         )
         .route("/library/table", get(handlers::library::table::page))
         .route("/library/groups", get(handlers::library::groups::page))
+        .route(
+            "/library/groups/{seed}/preview",
+            get(handlers::library::groups::preview::page),
+        )
         .merge(handlers::release_follows::routes())
         .route("/library/recycle", get(handlers::library::recycle::page))
         // #122 manual import wizard. Form-POST + server render; the
