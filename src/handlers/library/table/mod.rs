@@ -72,23 +72,15 @@ async fn load(db: &SqlitePool) -> Result<Table, sqlx::Error> {
     let cfg = cfg.unwrap_or_default();
     let inventory = inventory::load(db, &cfg.media_root, &library).await?;
     let mut follows: HashMap<_, _> = follows.into_iter().map(|f| (f.anilist_id, f)).collect();
-    // Resolve a legacy MAL-only entry only when the cached identity is unique.
-    // A tracked positive AniList ID always owns its own follow.
-    let mapped: HashMap<_, _> = sqlx::query_as::<_, (i64, i64)>(
-        "WITH candidates AS (
-             SELECT mal_id, provider_id FROM provider_metadata_cache WHERE provider_id>0
-             UNION SELECT mal_id,provider_id FROM series_metadata_cache WHERE provider_id>0
-             UNION SELECT mal_id,anilist_id FROM series WHERE anilist_id>0
-         ), unique_mal AS (
-             SELECT mal_id,min(provider_id) AS provider_id FROM candidates
-             WHERE mal_id>0 GROUP BY mal_id HAVING count(*)=1
-         ), resolved AS (
-             SELECT s.id,coalesce(m.provider_id,u.provider_id) AS provider_id
-             FROM series s LEFT JOIN series_metadata_cache m ON m.series_id=s.id AND m.provider_id>0
-             LEFT JOIN unique_mal u ON u.mal_id=s.mal_id WHERE s.anilist_id<0
-         ) SELECT r.id,r.provider_id FROM resolved r JOIN release_follows f ON f.anilist_id=r.provider_id
-           WHERE NOT EXISTS (SELECT 1 FROM series t WHERE t.anilist_id=r.provider_id)",
-    ).fetch_all(db).await?.into_iter().collect();
+    let mapped: HashMap<_, _> = sqlx::query_as::<_, (i64, i64)>(sqlx::AssertSqlSafe(format!(
+        "{} SELECT l.series_id, l.anilist_id FROM local_anilist_ids l
+            JOIN release_follows f ON f.anilist_id = l.anilist_id",
+        series::LOCAL_ANILIST_IDS
+    )))
+    .fetch_all(db)
+    .await?
+    .into_iter()
+    .collect();
     let mut rows = Vec::new();
     for s in library {
         let facts = &inventory[&s.id];
@@ -98,9 +90,9 @@ async fn load(db: &SqlitePool) -> Result<Table, sqlx::Error> {
             &s.title_romaji,
             &s.title_native,
         );
-        let followed = follows
-            .remove(mapped.get(&s.id).unwrap_or(&s.anilist_id))
-            .is_some();
+        let followed = mapped
+            .get(&s.id)
+            .is_some_and(|id| follows.remove(id).is_some());
         rows.push(Entry {
             title: if preferred.is_empty() {
                 s.title.clone()
