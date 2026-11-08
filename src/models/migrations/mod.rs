@@ -3120,6 +3120,19 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
+    // Older receipts have no check timestamp or saved title.
+    for (table, column) in [
+        ("release_follows", "check_status"),
+        ("release_follows", "last_checked_at"),
+        ("release_follows", "last_success_at"),
+        ("followed_releases", "title"),
+    ] {
+        if !column_exists(db, table, column).await {
+            let sql = format!("ALTER TABLE {table} ADD COLUMN {column} TEXT");
+            sqlx::query(sqlx::AssertSqlSafe(sql)).execute(db).await?;
+        }
+    }
+
     // Watch-list sync exclusions (Sonarr's import-list exclusions): a
     // series removed with "keep it off my watch-list sync" is not added
     // again by the AniList / MAL sync until the row is deleted.

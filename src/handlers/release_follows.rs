@@ -81,7 +81,7 @@ async fn page(
     State(state): State<AppState>,
     Query(selection): Query<Selection>,
 ) -> Result<Html<String>, (StatusCode, &'static str)> {
-    let mut follows = release_follows::list(&state.db)
+    let mut follows = release_follows::list_with_matches(&state.db)
         .await
         .map_err(internal_error)?;
     if selection.valid() {
@@ -101,6 +101,7 @@ async fn page(
                     movies: false,
                     ovas: false,
                     alternatives: false,
+                    ..Follow::default()
                 },
             );
         }
