@@ -9,15 +9,12 @@
 //! * `episode_file_format`, applied on every import. Must end with
 //!   `{ext}` and must carry `{episode.number}`.
 //!
-//! The defaults reproduce the pre-#124 hardcoded layout byte for byte
-//! (`<title>/Season 01/<title> - S01E07 - <episode title>.mkv`), so an
-//! existing install sees no change until it edits a template.
+//! The default layout is `<title>/Season 01/<title> - S01E07 - <episode title>.mkv`.
 //!
 //! Tokens are `{name}` or `{name:00}` (zero-pad to the spec's width),
 //! lowercase with dots, so parsing needs no case table and no
 //! whitespace-inside-braces handling. Every token value is sanitized on
-//! its own (`media::sanitize_folder_name`: path-illegal characters to
-//! `_`, leading / trailing dots and whitespace trimmed), the pieces are
+//! its own (Sonarr Smart Replace punctuation, trimmed edge dots and whitespace), the pieces are
 //! joined, and a structural cleanup drops what an empty value leaves
 //! behind: empty bracket pairs, doubled ` - ` separators, dangling
 //! separators at either end. The cleanup runs on the template's literal
@@ -537,7 +534,11 @@ fn token_value(token: Token, pad: usize, ctx: &NameContext) -> String {
             .filter(|n| *n > 0)
             .map(number)
             .unwrap_or_default(),
-        Token::EpisodeTitle => ctx.episode_title.clone(),
+        // Sonarr trims these from the episode-title token before replacing punctuation.
+        Token::EpisodeTitle => ctx
+            .episode_title
+            .trim_end_matches([' ', '.', '?'])
+            .to_owned(),
         Token::QualityFull => quality_full(&ctx.quality_resolution, &ctx.quality_source),
         Token::QualityResolution => ctx.quality_resolution.clone(),
         Token::QualitySource => ctx.quality_source.clone(),

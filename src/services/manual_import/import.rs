@@ -1111,17 +1111,17 @@ mod tests {
         assert!(!report.cancelled);
         assert_eq!(report.groups.len(), 1);
         assert!(report.groups[0].created);
-        assert_eq!(report.groups[0].folder_name, "Show_ Title");
+        assert_eq!(report.groups[0].folder_name, "Show - Title");
 
         let row = series::get_by_anilist_id(&f.state.db, 100)
             .await
             .unwrap()
             .expect("series created");
-        assert_eq!(row.folder_name, "Show_ Title");
+        assert_eq!(row.folder_name, "Show - Title");
         assert_eq!(row.monitor_mode, "future", "imports don't backfill");
         assert_eq!(row.title, "Show: Title");
 
-        let season = f.media.join("Show_ Title").join("Season 01");
+        let season = f.media.join("Show - Title").join("Season 01");
         let dest1 = season.join("[G] Show - 01 [WEB 1080p].mkv");
         assert!(dest1.exists());
         assert!(season.join("[G] Show - 02 [WEB 1080p].mkv").exists());
@@ -1136,7 +1136,7 @@ mod tests {
             "episode NFO"
         );
         assert!(
-            f.media.join("Show_ Title").join("tvshow.nfo").exists(),
+            f.media.join("Show - Title").join("tvshow.nfo").exists(),
             "series NFO"
         );
         assert!(season.join("season.nfo").exists(), "season NFO");
