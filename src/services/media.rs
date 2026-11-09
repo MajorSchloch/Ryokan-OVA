@@ -232,14 +232,24 @@ fn parse_dot_delimited_episode(lower: &str) -> Option<i32> {
     })
 }
 
-/// Format one path component with Sonarr v4's Smart Replace punctuation rules.
+/// Generate a library path component using Smart Replace punctuation and spaces for underscores.
 pub fn sanitize_folder_name(s: &str) -> String {
+    format_component(s, ' ')
+}
+
+/// Linking an existing folder must use its literal spelling, including legacy underscores.
+pub fn valid_link_folder(s: &str) -> bool {
+    !s.is_empty() && format_component(s, '_') == s
+}
+
+fn format_component(s: &str, underscore: char) -> String {
     let mut name: String = s
         .replace(": ", " - ")
         .chars()
         .filter_map(|c| match c {
             '/' | '\\' => Some('+'),
             ':' | '*' => Some('-'),
+            '_' => Some(underscore),
             '?' => Some('!'),
             '"' | '<' | '>' | '|' => None,
             c if c.is_control() => None,
@@ -1353,7 +1363,8 @@ mod folder_name_tests {
             ("A \"<B>\" | C", "A B C"),
             ("Re:Zero", "Re-Zero"),
             ("A::B", "A-B"),
-            ("A__B...C", "A__B...C"),
+            ("A__B...C", "A B...C"),
+            ("__Show_ _Name__", "Show Name"),
             ("物語：序章", "物語：序章"),
             ("A\0B", "AB"),
             (" <..> ", ""),

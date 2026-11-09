@@ -39,3 +39,21 @@ python3 scripts/rehearse_migration_snapshot.py \
 The rehearsal builds a test library with placeholder media. It applies the plan and tests rollback. The journal and staged media must support hard links on the same file system. Later changes to the database or files can prevent rollback from that journal.
 
 Keep an independent copy of the original configuration and media before a live migration. The rehearsal does not provide a production cutover command. Check metadata refresh, playback, and file conversion with real media before you retire the original copy.
+
+## Clean up underscores in series folders
+
+New library names use spaces for underscores. To review existing series folders, run the next-release binary with the same database and media mounts as Ryokan.
+
+```sh
+/app/ryokan --preview-folder-cleanup
+```
+
+The preview lists the Ryokan series ID and both paths. When an old folder matches a stored title, Ryokan can recover the original punctuation. For example, `Kizumonogatari Part 1_ Tekketsu (2016)` becomes `Kizumonogatari Part 1 - Tekketsu (2016)`. A custom name with underscores uses spaces.
+
+Before applying a rename, check the media mount and any Jellyfin, WatchGuard or Tdarr references to the old path. Stop Ryokan and other writers to that folder. Run the command with the internal series ID from the preview. In this example the ID is 155.
+
+```sh
+/app/ryokan --apply-folder-cleanup 155
+```
+
+The command renames the series directory and updates its stored path. Files and subdirectories travel with it. If Ryokan has tracked the release but the folder does not exist yet, the command updates only the stored path. A conflicting destination or a source shared by two series blocks the operation. If the process stops during the rename, run the same command again before starting Ryokan.
