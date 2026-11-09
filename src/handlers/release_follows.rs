@@ -85,9 +85,11 @@ async fn page(
         .await
         .map_err(internal_error)?;
     if selection.valid() {
+        let owner:Option<i64> = sqlx::query_scalar("SELECT f.anilist_id FROM franchise_choices c JOIN release_follows f ON f.id=c.follow_id WHERE c.anilist_id=?")
+            .bind(selection.anilist_id).fetch_optional(&state.db).await.map_err(internal_error)?;
         if let Some(i) = follows
             .iter()
-            .position(|f| f.anilist_id == selection.anilist_id)
+            .position(|f| f.anilist_id == owner.unwrap_or(selection.anilist_id))
         {
             follows[..=i].rotate_right(1);
         } else {
