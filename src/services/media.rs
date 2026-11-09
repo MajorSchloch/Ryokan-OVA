@@ -624,7 +624,7 @@ fn scan_dir_recursive(
 
 /// A file the scan counts as an episode: a video, or a `.strm` stub
 /// standing in for one.
-fn is_library_file(path: &Path) -> bool {
+pub(crate) fn is_library_file(path: &Path) -> bool {
     match path.extension().and_then(|e| e.to_str()) {
         Some(ext) => matches!(
             ext.to_lowercase().as_str(),
@@ -647,7 +647,7 @@ pub fn is_stream_stub(name: &str) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("strm"))
 }
 
-fn parse_episode_file(path: &Path, series_root: &Path) -> Option<EpisodeFile> {
+pub(crate) fn parse_episode_file(path: &Path, series_root: &Path) -> Option<EpisodeFile> {
     let basename = path.file_name()?.to_str()?.to_string();
     let lower = basename.to_lowercase();
 

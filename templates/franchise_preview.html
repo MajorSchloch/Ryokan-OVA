@@ -42,11 +42,14 @@
     </fieldset>
     <p>Saving adds selected releases outside your library and monitors their episodes. Unchecked releases stay outside the follow. Existing library entries keep their episode settings and files.</p>
     <button class="btn btn-secondary" type="submit">Update preview</button>
+    <button class="btn btn-secondary" type="submit" name="files" value="1">Preview files</button>
     <button class="btn btn-primary" type="submit" formaction="/library/groups/{{ seed }}/follow" formmethod="post">Save franchise follow</button>
 </form>
 <section class="franchise-preview" aria-labelledby="franchise-folder">
     <h3 id="franchise-folder">Proposed franchise folder</h3>
-    <p>Each release keeps its AniList ID and Ryokan episode numbers. Preview choices do not change files or monitoring.</p>
+    <p>Ryokan identifies each release by its saved AniList ID. Folder names use titles, with a year or ID when names conflict.</p>
+    {% if files_requested %}<p>File paths observed now. Moving them requires a later migration step.</p>{% endif %}
+    {% for issue in file_issues %}<p>{{ issue }}</p>{% endfor %}
     {% if owner.is_none() %}<p>Choose the release that should own this franchise.</p>
     {% else if folder.is_empty() %}<p>Set a media root in Settings to see the proposed paths.</p>
     {% else %}
@@ -54,7 +57,20 @@
     <ol>{% for row in rows %}{% if row.selected %}
         <li><code>{{ row.destination }}/</code><small>
         {% if let Some(source) = row.source %}Current folder · <code>{{ source }}/</code>
-        {% else if row.entry.series_id.is_some() %}Current folder unavailable{% else %}Outside library{% endif %}{% if row.entry.excluded %} · Excluded from sync{% endif %}</small></li>
+        {% else if row.entry.series_id.is_some() %}Current folder unavailable{% else %}Outside library{% endif %}{% if row.entry.excluded %} · Excluded from sync{% endif %}</small>
+        {% if let Some(scan) = row.file_preview %}
+        <p>{{ scan.status }}{% if scan.status == "Scanned" %} · {{ scan.media_files }} media files · {{ scan.episodes }} episodes{% endif %}</p>
+        {% if !scan.missing.is_empty() %}<p>Missing episodes{% for n in scan.missing %} {{ n }}{% endfor %}</p>{% endif %}
+        {% for issue in scan.issues %}<p>{{ issue }}</p>{% endfor %}
+        {% if !scan.files.is_empty() %}
+        <details><summary>{{ scan.files.len() }} file and directory paths</summary>
+        <ol>{% for file in scan.files %}
+            <li><small>Current {{ file.kind }}</small><code>{{ file.from.display() }}</code><small>Proposed path</small><code>{{ file.to.display() }}</code></li>
+        {% endfor %}</ol>
+        </details>
+        {% endif %}
+        {% endif %}
+        </li>
     {% endif %}{% endfor %}</ol>
     {% if selection_empty %}<p>Select a release to preview its folder.</p>{% endif %}
     {% endif %}
