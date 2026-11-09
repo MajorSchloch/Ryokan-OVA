@@ -46,6 +46,36 @@ mod crud_ci {
     // ─── set_folder ──────────────────────────────────────────
 
     #[tokio::test]
+    async fn franchise_policy_requires_nested_assignments_but_keeps_existing_flat_paths() {
+        let db = in_memory_pool().await;
+        let id = seed_series(&db, 10, "Show").await;
+        crate::models::library_layout::enable(&db).await.unwrap();
+        let state = build_test_app_state(db.clone(), None);
+        let form = |name: &str| super::super::SetFolderForm {
+            series_id: id,
+            folder_name: name.into(),
+        };
+        let _ = ok_json(set_folder(State(state.clone()), AxumJson(form("Show"))).await).await;
+        assert_eq!(
+            set_folder(State(state.clone()), AxumJson(form("Other Flat")))
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        let _ = ok_json(set_folder(State(state), AxumJson(form("Family/Show"))).await).await;
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT folder FROM library_franchise_members WHERE provider_id=10"
+            )
+            .fetch_one(&db)
+            .await
+            .unwrap(),
+            "Family"
+        );
+    }
+
+    #[tokio::test]
     async fn set_folder_persists_sanitized_name_on_happy_path() {
         let db = in_memory_pool().await;
         let series_id = seed_series(&db, 10, "Show").await;

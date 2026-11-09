@@ -500,7 +500,33 @@ pub async fn set_folder(
         ));
     }
 
-    if series::other_series_in_folder(&state.db, form.series_id, &form.folder_name)
+    let mut tx = state
+        .db
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let current: Option<String> = sqlx::query_scalar("SELECT folder_name FROM series WHERE id=?")
+        .bind(form.series_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let Some(current) = current else {
+        return Err((
+            axum::http::StatusCode::NOT_FOUND,
+            "Release no longer exists".into(),
+        ));
+    };
+    let nested = crate::models::library_layout::enabled(&mut *tx)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if nested && current != form.folder_name && !form.folder_name.contains('/') {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "Use Franchise/Release for a new folder assignment".into(),
+        ));
+    }
+    if sqlx::query_scalar::<_,String>("SELECT title FROM series WHERE id!=?2 AND (lower(folder_name)=lower(?1) OR instr(lower(folder_name),lower(?1)||'/')=1 OR instr(lower(?1),lower(folder_name)||'/')=1) LIMIT 1")
+        .bind(&form.folder_name).bind(form.series_id).fetch_optional(&mut *tx)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .is_some()
@@ -511,7 +537,16 @@ pub async fn set_folder(
         ));
     }
 
-    series::update_folder(&state.db, form.series_id, &form.folder_name)
+    sqlx::query("UPDATE series SET folder_name=? WHERE id=?")
+        .bind(&form.folder_name)
+        .bind(form.series_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    crate::models::library_layout::record_move(&mut tx, form.series_id, &form.folder_name)
+        .await
+        .map_err(|e| (axum::http::StatusCode::CONFLICT, e.to_string()))?;
+    tx.commit()
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let _ = monitoring_service::recompute_series_monitoring(&state.db, form.series_id).await;

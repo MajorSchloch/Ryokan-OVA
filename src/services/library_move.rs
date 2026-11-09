@@ -246,12 +246,15 @@ async fn apply(pool: &SqlitePool, root: &Path, marker: &Path, id: i64, target: &
             if dir_id(&new)?.is_some() {
                 return Err("Missing source and occupied destination".into());
             }
+            let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
             sqlx::query("UPDATE series SET folder_name=? WHERE id=? AND folder_name=?")
                 .bind(target)
                 .bind(id)
                 .bind(&current)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
+            crate::models::library_layout::record_move(&mut tx, id, target).await?;
+            tx.commit().await?;
             println!("{id}: {current} -> {target} (future import path)");
             return Ok(());
         };
@@ -300,6 +303,7 @@ async fn apply(pool: &SqlitePool, root: &Path, marker: &Path, id: i64, target: &
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    crate::models::library_layout::record_move(&mut tx, id, &plan.to).await?;
     tx.commit().await?;
     let saved: Move = serde_json::from_slice(&fs::read(marker)?)?;
     if serde_json::to_value(saved)? != serde_json::to_value(&plan)? {
@@ -350,6 +354,20 @@ async fn set_franchise(pool: &SqlitePool, owner: i64, folder: &str) -> Result<()
 }
 
 pub async fn run(args: &[String]) -> Result<()> {
+    if args == ["--enable-franchise-folders"] {
+        let lease = LibraryLease::acquire_configured(
+            &paths::live_db_path(),
+            paths::database_url().as_deref(),
+        )?;
+        lease.require_clean()?;
+        let db = paths::live_db_path().canonicalize()?;
+        let pool = SqlitePool::connect_with(SqliteConnectOptions::new().filename(db)).await?;
+        crate::models::library_layout::enable(&pool).await?;
+        println!(
+            "New releases use franchise folders. Existing paths and download selections are unchanged."
+        );
+        return Ok(());
+    }
     let (operation, id, target) = match args {
         [op, id, target] if matches!(op.as_str(), "--move-library-folder" | "--preview-library-folder" | "--set-franchise-library-folder") => (op.as_str(), id.parse::<i64>()?, target.as_str()),
         _ => return Err("Use --preview-library-folder SERIES_ID PATH, --move-library-folder SERIES_ID PATH, or --set-franchise-library-folder OWNER_ANILIST_ID FOLDER".into()),
