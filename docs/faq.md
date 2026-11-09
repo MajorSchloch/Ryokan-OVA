@@ -19,7 +19,7 @@ No. Ryokan only manages anime in the current 1.x line. Manga, light novels, and 
 
 ## How do I follow future releases after I remove a series?
 
-Open the anime's details page. Select **Follow future releases**, choose the formats and relationships you want, and select **Start follow**. Open **Library → Release follows** to edit or stop a follow, even after you remove the series.
+For a title in your library, open **Franchise**, choose the releases and future formats you want, and select **Save franchise follow**. A standalone title starts with one release. For an anime outside your library, select **Follow future releases** on its details page. Open **Library → Release follows** to edit or stop a follow, even after you remove the series.
 
 Ryokan saves the UTC date when you start the follow. It checks AniList when you save, at startup, and every six hours. An upcoming sequel qualifies even if AniList announced it before you started the follow. For a sequel that has aired, its first air date must be on or after your follow date. If AniList gives only a month or year, the whole period must qualify.
 
@@ -48,6 +48,8 @@ Yes. Ryokan exposes a Swagger UI at `/api-docs` and the OpenAPI JSON at `/api-do
 ## How do I see related anime in the library?
 
 Select **Grouped view** in the library. Open a group to see its entries in release order, oldest first. Ryokan uses the AniList relationships in its metadata cache. Entries without a known release date appear last. Each title keeps its own episode numbers.
+
+Select **Franchise** to manage the same follow from any tracked release. Saving a follow preserves existing episode settings and adds missing releases you select. An unchecked release stays outside the follow. A sync exclusion also prevents an automatic add.
 
 Turn on **Show missing entries** to include related anime outside your library. **In library** means Ryokan tracks that entry, even if an episode file is missing. Opening a group and changing the switch only change what you see. Select **Poster view** to return to the library posters.
 

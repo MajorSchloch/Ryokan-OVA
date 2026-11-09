@@ -19,7 +19,7 @@ impl Follow {
         let format_allowed = match entry.format.as_str() {
             "MOVIE" => self.movies,
             "OVA" => self.ovas,
-            "TV" | "TV_SHORT" | "ONA" => true,
+            "TV" | "TV_SHORT" | "ONA" => self.tv,
             _ => false,
         };
         format_allowed
@@ -38,7 +38,17 @@ async fn check_follow(
     graph: &mut HashMap<i64, Vec<RelatedEntry>>,
 ) -> Result<usize, String> {
     let mut visited = HashSet::from([follow.anilist_id]);
-    let mut frontier = vec![follow.anilist_id];
+    if follow.revision > 0 {
+        let selected: Vec<i64> = sqlx::query_scalar(
+            "SELECT anilist_id FROM franchise_choices WHERE follow_id=? AND selected=1",
+        )
+        .bind(follow.id)
+        .fetch_all(db)
+        .await
+        .map_err(|e| e.to_string())?;
+        visited.extend(selected);
+    }
+    let mut frontier: Vec<_> = visited.iter().copied().collect();
     let mut added = 0;
     let mut incomplete = false;
     while !frontier.is_empty() {
@@ -109,6 +119,71 @@ pub async fn refresh(db: &SqlitePool) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn franchise_follow_discovers_from_a_selected_side_story_once_and_respects_skips() {
+        let db = crate::test_support::in_memory_pool().await;
+        release_follows::start(&db, 1, "Franchise", true, false, false)
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "UPDATE release_follows SET tv=0,revision=1;
+            INSERT INTO franchise_choices SELECT 2,id,'Side story',1 FROM release_follows;
+            INSERT INTO franchise_choices SELECT 3,id,'Skipped movie',0 FROM release_follows;
+            INSERT INTO external_sync_exclusions(anilist_id,title) VALUES(6,'Excluded movie');",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let follow = release_follows::list(&db).await.unwrap().remove(0);
+        let sequel = |id, format| {
+            serde_json::from_value::<RelatedEntry>(serde_json::json!({
+            "id":id,"title_romaji":format!("Sequel {id}"),"title_english":"","title_native":"","cover_url":"",
+            "format":format,"status":"NOT_YET_RELEASED","status_display":"","relation_type":"SEQUEL","media_type":"ANIME"
+        })).unwrap()
+        };
+        let mut graph = HashMap::from([
+            (1, vec![]),
+            (
+                2,
+                vec![
+                    sequel(3, "MOVIE"),
+                    sequel(4, "TV"),
+                    sequel(5, "MOVIE"),
+                    sequel(6, "MOVIE"),
+                ],
+            ),
+            (3, vec![]),
+            (4, vec![]),
+            (5, vec![]),
+            (6, vec![]),
+        ]);
+        assert_eq!(check_follow(&db, &follow, &mut graph).await.unwrap(), 1);
+        assert_eq!(check_follow(&db, &follow, &mut graph).await.unwrap(), 0);
+        assert_eq!(crate::test_support::count_series(&db).await, 1);
+        assert!(
+            crate::models::series::get_by_anilist_id(&db, 5)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM followed_releases")
+                .fetch_one(&db)
+                .await
+                .unwrap(),
+            1
+        );
+        sqlx::query("UPDATE release_follows SET revision=2")
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(
+            !release_follows::accept(&db, &follow, &sequel(7, "MOVIE"))
+                .await
+                .unwrap()
+        );
+    }
 
     #[test]
     fn release_follows_format_and_relationship_filters_are_independent() {

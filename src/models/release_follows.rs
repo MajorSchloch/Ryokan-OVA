@@ -9,6 +9,8 @@ pub struct Follow {
     pub anilist_id: i64,
     pub title: String,
     pub started_on: String,
+    pub tv: bool,
+    pub revision: i64,
     pub movies: bool,
     pub ovas: bool,
     pub alternatives: bool,
@@ -79,13 +81,14 @@ pub(crate) async fn record_check(
         check_status = CASE WHEN ?1 THEN 'success' ELSE 'failed' END,
         last_checked_at = CURRENT_TIMESTAMP,
         last_success_at = CASE WHEN ?1 THEN CURRENT_TIMESTAMP ELSE last_success_at END
-        WHERE id=?2 AND movies=?3 AND ovas=?4 AND alternatives=?5",
+        WHERE id=?2 AND movies=?3 AND ovas=?4 AND alternatives=?5 AND revision=?6",
     )
     .bind(succeeded)
     .bind(follow.id)
     .bind(follow.movies)
     .bind(follow.ovas)
     .bind(follow.alternatives)
+    .bind(follow.revision)
     .execute(db)
     .await?;
     Ok(())
@@ -101,7 +104,7 @@ pub async fn start(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO release_follows (anilist_id, title, movies, ovas, alternatives, check_status)
-        VALUES (?, ?, ?, ?, ?, 'pending') ON CONFLICT(anilist_id) DO NOTHING",
+        SELECT ?1, ?2, ?3, ?4, ?5, 'pending' WHERE NOT EXISTS (SELECT 1 FROM franchise_choices WHERE anilist_id=?1) ON CONFLICT(anilist_id) DO NOTHING",
     )
     .bind(root)
     .bind(title)
@@ -120,7 +123,7 @@ pub async fn update(
     ovas: bool,
     alternatives: bool,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE release_follows SET movies = ?, ovas = ?, alternatives = ? WHERE id = ?")
+    sqlx::query("UPDATE release_follows SET movies = ?, ovas = ?, alternatives = ? WHERE id = ? AND revision=0")
         .bind(movies)
         .bind(ovas)
         .bind(alternatives)
@@ -155,7 +158,8 @@ pub(crate) async fn accept(
     );
     let receipt = sqlx::query(
         "INSERT INTO followed_releases (follow_id, anilist_id, title)
-        SELECT id, ?, ? FROM release_follows WHERE id = ? AND movies = ? AND ovas = ? AND alternatives = ?
+        SELECT id, ?, ? FROM release_follows WHERE id = ? AND movies = ? AND ovas = ? AND alternatives = ? AND revision=?
+          AND NOT EXISTS (SELECT 1 FROM franchise_choices WHERE anilist_id=? AND (selected=0 OR follow_id != release_follows.id))
           AND NOT EXISTS (SELECT 1 FROM external_sync_exclusions WHERE anilist_id = ?
                           OR (anilist_id IS NULL AND mal_id = ?))
         ON CONFLICT DO NOTHING",
@@ -166,6 +170,8 @@ pub(crate) async fn accept(
     .bind(follow.movies)
     .bind(follow.ovas)
     .bind(follow.alternatives)
+    .bind(follow.revision)
+    .bind(entry.id)
     .bind(entry.id)
     .bind(entry.id_mal)
     .execute(&mut *tx)
@@ -177,6 +183,25 @@ pub(crate) async fn accept(
         tx.commit().await?;
         return Ok(false);
     }
+    let added = track_release(&mut tx, entry).await?;
+    if follow.revision > 0 {
+        sqlx::query("INSERT INTO franchise_choices(anilist_id,follow_id,title,selected) VALUES(?,?,?,1) ON CONFLICT DO NOTHING")
+            .bind(entry.id).bind(follow.id).bind(title).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(added)
+}
+
+pub(crate) async fn track_release(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    entry: &RelatedEntry,
+) -> Result<bool, sqlx::Error> {
+    let title = pick_title(
+        "romaji",
+        &entry.title_english,
+        &entry.title_romaji,
+        &entry.title_native,
+    );
     // A positive AniList ID owns its own season, even when two share a MAL ID.
     // A MAL-only row for the same entry already belongs to the user.
     let exists: bool = sqlx::query_scalar(
@@ -186,10 +211,9 @@ pub(crate) async fn accept(
     )
     .bind(entry.id)
     .bind(entry.id_mal)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
     if exists {
-        tx.commit().await?;
         return Ok(false);
     }
 
@@ -207,15 +231,14 @@ pub(crate) async fn accept(
         season_year: entry.season_year,
         end_year: None,
     };
-    let id = series::insert_new(&mut tx, core, MonitorMode::All).await?;
+    let id = series::insert_new(tx, core, MonitorMode::All).await?;
     // All episodes of a qualifying *new entry* are wanted, including ones
     // that aired during downtime. Normal metadata refresh fills unknown totals.
     if let Some(count) = entry.episodes.filter(|n| *n > 0) {
         sqlx::query("WITH RECURSIVE episodes(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM episodes WHERE n < ?)
             INSERT INTO episode_monitor_state(series_id, episode_number, monitored) SELECT ?, n, 1 FROM episodes")
-            .bind(count).bind(id).execute(&mut *tx).await?;
+            .bind(count).bind(id).execute(&mut **tx).await?;
     }
-    tx.commit().await?;
     Ok(true)
 }
 

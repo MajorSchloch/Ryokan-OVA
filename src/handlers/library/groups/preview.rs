@@ -8,29 +8,33 @@ use axum::{
     response::Html,
 };
 use sqlx::SqlitePool;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+};
 
 #[derive(Template)]
 #[template(path = "franchise_preview.html")]
-struct Preview {
+pub(super) struct Preview {
     page: &'static str,
     title_language: String,
     seed: i64,
-    owner: Option<i64>,
+    pub(super) owner: Option<i64>,
     folder: String,
-    name_override: String,
+    pub(super) name_override: String,
     selection_empty: bool,
-    policy: Policy,
-    rows: Vec<Row>,
-    follows: Vec<release_follows::Follow>,
+    pub(super) policy: Policy,
+    pub(super) rows: Vec<Row>,
+    pub(super) follows: Vec<release_follows::Follow>,
+    pub(super) version: String,
 }
 
 #[derive(Default)]
-struct Policy {
-    tv: bool,
-    movies: bool,
-    ovas: bool,
-    alternatives: bool,
+pub(super) struct Policy {
+    pub(super) tv: bool,
+    pub(super) movies: bool,
+    pub(super) ovas: bool,
+    pub(super) alternatives: bool,
 }
 
 impl Policy {
@@ -54,7 +58,7 @@ impl Policy {
                 ..Self::default()
             },
             [f] => Self {
-                tv: true,
+                tv: f.tv,
                 movies: f.movies,
                 ovas: f.ovas,
                 alternatives: f.alternatives,
@@ -64,25 +68,11 @@ impl Policy {
     }
 }
 
-struct Row {
-    entry: Entry,
-    selected: bool,
+pub(super) struct Row {
+    pub(super) entry: Entry,
+    pub(super) selected: bool,
     source: Option<String>,
     destination: String,
-}
-
-// A shared character can connect unrelated shows in the broader groups view.
-fn franchise_members(entries: &HashMap<i64, &Entry>, seed: i64) -> HashSet<i64> {
-    let mut found = HashSet::from([seed]);
-    let mut pending = vec![seed];
-    while let Some(id) = pending.pop() {
-        for link in &entries[&id].links {
-            if link.franchise_relation && found.insert(link.peer_id) {
-                pending.push(link.peer_id);
-            }
-        }
-    }
-    found
 }
 
 fn folder_component(label: &str, id: i64) -> String {
@@ -107,21 +97,19 @@ fn release_folder(entry: &Entry) -> String {
     )
 }
 
-fn proposed_owner(entries: &[Entry], candidates: &HashSet<i64>) -> Option<i64> {
+fn proposed_owner(entries: &[Entry]) -> Option<i64> {
     // AniList prequels can premiere years later (the three Kizumonogatari films).
     // The catalog already sorts by premiere. Do not break an owner tie with a title or ID.
-    let mut dated = entries
-        .iter()
-        .filter(|e| candidates.contains(&e.provider_id) && !e.date.is_empty());
+    let mut dated = entries.iter().filter(|e| !e.date.is_empty());
     match (dated.next(), dated.next()) {
         (Some(first), Some(next)) if first.release_key() == next.release_key() => None,
         (Some(first), _) => Some(first.provider_id),
-        _ if candidates.len() == 1 => candidates.iter().next().copied(),
+        _ if entries.len() == 1 => Some(entries[0].provider_id),
         _ => None,
     }
 }
 
-type Error = (StatusCode, &'static str);
+pub(super) type Error = (StatusCode, &'static str);
 
 fn project(
     group: Group,
@@ -132,9 +120,18 @@ fn project(
     title_language: String,
 ) -> Result<Preview, Error> {
     let entries: HashMap<_, _> = group.entries.iter().map(|e| (e.provider_id, e)).collect();
-    let candidates = franchise_members(&entries, seed);
-    let mut owner = proposed_owner(&group.entries, &candidates);
-    let mut name_override = String::new();
+    let follows: Vec<_> = follows
+        .into_iter()
+        .filter(|f| entries.contains_key(&f.anilist_id))
+        .collect();
+    let managed = follows.iter().find(|f| f.revision > 0);
+    let mut owner = managed
+        .map(|f| f.anilist_id)
+        .or_else(|| proposed_owner(&group.entries));
+    let mut name_override = managed
+        .filter(|f| entries[&f.anilist_id].title != f.title)
+        .map(|f| f.title.clone())
+        .unwrap_or_default();
     let bad = (
         StatusCode::BAD_REQUEST,
         "Choose a release from this franchise preview.",
@@ -148,7 +145,7 @@ fn project(
             "owner" if value.is_empty() => owner = None,
             "owner" | "release" => {
                 let id = value.parse().map_err(|_| bad)?;
-                if !candidates.contains(&id) {
+                if !entries.contains_key(&id) {
                     return Err(bad);
                 }
                 if name == "owner" {
@@ -161,11 +158,10 @@ fn project(
         }
     }
     if !submitted {
-        selected.extend(
-            candidates
-                .iter()
-                .filter(|id| entries[id].series_id.is_some()),
-        );
+        selected.extend(entries.keys().filter(|id| {
+            let e = entries[id];
+            !e.excluded && e.series_id.is_some() && e.choice.unwrap_or(managed.is_none())
+        }));
     }
     let folder = owner
         .map(|id| {
@@ -185,15 +181,25 @@ fn project(
             .display()
             .to_string()
     };
-    let follows: Vec<_> = follows
-        .into_iter()
-        .filter(|f| candidates.contains(&f.anilist_id))
-        .collect();
+    // Reject an old form if the library, relation cache, exclusions, or follow changed
+    // after it was rendered. The form only needs one small value even for long franchises.
+    let mut fingerprint = DefaultHasher::new();
+    version(&follows).hash(&mut fingerprint);
+    for entry in &group.entries {
+        (
+            entry.provider_id,
+            entry.series_id,
+            entry.choice,
+            entry.excluded,
+        )
+            .hash(&mut fingerprint);
+    }
+    let version = fingerprint.finish().to_string();
+    selected.retain(|id| !entries[id].excluded);
     let policy = Policy::for_preview(query, submitted, &follows);
     let rows = group
         .entries
         .into_iter()
-        .filter(|e| candidates.contains(&e.provider_id))
         .map(|entry| {
             let selected = selected.contains(&entry.provider_id);
             let source = (!media_root.trim().is_empty()
@@ -228,35 +234,58 @@ fn project(
         selection_empty: selected.is_empty(),
         rows,
         follows,
+        version,
     })
 }
 
-pub async fn page(
-    State(db): State<SqlitePool>,
-    Path(seed): Path<i64>,
-    Query(query): Query<Vec<(String, String)>>,
-) -> Result<Html<String>, Error> {
-    let read_error = |err: sqlx::Error| {
-        tracing::error!(%err, "Cannot read franchise preview");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Could not read the franchise preview.",
-        )
-    };
-    let follows = release_follows::list(&db).await.map_err(read_error)?;
+pub(super) fn version(follows: &[release_follows::Follow]) -> String {
+    follows
+        .iter()
+        .map(|f| {
+            format!(
+                "{}-{}-{}{}{}",
+                f.id,
+                f.revision,
+                u8::from(f.movies),
+                u8::from(f.ovas),
+                u8::from(f.alternatives)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+pub(super) fn read_error(err: sqlx::Error) -> Error {
+    tracing::error!(%err, "Cannot access franchise follow");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Could not load or save the franchise follow.",
+    )
+}
+
+pub(super) async fn draft(
+    db: &SqlitePool,
+    seed: i64,
+    query: &[(String, String)],
+) -> Result<Preview, Error> {
+    let follows = release_follows::list(db).await.map_err(read_error)?;
     let follow_seed = follows.iter().find(|f| f.anilist_id == seed);
-    let view = load_groups(&db, false, follow_seed)
+    let view = load_groups(db, false, follow_seed)
         .await
         .map_err(read_error)?;
-    let group = view
+    let (group, seed) = view
         .groups
         .into_iter()
-        .find(|g| {
-            g.entries.iter().any(|e| {
-                e.provider_id == seed
-                    && seed > 0
-                    && (e.series_id.is_some() || follow_seed.is_some())
-            })
+        .find_map(|group| {
+            let id = group
+                .entries
+                .iter()
+                .find(|e| {
+                    (e.provider_id == seed || e.library_provider_id == Some(seed))
+                        && (e.series_id.is_some() || follow_seed.is_some())
+                })
+                .map(|e| e.provider_id)?;
+            Some((group, id))
         })
         .ok_or((
             StatusCode::NOT_FOUND,
@@ -265,19 +294,28 @@ pub async fn page(
     project(
         group,
         seed,
-        &query,
+        query,
         &view.media_root,
         follows,
         view.title_language,
-    )?
-    .render()
-    .map(Html)
-    .map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Could not display the franchise preview.",
-        )
-    })
+    )
+}
+
+pub async fn page(
+    State(db): State<SqlitePool>,
+    Path(seed): Path<i64>,
+    Query(query): Query<Vec<(String, String)>>,
+) -> Result<Html<String>, Error> {
+    draft(&db, seed, &query)
+        .await?
+        .render()
+        .map(Html)
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not display the franchise preview.",
+            )
+        })
 }
 
 #[cfg(test)]
