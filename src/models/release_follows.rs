@@ -11,6 +11,7 @@ pub struct Follow {
     pub started_on: String,
     pub tv: bool,
     pub revision: i64,
+    pub library_folder: String,
     pub movies: bool,
     pub ovas: bool,
     pub alternatives: bool,

@@ -77,9 +77,14 @@ pub fn inspect(root: &Path, franchise: &Path, releases: &[Release], owners: &[St
         .unwrap()
         .to_string_lossy()
         .to_lowercase();
-    if root_entries
+    let relative_root = franchise.strip_prefix(root).unwrap().to_string_lossy();
+    let known_root = owners
         .iter()
-        .any(|path| path.file_name().unwrap().to_string_lossy().to_lowercase() == target_name)
+        .any(|path| path.starts_with(&format!("{relative_root}/")));
+    if !known_root
+        && root_entries
+            .iter()
+            .any(|path| path.file_name().unwrap().to_string_lossy().to_lowercase() == target_name)
     {
         review.issues.push(format!(
             "A franchise destination already exists at {}. Review it before a move.",
@@ -107,7 +112,7 @@ pub fn inspect(root: &Path, franchise: &Path, releases: &[Release], owners: &[St
             review.releases.push(found);
             continue;
         };
-        if !media::usable_folder_name(source)
+        if !media::valid_library_location(root, source)
             || owners
                 .iter()
                 .filter(|other| other.to_lowercase() == source.to_lowercase())
@@ -122,6 +127,15 @@ pub fn inspect(root: &Path, franchise: &Path, releases: &[Release], owners: &[St
             continue;
         }
         let source = root.join(source);
+        let destination = franchise.join(&release.destination);
+        if source != destination && destination.symlink_metadata().is_ok() {
+            found.status = "Needs review".into();
+            found
+                .issues
+                .push("The release destination is already occupied.".into());
+            review.releases.push(found);
+            continue;
+        }
         match source.symlink_metadata() {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 found.status = "No current folder".into()

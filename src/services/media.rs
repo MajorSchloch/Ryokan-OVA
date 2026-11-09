@@ -5,6 +5,10 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
+#[cfg(test)]
+#[path = "library_paths_tests.rs"]
+mod library_paths_tests;
+
 // ── Pre-compiled regexes for episode-number parsing ───────────────────────
 // Lifted to LazyLock statics — `parse_episode_number` runs once per video
 // file during every library scan, RSS sync, auto-search, and upgrade
@@ -239,7 +243,7 @@ pub fn sanitize_folder_name(s: &str) -> String {
 
 /// Linking an existing folder must use its literal spelling, including legacy underscores.
 pub fn valid_link_folder(s: &str) -> bool {
-    !s.is_empty() && format_component(s, '_') == s
+    usable_library_path(s) && s.split('/').all(|part| format_component(part, '_') == part)
 }
 
 fn format_component(s: &str, underscore: char) -> String {
@@ -320,6 +324,47 @@ fn anitomy_input(input: &str) -> std::borrow::Cow<'_, str> {
 pub fn usable_folder_name(name: &str) -> bool {
     let name = name.trim();
     !name.is_empty() && !name.chars().all(|c| c == '.') && !name.contains(['/', '\\', '\0'])
+}
+
+/// A legacy title folder or one release below a franchise folder. Each
+/// component retains the single-folder rules; absolute and parent paths fail.
+pub fn usable_library_path(path: &str) -> bool {
+    let parts: Vec<_> = path.split('/').collect();
+    (1..=2).contains(&parts.len())
+        && parts
+            .iter()
+            .all(|part| usable_folder_name(part) && part.trim() == *part && part.len() <= 255)
+}
+
+/// Stored paths may share a franchise parent, but cannot own one another.
+pub fn library_paths_overlap(first: &str, second: &str) -> bool {
+    let first = first.to_ascii_lowercase();
+    let second = second.to_ascii_lowercase();
+    first == second
+        || first.starts_with(&(second.clone() + "/"))
+        || second.starts_with(&(first + "/"))
+}
+
+/// A nested release cannot alias another owner's folder through a linked
+/// franchise or release directory. Missing components are created on import.
+pub fn valid_library_location(root: &Path, relative: &str) -> bool {
+    if !usable_library_path(relative) {
+        return false;
+    }
+    if !relative.contains('/') {
+        return true;
+    }
+    let mut current = root.to_path_buf();
+    for part in relative.split('/') {
+        current.push(part);
+        match current.symlink_metadata() {
+            Ok(meta) if meta.is_symlink() || !meta.is_dir() => return false,
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 /// A file found on disk that represents an episode, or several (issue
@@ -411,7 +456,7 @@ pub async fn scan_series_folder_checked(
     media_root: &str,
     folder_name: &str,
 ) -> Result<Vec<EpisodeFile>, String> {
-    if media_root.is_empty() || !usable_folder_name(folder_name) {
+    if media_root.is_empty() || !valid_library_location(Path::new(media_root), folder_name) {
         return Err("Import protection: invalid library folder".into());
     }
     let root = Path::new(media_root).join(folder_name);
@@ -469,7 +514,10 @@ pub(crate) async fn library_slots(
         if std::fs::read_dir(root).is_err() {
             return slots;
         }
-        for folder in folders.into_iter().filter(|f| usable_folder_name(f)) {
+        for folder in folders.into_iter().filter(|f| usable_library_path(f)) {
+            if !valid_library_location(root, &folder) {
+                continue;
+            }
             let path = root.join(&folder);
             let episodes = match path.symlink_metadata() {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
@@ -526,7 +574,7 @@ pub fn scan_series_folder_split(
     media_root: &str,
     folder_name: &str,
 ) -> (Vec<EpisodeFile>, Vec<EpisodeFile>) {
-    if !usable_folder_name(folder_name) {
+    if !valid_library_location(Path::new(media_root), folder_name) {
         return (Vec::new(), Vec::new());
     }
     let series_path = Path::new(media_root).join(folder_name);
@@ -574,6 +622,18 @@ pub fn list_media_folders(media_root: &str) -> Vec<String> {
                 && let Some(name) = entry.file_name().to_str()
             {
                 folders.push(name.to_string());
+                if !entry.path().join("tvshow.nfo").is_file()
+                    && let Ok(children) = std::fs::read_dir(entry.path())
+                {
+                    for child in children.flatten() {
+                        if child.path().is_dir()
+                            && child.path().join("tvshow.nfo").is_file()
+                            && let Some(leaf) = child.file_name().to_str()
+                        {
+                            folders.push(format!("{name}/{leaf}"));
+                        }
+                    }
+                }
             }
         }
     }

@@ -294,17 +294,18 @@ pub fn import_file_name(
 /// free (or owned by a series row, which is a merge not a collision),
 /// otherwise ` (2)`, ` (3)`, ... Returns whether a suffix was needed.
 pub fn unique_folder_name(base: &str, ctx: &ProjectionContext<'_>) -> (String, bool) {
-    let taken = |name: &str| ctx.disk_folders.contains(name) && !ctx.owned_folders.contains(name);
-    if !taken(base) {
-        return (base.to_string(), false);
-    }
-    for n in 2..1000 {
-        let candidate = format!("{base} ({n})");
-        if !taken(&candidate) {
-            return (candidate, true);
-        }
-    }
-    (format!("{base} ({})", ctx.disk_folders.len() + 2), true)
+    let taken = |name: &str| {
+        ctx.disk_folders
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(name))
+            && !ctx
+                .owned_folders
+                .iter()
+                .any(|p| p.eq_ignore_ascii_case(name))
+    };
+    let unique = crate::models::series::unique_folder_among(base.into(), None, taken);
+    let changed = unique != base;
+    (unique, changed)
 }
 
 /// The folder a new series' files land in, as the import picks it:
@@ -326,7 +327,9 @@ fn new_series_folder_name(
         .collect();
     let row_name =
         crate::models::series::unique_folder_among(base.clone(), entry.season_year, |n| {
-            owned.contains(&n.to_ascii_lowercase())
+            owned
+                .iter()
+                .any(|p| crate::services::media::library_paths_overlap(p, n))
         });
     let (folder, disk_suffixed) = unique_folder_name(&row_name, ctx);
     let suffixed = disk_suffixed || row_name != base;
