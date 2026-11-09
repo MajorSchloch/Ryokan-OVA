@@ -47,7 +47,7 @@
 </form>
 <section class="franchise-preview" aria-labelledby="franchise-folder">
     <h3 id="franchise-folder">Proposed franchise folder</h3>
-    <p>Each release keeps its AniList ID and Ryokan episode numbers. Preview choices do not change files or monitoring.</p>
+    <p>Ryokan identifies each release by its saved AniList ID. Folder names use titles, with a year or ID when names conflict.</p>
     {% if files_requested %}<p>File paths observed now. Moving them requires a later migration step.</p>{% endif %}
     {% for issue in file_issues %}<p>{{ issue }}</p>{% endfor %}
     {% if owner.is_none() %}<p>Choose the release that should own this franchise.</p>
