@@ -470,3 +470,54 @@ async fn franchise_singleton_grows_without_starting_a_second_follow() {
     assert_eq!(preview::draft(&db, SUNNY, &[]).await.unwrap().rows.len(), 1);
     assert_eq!(models::release_follows::list(&db).await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn franchise_file_preview_reads_selected_files_without_saving_the_draft() {
+    use axum::extract::{Path, Query};
+    let db = crate::test_support::in_memory_pool().await;
+    let temp = tempfile::tempdir().unwrap();
+    let id = seed_series(&db, FIRST, TITLE).await;
+    sqlx::query("UPDATE series SET folder_name='Source' WHERE id=?")
+        .bind(id)
+        .execute(&db)
+        .await
+        .unwrap();
+    config::save_config(
+        &db,
+        &Config {
+            media_root: temp.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    std::fs::create_dir_all(temp.path().join("Source/Season 01")).unwrap();
+    std::fs::write(temp.path().join("Source/Season 01/Show - S01E01.mkv"), []).unwrap();
+    std::fs::write(
+        temp.path().join("Source/Season 01/Show - S01E01.en.ass"),
+        [],
+    )
+    .unwrap();
+    sqlx::query("PRAGMA query_only=ON")
+        .execute(&db)
+        .await
+        .unwrap();
+    let Html(html) = preview::page(
+        State(db.clone()),
+        Path(FIRST),
+        Query(vec![("files".into(), "1".into())]),
+    )
+    .await
+    .unwrap();
+    assert!(html.contains("1 media files") && html.contains("Show - S01E01.en.ass"));
+    assert!(html.contains("Proposed path"));
+    assert_eq!(crate::test_support::count_series(&db).await, 1);
+    assert!(models::release_follows::list(&db).await.unwrap().is_empty());
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    assert_eq!(
+        std::fs::metadata(temp.path().join("Source/Season 01/Show - S01E01.mkv"))
+            .unwrap()
+            .len(),
+        0
+    );
+}

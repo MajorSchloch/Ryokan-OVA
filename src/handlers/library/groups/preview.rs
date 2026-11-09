@@ -1,6 +1,9 @@
 //! A projection of cached releases and follows. The query string owns all draft choices.
 use super::{Entry, Group, load_groups};
-use crate::{models::release_follows, services::media};
+use crate::{
+    models::release_follows,
+    services::{franchise_files, media},
+};
 use askama::Template;
 use axum::{
     extract::{Path, Query, State},
@@ -27,6 +30,8 @@ pub(super) struct Preview {
     pub(super) rows: Vec<Row>,
     pub(super) follows: Vec<release_follows::Follow>,
     pub(super) version: String,
+    files_requested: bool,
+    file_issues: Vec<String>,
 }
 
 #[derive(Default)]
@@ -73,6 +78,7 @@ pub(super) struct Row {
     pub(super) selected: bool,
     source: Option<String>,
     destination: String,
+    file_preview: Option<franchise_files::ReleaseFiles>,
 }
 
 fn folder_component(label: &str, id: i64) -> String {
@@ -220,6 +226,7 @@ fn project(
                 selected,
                 source,
                 destination,
+                file_preview: None,
             }
         })
         .collect();
@@ -235,6 +242,8 @@ fn project(
         rows,
         follows,
         version,
+        files_requested: false,
+        file_issues: Vec::new(),
     })
 }
 
@@ -306,16 +315,64 @@ pub async fn page(
     Path(seed): Path<i64>,
     Query(query): Query<Vec<(String, String)>>,
 ) -> Result<Html<String>, Error> {
-    draft(&db, seed, &query)
-        .await?
-        .render()
-        .map(Html)
-        .map_err(|_| {
+    let mut preview = draft(&db, seed, &query).await?;
+    if query.iter().any(|(k, v)| k == "files" && v == "1") && !preview.folder.is_empty() {
+        let cfg = crate::models::config::get_config(&db)
+            .await
+            .map_err(read_error)?
+            .unwrap_or_default();
+        let owners = crate::models::series::get_all(&db)
+            .await
+            .map_err(read_error)?
+            .into_iter()
+            .map(|s| s.folder_name)
+            .collect::<Vec<_>>();
+        preview = tokio::task::spawn_blocking(move || {
+            let releases = preview
+                .rows
+                .iter()
+                .filter(|r| r.selected)
+                .map(|r| franchise_files::Release {
+                    anilist_id: r.entry.provider_id,
+                    source: r.entry.series_id.map(|_| r.entry.folder_name.clone()),
+                    destination: r.destination.clone(),
+                    episodes: r.entry.episodes,
+                })
+                .collect::<Vec<_>>();
+            let report = franchise_files::inspect(
+                std::path::Path::new(&cfg.media_root),
+                std::path::Path::new(&preview.folder),
+                &releases,
+                &owners,
+            );
+            preview.files_requested = true;
+            preview.file_issues = report.issues;
+            for files in report.releases {
+                if let Some(row) = preview
+                    .rows
+                    .iter_mut()
+                    .find(|r| r.entry.provider_id == files.anilist_id)
+                {
+                    row.file_preview = Some(files);
+                }
+            }
+            preview
+        })
+        .await
+        .map_err(|e| {
+            tracing::error!(%e,"Cannot preview franchise files");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Could not display the franchise preview.",
+                "Could not read the franchise files.",
             )
-        })
+        })?;
+    }
+    preview.render().map(Html).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not display the franchise preview.",
+        )
+    })
 }
 
 #[cfg(test)]
