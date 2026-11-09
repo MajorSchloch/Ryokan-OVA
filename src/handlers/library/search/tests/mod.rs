@@ -1413,7 +1413,7 @@ mod handler_endpoints {
                 average_score: Some(78),
             },
             AnimeEntry {
-                id: 100,
+                id: -9876,
                 id_mal: Some(9876),
                 title_romaji: "Some MAL Show".into(),
                 title_english: String::new(),
@@ -1431,6 +1431,8 @@ mod handler_endpoints {
 
         let partial = super::super::build_search_results_partial(entries, "english");
         let html = partial.render().expect("partial renders");
+        assert_eq!(html.matches(r#"href="/anime/anilist/21""#).count(), 2);
+        assert_eq!(html.matches(r#"href="/anime/mal/9876""#).count(), 2);
 
         // AL row: external link to anilist.co with the AL id, format
         // underscore replaced, episodes count rendered, status class

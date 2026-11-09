@@ -35,9 +35,10 @@
     </fieldset>
     <fieldset class="franchise-releases"><legend>Releases in premiere order</legend>
         {% for row in rows %}
-        <label class="checkbox-row"><input type="checkbox" name="release" value="{{ row.entry.provider_id }}"{% if row.selected %} checked{% endif %}{% if row.entry.excluded %} disabled{% endif %}>
+        <div class="franchise-release"><label class="checkbox-row"><input type="checkbox" name="release" value="{{ row.entry.provider_id }}"{% if row.selected %} checked{% endif %}{% if row.entry.excluded %} disabled{% endif %}>
         <span><strong>{{ row.entry.title }}</strong><small>{% if !row.entry.format.is_empty() %}{{ row.entry.format }} · {% endif %}{% if row.entry.date.is_empty() %}Date unknown{% else %}{{ row.entry.date }}{% endif %}
         · AniList {{ row.entry.provider_id }}{% if let Some(n) = row.entry.episodes %}{% if *n > 1 %} · Episodes 1–{{ n }}{% endif %}{% endif %} · {% if row.entry.series_id.is_some() %}In library{% else %}Outside library{% endif %}{% if row.entry.excluded %} · Excluded from sync{% endif %}</small></span></label>
+        <a href="{{ crate::handlers::library::detail::path(row.entry.provider_id) }}" class="btn btn-secondary btn-sm" aria-label="Details for {{ row.entry.title }}">Details</a></div>
         {% endfor %}
     </fieldset>
     <p>Saving adds selected releases outside your library and monitors their episodes. Unchecked releases stay outside the follow. Existing library entries keep their episode settings and files.</p>

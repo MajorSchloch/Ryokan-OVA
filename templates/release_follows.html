@@ -12,7 +12,7 @@ It monitors new entries that start on or after your follow date. Following a tit
 {% endif %}
 {% for follow in follows %}
 <section class="cf-section release-follow">
-    <h3><a href="/series/{{ follow.anilist_id }}?by=anilist">{{ follow.title }}</a></h3>
+    <h3><a href="{{ crate::handlers::library::detail::path(follow.anilist_id) }}">{{ follow.title }}</a></h3>
     {% if follow.id > 0 %}
     <div class="follow-check">
         <a href="/library/groups/{{ follow.anilist_id }}/preview">Manage franchise follow</a>
@@ -28,7 +28,7 @@ It monitors new entries that start on or after your follow date. Following a tit
     {% if !follow.matches.is_empty() %}
     <ul class="follow-matches">
         {% for release in follow.matches %}
-        <li><a href="{% if let Some(id) = release.series_id %}/series/{{ id }}{% else %}/series/{{ release.anilist_id }}?by=anilist{% endif %}">{{ release.title }}</a></li>
+        <li><a href="{{ crate::handlers::library::detail::path(release.anilist_id) }}">{{ release.title }}</a></li>
         {% endfor %}
     </ul>
     {% else if follow.check_status.as_deref() == Some("pending") %}

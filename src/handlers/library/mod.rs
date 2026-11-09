@@ -7,6 +7,7 @@ use crate::services::anilist;
 pub mod bulk;
 pub mod cleanup;
 pub mod crud;
+pub mod detail;
 pub mod episodes;
 pub mod groups;
 mod inventory;
@@ -135,7 +136,6 @@ struct SeriesTemplate {
     page: String,
     route_id: i64,
     follow_anilist_id: i64,
-    follow_title: String,
     detail: anilist::AnimeDetail,
     is_tracked: bool,
     db_id: Option<i64>,
@@ -337,8 +337,9 @@ pub struct RelationGroup {
 pub struct RelationCard {
     /// The library series id when `tracked`, else the AniList id.
     pub id: i64,
-    /// In the library: the link carries the internal id; otherwise it
-    /// carries the AniList id and says so with `?by=anilist`.
+    /// Provider-addressed link, stable before and after adding the release.
+    pub href: String,
+    /// Library membership is independent of the detail page address.
     pub tracked: bool,
     pub title: String,
     pub title_romaji: String,

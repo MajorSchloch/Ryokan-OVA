@@ -229,6 +229,7 @@ struct SearchResultRow {
     episodes_display: String,
     status_class: String,
     status_label: String,
+    detail_href: String,
     external_href: Option<String>,
     source_label: &'static str,
     /// Pre-serialized JSON of `entry`. Embedded into the `data-entry`
@@ -326,6 +327,7 @@ fn build_search_results_partial(
             // into `&quot;`, which the browser parses back to a literal
             // `"` inside the attribute — no manual escAttr needed.
             let data_entry_json = serde_json::to_string(&entry).unwrap_or_else(|_| "{}".into());
+            let detail_href = super::detail::path(entry.id);
             SearchResultRow {
                 entry,
                 title,
@@ -334,6 +336,7 @@ fn build_search_results_partial(
                 episodes_display,
                 status_class,
                 status_label,
+                detail_href,
                 external_href,
                 source_label,
                 data_entry_json,
