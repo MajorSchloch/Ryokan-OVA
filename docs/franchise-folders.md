@@ -24,6 +24,16 @@ Add Series, automatic tracking, manual-import previews, and external request loo
 
 The eventual Jellyfin view should show one franchise entry with its releases and watch order inside. This change supplies storage and compatibility support for that view. It does not implement the franchise presentation layer.
 
+## Browse releases before adding them
+
+Release detail pages use provider identities: `/anime/anilist/130003` for an AniList release, or `/anime/mal/5680` for a MAL release. The same URL works before and after the release enters the library. Browsing can cache metadata, but does not create a library entry, follow, media folder, or download.
+
+Search result covers and titles open these Ryokan pages. Provider links remain available separately. Relation cards, library groups, and franchise previews also link to release details. A tracked release shows its library controls; an untracked release offers **Add to Library** and **Explore franchise**.
+
+Legacy `/series/<library row id>` bookmarks redirect to the provider page. The existing `?by=anilist` links still identify provider IDs explicitly. Mutation and playback APIs retain their library row IDs. An AniList ID that equals another release's library row ID cannot select that release.
+
+A franchise remains a Ryokan group of releases. Its follow owner is a release, not a provider identity for the whole franchise. Browsing a release or its franchise preview does not save a follow or move files.
+
 ## Jellyfin compatibility view
 
 Jellyfin's TV library can interpret a franchise folder as a series and its release folders as seasons. A private Jellyfin 12.4.0 rehearsal confirmed that this loses the releases' separate provider identities.

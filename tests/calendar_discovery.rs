@@ -220,7 +220,7 @@ async fn discover_filter_add_and_serve_the_last_complete_snapshot_on_429() {
     let html = fetch(&app, path, None).await;
     let doc = Html::parse_document(&html);
     let link = doc
-        .select(&select("[data-anilist-id='12'] a"))
+        .select(&select("[data-anilist-id='12'] a.btn"))
         .next()
         .unwrap();
     assert_eq!(link.text().collect::<String>(), "Open in library");
@@ -320,7 +320,7 @@ async fn ambiguous_calendar_add(
 
     let doc = Html::parse_document(&fetch(app, path, None).await);
     let link = doc
-        .select(&Selector::parse("[data-anilist-id='13'] a").unwrap())
+        .select(&Selector::parse("[data-anilist-id='13'] a.btn").unwrap())
         .next()
         .unwrap();
     assert_eq!(

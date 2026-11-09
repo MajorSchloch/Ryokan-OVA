@@ -4,6 +4,7 @@ use crate::{
     services::anilist,
     test_support::seed_series,
 };
+use axum::extract::{Path, Query};
 use serde_json::{Value, json};
 
 const FIRST: i64 = 19603;
@@ -12,6 +13,47 @@ const SUNNY: i64 = 21318;
 const TITLE: &str = "Fate/stay night: Unlimited Blade Works";
 const SECOND_TITLE: &str = "Fate/stay night: Unlimited Blade Works 2nd Season";
 const SUNNY_TITLE: &str = "Fate/stay night: Unlimited Blade Works 2nd Season - sunny day";
+
+#[tokio::test]
+async fn franchise_preview_browses_cached_releases_without_library_or_follow_records() {
+    let db = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    models::migrate(&db).await.unwrap();
+    cache(&db, FIRST, &[("SEQUEL", SECOND)]).await;
+    cache(&db, SECOND, &[("PREQUEL", FIRST)]).await;
+    sqlx::query("PRAGMA query_only=ON")
+        .execute(&db)
+        .await
+        .unwrap();
+    let response = preview::page(State(db.clone()), Path(SECOND), Query(vec![]))
+        .await
+        .unwrap();
+    let doc = scraper::Html::parse_document(&response.0);
+    let links = scraper::Selector::parse(".franchise-release > a").unwrap();
+    let hrefs: Vec<_> = doc
+        .select(&links)
+        .map(|a| a.value().attr("href").unwrap())
+        .collect();
+    assert_eq!(hrefs, ["/anime/anilist/19603", "/anime/anilist/20792"]);
+    assert!(response.0.contains("No current follow for these releases."));
+    for table in [
+        "series",
+        "release_follows",
+        "franchise_choices",
+        "followed_releases",
+        "grabbed_torrents",
+    ] {
+        let count: i64 =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(count, 0, "Browsing changed {table}");
+    }
+}
 
 // AniList's anime records, restricted to the three entries in the example.
 // The relation is ALTERNATIVE. The media format of Sunny Day is SPECIAL.
@@ -137,11 +179,17 @@ async fn grouped_library_fate_release_order_ownership_and_local_numbers_are_read
     assert_eq!(doc.select(&select("details.library-group li")).count(), 3);
     assert_eq!(doc.select(&select("li.outside-entry")).count(), 1);
     assert_eq!(
-        doc.select(&select(
-            "li.outside-entry a, .library-groups form, .library-groups [hx-post]"
-        ))
-        .count(),
+        doc.select(&select(".library-groups form, .library-groups [hx-post]"))
+            .count(),
         0
+    );
+    assert_eq!(
+        doc.select(&select("li.outside-entry a"))
+            .next()
+            .unwrap()
+            .value()
+            .attr("href"),
+        Some("/anime/anilist/21318")
     );
     assert!(html.contains("Episodes 1–13"));
     assert!(html.contains("Episode 1"));

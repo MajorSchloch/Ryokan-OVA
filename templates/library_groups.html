@@ -23,7 +23,7 @@
         {% for entry in group.entries %}
             <li{% if entry.series_id.is_none() %} class="outside-entry"{% endif %}>
                 <div class="group-entry-heading">
-                    {% if let Some(id) = entry.series_id %}<a href="/series/{{ id }}">{{ entry.title }}</a>{% else %}<strong>{{ entry.title }}</strong>{% endif %}
+                    <a href="{{ crate::handlers::library::detail::path(entry.provider_id) }}">{{ entry.title }}</a>
                     <span class="tag tag-res">{% if !entry.format.is_empty() %}{{ entry.format.replace("_", " ") }}{% else %}Format unknown{% endif %}</span>
                 </div>
                 <div class="group-entry-meta">

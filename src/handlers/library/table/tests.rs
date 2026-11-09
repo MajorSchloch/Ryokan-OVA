@@ -75,7 +75,7 @@ async fn counts_local_slots_and_only_confirmed_airings_for_each_part() {
         (follow.disk, follow.missing, follow.total),
         (Some(0), None, None)
     );
-    assert!(follow.href.contains("anilist_id=200"));
+    assert_eq!(follow.href, "/anime/anilist/200");
     assert!(first.followed && !first.follow_only);
     assert_eq!(
         (first.disk, first.missing, first.total),
