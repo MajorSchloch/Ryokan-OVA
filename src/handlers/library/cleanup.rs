@@ -240,9 +240,9 @@ pub async fn cleanup_series_files(
     if let Some(root) = media_root
         && !root.trim().is_empty()
         && !folder_name.trim().is_empty()
-        && !crate::services::media::usable_folder_name(folder_name)
+        && !crate::services::media::valid_library_location(std::path::Path::new(root), folder_name)
     {
-        // `.`, `..` or a path: never joined onto the media root.
+        // Invalid components or paths outside the supported library layout.
         report.folder_status = "refused";
         report.folder_detail = format!("unusable folder name {folder_name:?}");
     } else if let Some(root) = media_root
@@ -333,6 +333,15 @@ pub async fn cleanup_series_files(
     }
 
     // 4. Nudge Jellyfin. Best-effort.
+    if let Some(root) = media_root
+        && let Err(e) = crate::services::jellyfin_view::sync(&state.db, root).await
+    {
+        report.jellyfin_status = "error";
+        report
+            .folder_detail
+            .push_str(&format!("; Jellyfin view: {e}"));
+        return Ok(report);
+    }
     let jellyfin_opt = state.jellyfin.read().await.clone();
     if let Some(jelly) = jellyfin_opt {
         report.jellyfin_status = match jelly.refresh_library().await {

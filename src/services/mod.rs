@@ -14,6 +14,7 @@ pub mod indexers;
 pub mod jikan;
 pub mod kitsu;
 pub mod library_guard;
+pub mod library_move;
 pub mod mal;
 pub mod media;
 pub mod migration_preview;
@@ -24,6 +25,7 @@ pub mod sanitize;
 pub mod scoring;
 
 pub mod jellyfin;
+pub mod jellyfin_view;
 
 pub mod auto_expand;
 pub mod auto_search;
