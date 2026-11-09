@@ -97,7 +97,7 @@ pub(super) async fn shim_ids(
 /// the TVDB ID maps to multiple anibridge seasons. This matches how real Sonarr
 /// returns multi-season shows, allowing Seerr to request specific seasons.
 pub(super) async fn lookup_by_external_id(
-    _state: &AppState,
+    state: &AppState,
     cfg: &config::Config,
     tvdb_id: i64,
 ) -> Result<Json<Vec<SonarrSeries>>, (StatusCode, String)> {
@@ -178,6 +178,27 @@ pub(super) async fn lookup_by_external_id(
             ..Default::default()
         },
     );
+    let provider_id = first_ids
+        .anilist_id
+        .or_else(|| first_ids.mal_id.map(|m| -m))
+        .ok_or_else(|| {
+            (
+                StatusCode::CONFLICT,
+                "No verified anime identity".to_string(),
+            )
+        })?;
+    let folder = crate::models::library_layout::project(
+        &state.db,
+        provider_id,
+        folder,
+        crate::services::naming::SeriesNames {
+            title: &show_title,
+            year: show_detail.as_ref().and_then(|d| d.season_year),
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
     let path = if cfg.media_root.is_empty() {
         format!("/media/{folder}")
     } else {
@@ -263,26 +284,39 @@ pub(super) async fn fetch_anime_detail(ids: &anibridge::AnimeIds) -> Option<anil
 }
 
 pub(super) async fn build_sonarr_series_from_search(
+    db: &sqlx::SqlitePool,
     r: &anilist::AnimeEntry,
     title: &str,
     ids: ShimIds,
     db_series: Option<&series::Series>,
     cfg: &config::Config,
-) -> SonarrSeries {
+) -> Result<SonarrSeries, sqlx::Error> {
     let total_eps = r.episodes.unwrap_or(0).max(0);
     let is_in_library = db_series.is_some();
     let internal_id = db_series.map(|s| s.id).unwrap_or(0);
 
-    let folder_name = db_series.map(|s| s.folder_name.clone()).unwrap_or_else(|| {
-        crate::services::naming::series_folder(
+    let folder_name = if let Some(s) = db_series {
+        s.folder_name.clone()
+    } else {
+        let leaf = crate::services::naming::series_folder(
             &cfg.series_folder_format,
             &cfg.title_language,
             &crate::services::naming::SeriesNames {
                 title,
                 ..crate::services::naming::SeriesNames::from_entry(r)
             },
+        );
+        crate::models::library_layout::project(
+            db,
+            r.id,
+            leaf,
+            crate::services::naming::SeriesNames {
+                title,
+                ..crate::services::naming::SeriesNames::from_entry(r)
+            },
         )
-    });
+        .await?
+    };
 
     let disk_files = if is_in_library {
         media::scan_series_folder(&cfg.media_root, &folder_name).await
@@ -303,7 +337,7 @@ pub(super) async fn build_sonarr_series_from_search(
         .map(|s| s.monitor_mode_enum() != monitoring::MonitorMode::None)
         .unwrap_or(true);
 
-    SonarrSeries {
+    Ok(SonarrSeries {
         id: internal_id,
         title: title.to_string(),
         sort_title: title.to_lowercase(),
@@ -369,7 +403,7 @@ pub(super) async fn build_sonarr_series_from_search(
                 0.0
             },
         },
-    }
+    })
 }
 
 pub(super) async fn build_sonarr_series_from_tracked(

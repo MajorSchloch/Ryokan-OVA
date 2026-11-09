@@ -385,7 +385,10 @@ async fn main() {
     if args.first().is_some_and(|arg| {
         matches!(
             arg.as_str(),
-            "--preview-library-folder" | "--move-library-folder" | "--set-franchise-library-folder"
+            "--preview-library-folder"
+                | "--move-library-folder"
+                | "--set-franchise-library-folder"
+                | "--enable-franchise-folders"
         )
     }) {
         if let Err(err) = services::library_move::run(&args).await {

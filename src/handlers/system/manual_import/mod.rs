@@ -356,6 +356,7 @@ fn picker_rows(group: &manual_import::SeriesGroup, pref: &str) -> Vec<CandidateV
 
 /// Library state the projection reads, gathered once per render.
 struct RenderContext {
+    layout: std::sync::Mutex<crate::models::library_layout::Catalog>,
     media_root: String,
     title_pref: String,
     series_folder_format: String,
@@ -390,6 +391,11 @@ async fn render_context(state: &AppState) -> RenderContext {
     let disk_folders: HashSet<String> =
         media::list_media_folders(&media_root).into_iter().collect();
     RenderContext {
+        layout: std::sync::Mutex::new(
+            crate::models::library_layout::catalog(&state.db)
+                .await
+                .unwrap_or_else(crate::models::library_layout::Catalog::failed),
+        ),
         media_root,
         title_pref,
         series_folder_format,
@@ -403,6 +409,7 @@ async fn render_context(state: &AppState) -> RenderContext {
 impl RenderContext {
     fn projection(&self) -> ProjectionContext<'_> {
         ProjectionContext {
+            layout: Some(&self.layout),
             media_root: &self.media_root,
             owned_folders: &self.owned_folders,
             disk_folders: &self.disk_folders,
@@ -446,7 +453,11 @@ fn build_card(
         picker_rows: picker_rows(group, pref),
         picker_error: String::new(),
         low_confidence: group.low_confidence,
-        search_error: group.search_error.clone().unwrap_or_default(),
+        search_error: if view.path_error.is_empty() {
+            group.search_error.clone().unwrap_or_default()
+        } else {
+            view.path_error
+        },
         skipped: group.skipped,
         existing_title: group
             .existing

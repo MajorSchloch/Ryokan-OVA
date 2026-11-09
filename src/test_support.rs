@@ -44,6 +44,12 @@ pub async fn in_memory_pool() -> SqlitePool {
     crate::models::migrations::migrate(&pool)
         .await
         .expect("run migrations");
+    // Historical fixtures model an existing flat library. New-install layout
+    // defaults and the explicit adoption path have their own integration tests.
+    sqlx::query("UPDATE library_path_policy SET enabled=0 WHERE id=1")
+        .execute(&pool)
+        .await
+        .expect("select legacy fixture layout");
     pool
 }
 

@@ -411,6 +411,7 @@ mod tests {
         let preview = super::super::preview::project_group(
             &out[0],
             &super::super::preview::ProjectionContext {
+                layout: None,
                 media_root: "/library",
                 owned_folders: &folders,
                 disk_folders: &folders,

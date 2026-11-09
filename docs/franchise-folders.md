@@ -4,6 +4,24 @@ The library uses a general franchise model. A franchise can contain one release 
 
 The physical layout is `<media root>/<franchise>/<release>/...`. Existing flat release folders remain supported. Folder names do not define watch order. Release order and a future recommended watch order belong to franchise metadata.
 
+## Default paths and existing libraries
+
+Fresh installations assign a franchise parent to every new release. A one-off uses `Title/Title`. Names contain no generated date, format, or provider ID. A collision can add a year or numeric suffix. Custom release-folder templates still apply to the release name.
+
+Storage membership is separate from download follows and selections. A folder move does not create a follow or start a download. Stored membership keeps the library group intact when relation caches expire.
+
+The path planner uses provider IDs, cached anime relations, and explicit storage choices. It can reuse a known franchise through an untracked intermediate release. It does not compare similar title text. An ambiguous link between two saved franchise folders requires review. A later metadata refresh never renames a stored path.
+
+Existing installations retain their path policy on upgrade. After a preview and backup, stop Ryokan and enable the new default with the existing data and media mounts:
+
+```text
+/app/ryokan --enable-franchise-folders
+```
+
+This command records existing nested paths and changes future assignments. It moves no files and changes no download selections. It replaces the old default `{series.title} ({series.year})` template with `{series.title}`. It preserves custom templates. The command is safe to repeat.
+
+Add Series, automatic tracking, manual-import previews, and external request lookups use the same planner. A new folder assignment must use `Franchise/Release` after adoption. Existing flat paths remain valid until an explicit migration.
+
 The eventual Jellyfin view should show one franchise entry with its releases and watch order inside. This change supplies storage and compatibility support for that view. It does not implement the franchise presentation layer.
 
 ## Jellyfin compatibility view
@@ -57,13 +75,13 @@ One-off titles can move below their own name, such as `Title` to `Title/Title`. 
 
 A tracked release without a current directory receives only its future import path. No empty release directory is created.
 
-After every selected release uses its destination, save the franchise's future path:
+For a saved download follow, after every selected release uses its destination, save that follow's future path:
 
 ```text
 /app/ryokan --set-franchise-library-folder OWNER_ANILIST_ID 'Franchise'
 ```
 
-New selected releases then receive paths below that franchise. Existing release paths stay fixed. Selected releases must have a verified AniList identity. Saving the same franchise path again is a no-op.
+New selected releases then receive paths below that franchise. Existing release paths stay fixed. Selected releases must have a verified AniList identity. Saving the same franchise path again is a no-op. A storage-only migration does not need a download follow. The move command records its franchise membership directly.
 
 ## Cutover checks and recovery
 
@@ -76,7 +94,7 @@ To reverse a move, stop the writers and use the same move command with the origi
 ## Verification
 
 ```sh
-cargo nextest run --features test-support --lib -E 'test(library_move) or test(jellyfin_view) or test(library_paths_tests) or test(a_subsequent_import)'
+cargo nextest run --features test-support --lib -E 'test(library_layout) or test(library_move) or test(jellyfin_view) or test(library_paths_tests) or test(franchise_preview)'
 ```
 
 Coverage includes legacy paths, nested scans, subsequent imports, sibling-safe deletion, future follows, stable aliases, kept files, conflict refusal, interrupted moves, one-off staging, repeat runs, and reverse moves.

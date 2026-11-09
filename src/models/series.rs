@@ -579,6 +579,7 @@ pub(crate) async fn upsert_with_promotion(
             tx.commit().await?;
             return Ok((existing.id, false));
         }
+        super::library_layout::promote(&mut tx, existing.anilist_id, core.anilist_id).await?;
         sqlx::query(
             r#"
                 UPDATE series
@@ -652,37 +653,54 @@ pub(super) async fn insert_new(
     // A saved layout also owns releases discovered after its initial move.
     // Receipts are written before automatic tracking; explicit choices are
     // written before manual tracking. Existing rows never pass this branch.
-    let roots: Vec<String> = sqlx::query_scalar(
+    let folder = if super::library_layout::enabled(&mut *db).await? {
+        let mut layout = super::library_layout::Catalog::load(db).await?;
+        layout.seed(
+            core.anilist_id,
+            crate::services::naming::SeriesNames {
+                title: core.title,
+                romaji: core.title_romaji,
+                english: core.title_english,
+                native: core.title_native,
+                year: core.season_year,
+            },
+        );
+        let assignment = layout.plan(core.anilist_id, folder, core.season_year, None)?;
+        super::library_layout::record(db, core.anilist_id, &assignment).await?;
+        assignment.path
+    } else {
+        let roots: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT f.library_folder FROM release_follows f
          WHERE f.library_folder != '' AND (
            EXISTS(SELECT 1 FROM franchise_choices c WHERE c.follow_id=f.id AND c.anilist_id=?1 AND c.selected=1)
            OR (EXISTS(SELECT 1 FROM followed_releases r WHERE r.follow_id=f.id AND r.anilist_id=?1)
              AND NOT EXISTS(SELECT 1 FROM franchise_choices c WHERE c.anilist_id=?1 AND (c.selected=0 OR c.follow_id!=f.id))))",
     ).bind(core.anilist_id).fetch_all(&mut *db).await?;
-    let folder = match roots.as_slice() {
-        [] => folder,
-        [root] if crate::services::media::usable_folder_name(root) => {
-            let prefs = crate::models::config::get_naming_prefs(&mut *db).await;
-            let title = crate::services::library_link::pick_title(
-                &prefs.title_language,
-                core.title_english,
-                core.title_romaji,
-                core.title_native,
-            );
-            let title = if title.is_empty() { core.title } else { title };
-            let mut name = crate::services::media::sanitize_folder_name(title);
-            name.truncate(name.floor_char_boundary(255));
-            let name = if name.is_empty() {
-                format!("AniList {}", core.anilist_id)
-            } else {
-                name
-            };
-            format!("{root}/{name}")
-        }
-        _ => {
-            return Err(sqlx::Error::Protocol(
-                "Conflicting or invalid franchise library folders".into(),
-            ));
+        match roots.as_slice() {
+            [] => folder,
+            [root] if crate::services::media::usable_folder_name(root) => {
+                let prefs = crate::models::config::get_naming_prefs(&mut *db).await;
+                let title = crate::services::library_link::pick_title(
+                    &prefs.title_language,
+                    core.title_english,
+                    core.title_romaji,
+                    core.title_native,
+                );
+                let title = if title.is_empty() { core.title } else { title };
+                let mut name = crate::services::media::sanitize_folder_name(title);
+                name.truncate(name.floor_char_boundary(255));
+                let name = if name.is_empty() {
+                    format!("AniList {}", core.anilist_id)
+                } else {
+                    name
+                };
+                format!("{root}/{name}")
+            }
+            _ => {
+                return Err(sqlx::Error::Protocol(
+                    "Conflicting or invalid franchise library folders".into(),
+                ));
+            }
         }
     };
     let folder = unique_series_folder(&mut *db, folder, core.season_year, None).await?;
@@ -1256,8 +1274,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_series_sharing_another_ones_title_gets_its_own_folder() {
-        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        crate::models::migrate(&db).await.unwrap();
+        let db = crate::test_support::in_memory_pool().await;
         let core = |anilist_id, year| SeriesCore {
             anilist_id,
             mal_id: None,

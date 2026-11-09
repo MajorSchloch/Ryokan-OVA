@@ -182,12 +182,14 @@ pub struct GroupView {
     /// under the media root that no series row owns, so the import
     /// would suffix.
     pub folder_collision: bool,
+    pub path_error: String,
     pub files: Vec<FileView>,
     pub counts: GroupCounts,
 }
 
 /// Library state the projection needs, gathered once per render.
 pub struct ProjectionContext<'a> {
+    pub layout: Option<&'a std::sync::Mutex<crate::models::library_layout::Catalog>>,
     pub media_root: &'a str,
     /// `series.folder_name` for every tracked series.
     pub owned_folders: &'a HashSet<String>,
@@ -318,8 +320,28 @@ pub fn unique_folder_name(base: &str, ctx: &ProjectionContext<'_>) -> (String, b
 fn new_series_folder_name(
     entry: &crate::services::anilist::AnimeEntry,
     ctx: &ProjectionContext<'_>,
-) -> (String, bool) {
+    reserve: bool,
+) -> Result<(String, bool), String> {
     let base = default_folder_name(entry, ctx);
+    if let Some(layout) = ctx.layout {
+        let mut layout = layout
+            .lock()
+            .map_err(|_| "Library path preview is unavailable".to_string())?;
+        if layout.enabled {
+            let mut copy;
+            let layout = if reserve {
+                &mut *layout
+            } else {
+                copy = layout.clone();
+                &mut copy
+            };
+            layout.seed(entry.id, naming::SeriesNames::from_entry(entry));
+            return layout
+                .plan(entry.id, base, entry.season_year, None)
+                .map(|a| (a.path, false))
+                .map_err(|e| e.to_string());
+        }
+    }
     let owned: HashSet<String> = ctx
         .owned_folders
         .iter()
@@ -333,7 +355,7 @@ fn new_series_folder_name(
         });
     let (folder, disk_suffixed) = unique_folder_name(&row_name, ctx);
     let suffixed = disk_suffixed || row_name != base;
-    (folder, suffixed)
+    Ok((folder, suffixed))
 }
 
 /// `E18`, `E05-E06` for a file holding several episodes (issue #246),
@@ -360,7 +382,7 @@ fn dest_for(media_root: &str, folder: &str, season_folder: &str, file_name: &str
 
 pub fn project_group(group: &SeriesGroup, ctx: &ProjectionContext<'_>) -> GroupView {
     let picked = group.picked();
-    let kind = if group.skipped {
+    let mut kind = if group.skipped {
         GroupKind::Skipped
     } else if picked.is_none() {
         GroupKind::NoMatch
@@ -370,11 +392,24 @@ pub fn project_group(group: &SeriesGroup, ctx: &ProjectionContext<'_>) -> GroupV
         GroupKind::New
     };
 
-    let (folder_name, folder_collision) = match (&group.existing, picked) {
-        (Some(existing), _) => (existing.folder_name.clone(), false),
-        (None, Some(entry)) => new_series_folder_name(entry, ctx),
-        (None, None) => (String::new(), false),
+    let projected = match (&group.existing, picked.filter(|_| !group.skipped)) {
+        (Some(existing), _) => Ok((existing.folder_name.clone(), false)),
+        (None, Some(entry)) => new_series_folder_name(
+            entry,
+            ctx,
+            group
+                .files
+                .iter()
+                .any(|f| f.selected && f.episode.is_some()),
+        ),
+        (None, None) => Ok((String::new(), false)),
     };
+    let mut path_error = String::new();
+    let (folder_name, folder_collision) = projected.unwrap_or_else(|e| {
+        path_error = e;
+        kind = GroupKind::NoMatch;
+        (String::new(), false)
+    });
     let season_folder = season_folder_name(group, ctx);
 
     // Only a folder that exists can hold a stranger at a destination
@@ -530,6 +565,7 @@ pub fn project_group(group: &SeriesGroup, ctx: &ProjectionContext<'_>) -> GroupV
         kind,
         folder_name,
         folder_collision,
+        path_error,
         files,
         counts,
     }
@@ -715,6 +751,7 @@ mod tests {
 
     fn ctx<'a>(owned: &'a HashSet<String>, disk: &'a HashSet<String>) -> ProjectionContext<'a> {
         ProjectionContext {
+            layout: None,
             media_root: "/media",
             owned_folders: owned,
             disk_folders: disk,
@@ -915,6 +952,7 @@ mod tests {
         let disk: HashSet<String> = ["Show Folder".to_string()].into_iter().collect();
         let media_s = media.to_string_lossy().into_owned();
         let ctx = ProjectionContext {
+            layout: None,
             media_root: &media_s,
             owned_folders: &owned,
             disk_folders: &disk,
@@ -949,6 +987,7 @@ mod tests {
         let owned = HashSet::new();
         let disk = HashSet::new();
         let ctx = ProjectionContext {
+            layout: None,
             media_root: "/media",
             owned_folders: &owned,
             disk_folders: &disk,

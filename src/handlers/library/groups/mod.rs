@@ -428,6 +428,24 @@ async fn load_groups(
             e.files = file_status(facts);
         }
     }
+    // Storage membership survives cache changes without creating an acquisition follow.
+    let storage:Vec<(String,i64,i64)>=sqlx::query_as("SELECT f.folder,f.owner_provider_id,m.provider_id FROM library_franchises f JOIN library_franchise_members m ON m.folder=f.folder")
+        .fetch_all(db).await?;
+    for (name, root, member) in storage {
+        catalog.entries.entry(root).or_default().franchise_name = Some(name);
+        if root != member {
+            catalog
+                .neighbors
+                .entry(root)
+                .or_default()
+                .insert((member, ""));
+            catalog
+                .neighbors
+                .entry(member)
+                .or_default()
+                .insert((root, ""));
+        }
+    }
     // Keep saved members reachable even if AniList later drops a relation.
     let choices: Vec<(i64, String, i64, String, bool)> = sqlx::query_as(
         "SELECT f.anilist_id,f.title,c.anilist_id,c.title,c.selected FROM franchise_choices c

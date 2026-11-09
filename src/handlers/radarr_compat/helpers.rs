@@ -138,8 +138,16 @@ pub(super) async fn lookup_by_tmdb_id(
         };
 
         results.push(
-            build_radarr_movie_from_search(&search_result, title, tmdb_id, db_series.as_ref(), cfg)
-                .await,
+            build_radarr_movie_from_search(
+                &state.db,
+                &search_result,
+                title,
+                tmdb_id,
+                db_series.as_ref(),
+                cfg,
+            )
+            .await
+            .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?,
         );
     }
 
@@ -147,25 +155,38 @@ pub(super) async fn lookup_by_tmdb_id(
 }
 
 pub(super) async fn build_radarr_movie_from_search(
+    db: &sqlx::SqlitePool,
     r: &anilist::AnimeEntry,
     title: &str,
     tmdb_id: i64,
     db_series: Option<&series::Series>,
     cfg: &config::Config,
-) -> RadarrMovie {
+) -> Result<RadarrMovie, sqlx::Error> {
     let is_in_library = db_series.is_some();
     let internal_id = db_series.map(|s| s.id).unwrap_or(0);
 
-    let folder_name = db_series.map(|s| s.folder_name.clone()).unwrap_or_else(|| {
-        crate::services::naming::series_folder(
+    let folder_name = if let Some(s) = db_series {
+        s.folder_name.clone()
+    } else {
+        let leaf = crate::services::naming::series_folder(
             &cfg.series_folder_format,
             &cfg.title_language,
             &crate::services::naming::SeriesNames {
                 title,
                 ..crate::services::naming::SeriesNames::from_entry(r)
             },
+        );
+        crate::models::library_layout::project(
+            db,
+            r.id,
+            leaf,
+            crate::services::naming::SeriesNames {
+                title,
+                ..crate::services::naming::SeriesNames::from_entry(r)
+            },
         )
-    });
+        .await?
+    };
 
     let has_file = if is_in_library {
         !media::scan_series_folder(&cfg.media_root, &folder_name)
@@ -185,7 +206,7 @@ pub(super) async fn build_radarr_movie_from_search(
         .map(|s| s.monitor_mode_enum() != monitoring::MonitorMode::None)
         .unwrap_or(true);
 
-    RadarrMovie {
+    Ok(RadarrMovie {
         id: internal_id,
         title: title.to_string(),
         sort_title: title.to_lowercase(),
@@ -223,7 +244,7 @@ pub(super) async fn build_radarr_movie_from_search(
             .replace(|c: char| !c.is_alphanumeric(), ""),
         root_folder_path: cfg.media_root.clone(),
         movie_file: None,
-    }
+    })
 }
 
 pub(super) async fn build_radarr_movie_from_tracked(

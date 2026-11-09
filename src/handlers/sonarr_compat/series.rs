@@ -68,7 +68,11 @@ pub async fn series_lookup(
             &r.title_romaji
         };
 
-        sonarr_results.push(build_sonarr_series_from_search(&r, title, ids, db_series, &cfg).await);
+        sonarr_results.push(
+            build_sonarr_series_from_search(&state.db, &r, title, ids, db_series, &cfg)
+                .await
+                .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?,
+        );
     }
 
     Ok(Json(sonarr_results))

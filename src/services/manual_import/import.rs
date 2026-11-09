@@ -288,6 +288,11 @@ pub async fn run_import(
         return Err("media root is not set".to_string());
     }
     let mode = sess.mode.as_str();
+    let layout = std::sync::Mutex::new(
+        crate::models::library_layout::catalog(&state.db)
+            .await
+            .map_err(|e| format!("Library paths are unavailable: {e}"))?,
+    );
     let cancel = sess.cancel.clone();
 
     // Folders owned by a series row: a same-named folder on disk is a
@@ -303,6 +308,7 @@ pub async fn run_import(
     let total_writes: usize = {
         let disk: HashSet<String> = media::list_media_folders(&media_root).into_iter().collect();
         let ctx = ProjectionContext {
+            layout: Some(&layout),
             media_root: &media_root,
             owned_folders: &owned_folders,
             disk_folders: &disk,
@@ -340,6 +346,7 @@ pub async fn run_import(
         super::resolve_existing(&state.db, &mut group).await;
         let group = &group;
         let ctx = ProjectionContext {
+            layout: Some(&layout),
             media_root: &media_root,
             owned_folders: &owned_folders,
             disk_folders: &disk,
@@ -355,6 +362,9 @@ pub async fn run_import(
             ..Default::default()
         };
         if !matches!(view.kind, GroupKind::New | GroupKind::Merge) || view.counts.writes() == 0 {
+            if !view.path_error.is_empty() {
+                gr.errors.push(view.path_error);
+            }
             report.series_skipped += 1;
             gr.skipped = group.files.len();
             gr.series_title = group
@@ -411,21 +421,9 @@ pub async fn run_import(
         let usable = media::usable_library_path(&row.folder_name);
         if created || !usable {
             let base = if !usable {
-                let generated = naming::series_folder(
-                    &cfg.series_folder_format,
-                    &cfg.title_language,
-                    &naming::SeriesNames::from_series(&row),
-                );
                 // Never another series' folder: the rule a new row
                 // gets in `series::upsert`.
-                match series::unique_series_folder(
-                    &state.db,
-                    generated,
-                    row.season_year,
-                    Some(row.id),
-                )
-                .await
-                {
+                match crate::models::library_layout::generate(&state.db, &row).await {
                     Ok(name) => name,
                     Err(e) => {
                         gr.errors.push(format!("could not set folder name: {e}"));
@@ -1010,6 +1008,80 @@ mod tests {
         hydrate_metadata: false,
     };
 
+    #[tokio::test]
+    async fn franchise_preview_and_import_agree_for_a_batch_with_a_skipped_collision() {
+        let f = fixture("hardlink", false).await;
+        crate::models::library_layout::enable(&f.state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO provider_relations_cache(provider_id,related_provider_id,relation_type,media_type) VALUES(100,101,'SEQUEL','ANIME')")
+            .execute(&f.state.db).await.unwrap();
+        let mut skipped = group(
+            vec![candidate(&f.src, "skip/Show - 01.mkv", Some(1))],
+            entry(99, "Show"),
+        );
+        skipped.files[0].selected = false;
+        let groups = vec![
+            skipped,
+            group(
+                vec![candidate(&f.src, "one/Show - 01.mkv", Some(1))],
+                entry(100, "Show"),
+            ),
+            group(
+                vec![candidate(&f.src, "two/Show - 01.mkv", Some(1))],
+                entry(101, "Show"),
+            ),
+        ];
+        let layout = std::sync::Mutex::new(
+            crate::models::library_layout::catalog(&f.state.db)
+                .await
+                .unwrap(),
+        );
+        let owned = HashSet::new();
+        let disk = HashSet::new();
+        let ctx = ProjectionContext {
+            layout: Some(&layout),
+            media_root: f.media.to_str().unwrap(),
+            owned_folders: &owned,
+            disk_folders: &disk,
+            title_pref: "english",
+            series_folder_format: naming::DEFAULT_SERIES_FOLDER_FORMAT,
+            season_folder_format: naming::DEFAULT_SEASON_FOLDER_FORMAT,
+            episode_file_format: naming::DEFAULT_EPISODE_FILE_FORMAT,
+        };
+        let paths: Vec<_> = groups
+            .iter()
+            .map(|g| preview::project_group(g, &ctx).folder_name)
+            .collect();
+        assert_eq!(&paths[1..], ["Show/Show", "Show/Show (2020)"]);
+        let id = ready_session(&f.state, &f.src, ImportMode::Hardlink, groups);
+        let report = run_import(f.state.clone(), id, OPTS).await.unwrap();
+        assert_eq!(
+            (report.files_written, report.files_failed),
+            (2, 0),
+            "{report:?}"
+        );
+        for (i, id) in [(1, 100), (2, 101)] {
+            let row = series::get_by_anilist_id(&f.state.db, id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.folder_name, paths[i]);
+            assert_eq!(
+                media::scan_series_folder(f.media.to_str().unwrap(), &row.folder_name)
+                    .await
+                    .len(),
+                1
+            );
+        }
+        assert!(
+            series::get_by_anilist_id(&f.state.db, 99)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
     #[cfg(unix)]
     fn same_inode(a: &Path, b: &Path) -> bool {
         use std::os::unix::fs::MetadataExt;
@@ -1183,6 +1255,7 @@ mod tests {
             .into_iter()
             .collect();
         let ctx = ProjectionContext {
+            layout: None,
             media_root: &f.media.to_string_lossy(),
             owned_folders: &owned,
             disk_folders: &disk,
