@@ -7,6 +7,7 @@ pub mod download_client;
 pub mod episode_mapping;
 pub mod external_sync;
 pub mod folder_cleanup;
+pub mod franchise_files;
 pub mod http_body;
 pub mod indexer_catalog;
 pub mod indexers;
