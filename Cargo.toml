@@ -201,6 +201,7 @@ path = "tests/htmx_browser_e2e_boost_phase_d.rs"
 required-features = ["test-support", "browser-e2e"]
 
 [dependencies]
+tempfile = "3"
 # Web framework + async runtime
 axum = { version = "0.8", features = ["macros"] }
 # HTMX request detection — provides the `HxRequest` extractor so handlers
@@ -374,13 +375,6 @@ nix = { version = "0.31", features = ["fs", "hostname"] }
 fantoccini = { version = "0.22", optional = true, default-features = false, features = ["rustls-tls"] }
 
 [dev-dependencies]
-# Used only by the env-gated live_smoke tests for the DownloadClient
-# impls — each smoke creates a synthetic multi-file .torrent in a
-# tempdir (via shell-out to transmission-create) to get deterministic
-# file-list testing without depending on DHT metadata fetch landing
-# during the test window.
-tempfile = "3"
-
 # ── Test-coverage-expansion (issue-# to be filed) infrastructure ──
 #
 # wiremock: HTTP mock server that stands in for reqwest's targets. Used

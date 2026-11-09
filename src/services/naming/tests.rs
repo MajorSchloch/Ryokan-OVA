@@ -698,3 +698,35 @@ fn a_dots_only_title_falls_back_instead_of_naming_the_media_root() {
         assert!(!season.chars().all(|c| c == '.'), "{title:?} -> {season:?}");
     }
 }
+
+#[test]
+fn underscores_in_metadata_and_templates_produce_spaces_in_library_names() {
+    let ctx = NameContext {
+        series_title: "A__B: C_D".into(),
+        episode_title: "A_new_beginning".into(),
+        ..sample_context()
+    };
+    assert_eq!(
+        render(TemplateKind::SeriesFolder, "{series.title}", &ctx)
+            .unwrap()
+            .name,
+        "A B - C D"
+    );
+    assert_eq!(
+        render(
+            TemplateKind::SeasonFolder,
+            "Season_{season.number:00}",
+            &ctx
+        )
+        .unwrap()
+        .name,
+        "Season 01"
+    );
+    assert_eq!(
+        ep(
+            "{series.title}_S{season.number:00}E{episode.number:00}_{episode.title}{ext}",
+            &ctx
+        ),
+        "A B - C D S01E07 A new beginning.mkv"
+    );
+}
