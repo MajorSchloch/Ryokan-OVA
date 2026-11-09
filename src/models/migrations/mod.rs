@@ -3120,6 +3120,31 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
+    // Existing release follows include TV by default and retain their original root until edited.
+    for (column, definition) in [
+        ("tv", "BOOLEAN NOT NULL DEFAULT 1"),
+        ("revision", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        if !column_exists(db, "release_follows", column).await {
+            let sql = format!("ALTER TABLE release_follows ADD COLUMN {column} {definition}");
+            sqlx::query(sqlx::AssertSqlSafe(sql)).execute(db).await?;
+        }
+    }
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS franchise_choices (
+        anilist_id INTEGER PRIMARY KEY CHECK(anilist_id > 0),
+        follow_id INTEGER NOT NULL REFERENCES release_follows(id) ON DELETE CASCADE,
+        title TEXT NOT NULL, selected BOOLEAN NOT NULL
+    )",
+    )
+    .execute(db)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_franchise_choices_follow ON franchise_choices(follow_id)",
+    )
+    .execute(db)
+    .await?;
+
     // Older receipts have no check timestamp or saved title.
     for (table, column) in [
         ("release_follows", "check_status"),
