@@ -259,10 +259,8 @@ async fn grouped_library_previews_a_follow_on_an_untracked_sequel_without_backfi
     );
     assert_eq!(doc.select(&select("[name=release]")).count(), 2);
     assert_eq!(doc.select(&select("[name=release][checked]")).count(), 1);
-    assert!(html.contains("Fate+stay night [AniList 19603]/"));
-    assert!(html.contains(
-        "2015-04-05 - TV - Fate+stay night - Unlimited Blade Works 2nd Season [AniList 20792]"
-    ));
+    assert!(html.contains("Fate+stay night/"));
+    assert!(html.contains("Fate+stay night - Unlimited Blade Works 2nd Season"));
     assert!(html.contains("Movies on"));
     assert_eq!(crate::test_support::count_series(&db).await, 0);
     let err = preview::page(

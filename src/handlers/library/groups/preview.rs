@@ -81,26 +81,60 @@ pub(super) struct Row {
     file_preview: Option<franchise_files::ReleaseFiles>,
 }
 
-fn folder_component(label: &str, id: i64) -> String {
+fn folder_component(label: &str, suffix: &str) -> String {
     let name = media::sanitize_folder_name(label);
-    let suffix = format!(" [AniList {id}]");
-    // Keep the identity even when a long title reaches the filesystem limit.
     let end = name.floor_char_boundary(255 - suffix.len());
-    format!("{}{suffix}", &name[..end]).trim().to_owned()
+    format!("{}{suffix}", name[..end].trim_end_matches([' ', '.']))
 }
 
-fn release_folder(entry: &Entry) -> String {
-    let date = entry.release_key();
-    let date = if date.is_empty() { "Undated" } else { &date };
-    let format = if entry.format.is_empty() {
-        "Release"
-    } else {
-        &entry.format
-    };
-    folder_component(
-        &format!("{date} - {format} - {}", entry.title),
-        entry.provider_id,
-    )
+fn release_folders(entries: &[Entry]) -> HashMap<i64, String> {
+    let mut names: HashMap<_, _> = entries
+        .iter()
+        .map(|entry| {
+            let name = folder_component(&entry.title, "");
+            (
+                entry.provider_id,
+                if name.is_empty() {
+                    format!("AniList {}", entry.provider_id)
+                } else {
+                    name
+                },
+            )
+        })
+        .collect();
+    let mut counts = HashMap::<String, usize>::new();
+    for name in names.values() {
+        *counts.entry(name.to_lowercase()).or_default() += 1;
+    }
+    // Check every known release so checkbox changes keep the same proposed name.
+    for entry in entries {
+        let name = &names[&entry.provider_id];
+        if counts[&name.to_lowercase()] > 1
+            && let Some(year) = entry.date.get(..4).and_then(|s| s.parse::<i32>().ok())
+        {
+            names.insert(
+                entry.provider_id,
+                folder_component(name, &format!(" ({year})")),
+            );
+        }
+    }
+    counts.clear();
+    for name in names.values() {
+        *counts.entry(name.to_lowercase()).or_default() += 1;
+    }
+    let mut occupied: HashSet<_> = names.values().map(|name| name.to_lowercase()).collect();
+    for entry in entries {
+        let name = &names[&entry.provider_id];
+        if counts[&name.to_lowercase()] > 1 {
+            let named = folder_component(name, &format!(" [AniList {}]", entry.provider_id));
+            let unique = crate::models::series::unique_folder_among(named, None, |candidate| {
+                occupied.contains(&candidate.to_lowercase())
+            });
+            occupied.insert(unique.to_lowercase());
+            names.insert(entry.provider_id, unique);
+        }
+    }
+    names
 }
 
 fn proposed_owner(entries: &[Entry]) -> Option<i64> {
@@ -169,6 +203,7 @@ fn project(
             !e.excluded && e.series_id.is_some() && e.choice.unwrap_or(managed.is_none())
         }));
     }
+    let release_names = release_folders(&group.entries);
     let folder = owner
         .map(|id| {
             let title = if name_override.is_empty() {
@@ -176,7 +211,12 @@ fn project(
             } else {
                 &name_override
             };
-            folder_component(title, id)
+            let name = folder_component(title, "");
+            if name.is_empty() {
+                format!("AniList {id}")
+            } else {
+                name
+            }
         })
         .unwrap_or_default();
     let folder = if folder.is_empty() || media_root.trim().is_empty() {
@@ -217,7 +257,7 @@ fn project(
                     .to_string()
             });
             let destination = if selected && !folder.is_empty() {
-                release_folder(&entry)
+                release_names[&entry.provider_id].clone()
             } else {
                 String::new()
             };
@@ -399,6 +439,54 @@ mod tests {
     use crate::handlers::library::groups::Catalog;
     use serde_json::json;
     #[test]
+    fn franchise_folder_names_use_titles_and_disambiguate_only_conflicts() {
+        let entries: Vec<_> = [
+            (1, "Standalone_movie", "2020-01-01"),
+            (2, "Shared", "2000-01-01"),
+            (3, "shared", "2010-01-01"),
+            (4, "Repeat", "2020-01-01"),
+            (5, "Repeat", "2020-02-01"),
+            (6, "Repeat (2020) [AniList 4]", "2021-01-01"),
+        ]
+        .into_iter()
+        .map(|(provider_id, title, date)| Entry {
+            provider_id,
+            title: title.into(),
+            date: date.into(),
+            ..Default::default()
+        })
+        .collect();
+        let names = release_folders(&entries);
+        assert_eq!(names[&1], "Standalone movie");
+        assert_eq!(names[&2], "Shared (2000)");
+        assert_eq!(names[&3], "shared (2010)");
+        assert_eq!(names[&4], "Repeat (2020) [AniList 4] (2)");
+        assert_eq!(names[&5], "Repeat (2020) [AniList 5]");
+        let unique: HashSet<_> = names.values().map(|s| s.to_lowercase()).collect();
+        assert_eq!(unique.len(), names.len());
+        assert_eq!(folder_component("Monogatari", ""), "Monogatari");
+    }
+
+    #[test]
+    fn franchise_folder_names_keep_utf8_and_ids_when_long_titles_collide() {
+        let entries: Vec<_> = (1..=2)
+            .map(|provider_id| Entry {
+                provider_id,
+                title: "物語".repeat(100),
+                date: "2020".into(),
+                ..Default::default()
+            })
+            .collect();
+        let names = release_folders(&entries);
+        for id in 1..=2 {
+            assert!(names[&id].len() <= 255);
+            assert!(names[&id].ends_with(&format!("[AniList {id}]")));
+            assert!(media::usable_folder_name(&names[&id]));
+        }
+        assert_ne!(names[&1], names[&2]);
+    }
+
+    #[test]
     fn grouped_library_monogatari_uses_premiere_order_across_formats() {
         // The first Kizumonogatari film is a story prequel that premiered after Bakemonogatari.
         let mut catalog = Catalog::default();
@@ -451,12 +539,6 @@ mod tests {
             .map(|r| r.destination.as_str())
             .collect();
         assert_eq!(preview.owner, Some(5081));
-        assert_eq!(
-            folders,
-            [
-                "2009-07-03 - TV - Bakemonogatari [AniList 5081]",
-                "2016-01-08 - MOVIE - Kizumonogatari Part 1 [AniList 9260]"
-            ]
-        );
+        assert_eq!(folders, ["Bakemonogatari", "Kizumonogatari Part 1"]);
     }
 }
