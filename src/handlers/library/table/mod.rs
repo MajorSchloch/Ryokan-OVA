@@ -111,7 +111,7 @@ async fn load(db: &SqlitePool) -> Result<Table, sqlx::Error> {
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join(" "),
-            href: format!("/series/{}", s.id),
+            href: super::detail::path(s.anilist_id),
             mode: s.monitor_mode_enum().as_str(),
             format: s.format.replace('_', " "),
             status: status_label(&s.status),
@@ -139,11 +139,7 @@ async fn load(db: &SqlitePool) -> Result<Table, sqlx::Error> {
             .and_then(|raw| serde_json::from_str::<FollowDetail>(raw).ok())
             .unwrap_or_default();
         rows.push(Entry {
-            href: format!(
-                "/library/follows?anilist_id={}&title={}",
-                f.anilist_id,
-                urlencoding::encode(&f.title)
-            ),
+            href: super::detail::path(f.anilist_id),
             title: f.title,
             format: detail.format.replace('_', " "),
             status: status_label(&detail.status),

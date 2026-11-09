@@ -77,20 +77,23 @@
         {% endif %}
 
         <div class="detail-actions">
+            {% if is_tracked %}
             <button class="btn btn-primary" id="btn-auto-search" onclick="autoSearchSeries(this)">
                 <span class="btn-label">Search Monitored Episodes</span>
             </button>
+            {% endif %}
             {% if is_tracked %}
                 {% if let Some(id) = db_id %}
                 <button class="btn btn-danger" id="btn-track" onclick="removeSeries({{ id }})">Remove from Library</button>
                 {% endif %}
             {% else %}
-            <button class="btn btn-secondary" id="btn-track" onclick="addSeries()">+ Add to Library</button>
+            <button class="btn btn-primary" id="btn-track" onclick="addSeries()">+ Add to Library</button>
             {% endif %}
-            {% if is_tracked %}<a href="/library/groups/{{ follow_anilist_id }}/preview" class="btn btn-secondary">Franchise</a>{% else if follow_anilist_id > 0 %}<a href="/library/follows?anilist_id={{ follow_anilist_id }}&amp;title={{ follow_title|urlencode_strict }}" class="btn btn-secondary">Follow future releases</a>{% endif %}
+            {% if follow_anilist_id > 0 %}<a href="/library/groups/{{ follow_anilist_id }}/preview" class="btn btn-secondary">{% if is_tracked %}Franchise{% else %}Explore franchise{% endif %}</a>{% endif %}
             {% if !anilist_url.is_empty() %}<a href="{{ anilist_url }}" target="_blank" rel="noopener noreferrer" class="btn btn-ghost">AniList</a>{% endif %}
             {% if !mal_url.is_empty() %}<a href="{{ mal_url }}" target="_blank" rel="noopener noreferrer" class="btn btn-ghost">MyAnimeList</a>{% endif %}
         </div>
+        {% if !is_tracked %}<p class="form-hint">Outside your library. Explore this release and its relations, then add what you want to track.</p>{% endif %}
         {% if metadata_is_stale %}
         <div class="alert alert-warn metadata-stale-banner" role="status">
             <strong>Metadata may be out of date.</strong>
@@ -131,7 +134,7 @@
         <div class="relation-cards">
         {% for group in relation_groups %}
         {% for card in group.entries %}
-        <a href="/series/{{ card.id }}{% if !card.tracked %}?by=anilist{% endif %}" class="relation-card">
+        <a href="{{ card.href }}" class="relation-card">
             <div class="relation-card-cover-wrap">
                 <div class="relation-card-cover">
                     {% if !card.cover_url.is_empty() %}

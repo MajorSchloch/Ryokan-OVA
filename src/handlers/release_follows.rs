@@ -214,8 +214,12 @@ mod tests {
     #[tokio::test]
     async fn matched_release_links_to_the_mal_entry_with_a_unique_cached_mapping() {
         let (db, local_id) = matched_sequel().await;
+        assert_eq!(
+            release_follows::list_with_matches(&db).await.unwrap()[0].matches[0].series_id,
+            Some(local_id)
+        );
         let html = render_read_only(&db).await;
-        assert!(html.contains(&format!("href=\"/series/{local_id}\">Library sequel</a>")));
+        assert!(html.contains("href=\"/anime/anilist/12\">Library sequel</a>"));
     }
 
     #[tokio::test]
@@ -224,7 +228,7 @@ mod tests {
         sqlx::query("INSERT INTO provider_metadata_cache(provider_id,mal_id,detail_json) VALUES (13,800,'{}')")
             .execute(&db).await.unwrap();
         let html = render_read_only(&db).await;
-        assert!(html.contains("href=\"/series/12?by=anilist\">Matched sequel</a>"));
+        assert!(html.contains("href=\"/anime/anilist/12\">Matched sequel</a>"));
         assert!(!html.contains(&format!("href=\"/series/{local_id}\"")));
     }
 
@@ -236,7 +240,7 @@ mod tests {
             .bind(second).execute(&db).await.unwrap();
         let html = render_read_only(&db).await;
         assert_eq!(
-            html.matches("href=\"/series/12?by=anilist\">Matched sequel</a>")
+            html.matches("href=\"/anime/anilist/12\">Matched sequel</a>")
                 .count(),
             1
         );
@@ -252,8 +256,12 @@ mod tests {
             .execute(&db).await.unwrap();
         sqlx::query("INSERT INTO series_metadata_cache(series_id,provider_id,mal_id,detail_json) VALUES (?,12,800,'{}')")
             .bind(local_id).execute(&db).await.unwrap();
+        assert_eq!(
+            release_follows::list_with_matches(&db).await.unwrap()[0].matches[0].series_id,
+            Some(local_id)
+        );
         let html = render_read_only(&db).await;
-        assert!(html.contains(&format!("href=\"/series/{local_id}\">Library sequel</a>")));
+        assert!(html.contains("href=\"/anime/anilist/12\">Library sequel</a>"));
     }
 
     #[tokio::test]
@@ -262,8 +270,12 @@ mod tests {
         let exact = seed_series(&db, 12, "Exact sequel").await;
         sqlx::query("INSERT INTO series_metadata_cache(series_id,provider_id,mal_id,detail_json) VALUES (?,12,800,'{}')")
             .bind(mal_entry).execute(&db).await.unwrap();
+        assert_eq!(
+            release_follows::list_with_matches(&db).await.unwrap()[0].matches[0].series_id,
+            Some(exact)
+        );
         let html = render_read_only(&db).await;
-        assert!(html.contains(&format!("href=\"/series/{exact}\">Exact sequel</a>")));
+        assert!(html.contains("href=\"/anime/anilist/12\">Exact sequel</a>"));
         assert!(!html.contains(&format!("href=\"/series/{mal_entry}\"")));
     }
 }

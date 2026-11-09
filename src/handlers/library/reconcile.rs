@@ -166,13 +166,59 @@ pub(super) async fn maybe_hydrate_cumulative_offset(
 /// `?by=anilist`. Without that marker the id was tried as an internal
 /// id first, so a search for Cowboy Bebop (AniList 1) opened whatever
 /// series had internal id 1.
-async fn resolve_series_request(
+pub(super) async fn resolve_series_request(
     db: &SqlitePool,
     request_id: i64,
     by_anilist: bool,
 ) -> Result<(Option<series::Series>, i64), sqlx::Error> {
     if by_anilist {
-        let row = series::get_by_anilist_id(db, request_id).await?;
+        let mut row = series::get_by_anilist_id(db, request_id).await?;
+        if row.is_none() && request_id > 0 {
+            // The same verified local identities used by the follows page.
+            // Do not attach another AniList part merely because it shares MAL.
+            let local_id: Option<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "{} SELECT series_id FROM local_anilist_ids WHERE anilist_id=?",
+                series::LOCAL_ANILIST_IDS
+            )))
+            .bind(request_id)
+            .fetch_optional(db)
+            .await?;
+            if let Some(id) = local_id
+                && let Some(candidate) = series::get_by_id(db, id).await?
+            {
+                let confirmed: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM series_metadata_cache WHERE series_id=? AND provider_id=?)",
+                )
+                .bind(id)
+                .bind(request_id)
+                .fetch_one(db)
+                .await?;
+                // An attached metadata record identifies this exact part.
+                // A MAL-only match must also respect splits discovered in
+                // premiere snapshots, not just the detail cache above.
+                let unique = if confirmed {
+                    true
+                } else if let Some(mid) = candidate.mal_id {
+                    series::get_by_mal_id_for_entry(db, request_id, mid)
+                        .await?
+                        .is_some_and(|row| row.id == id)
+                } else {
+                    false
+                };
+                if unique {
+                    row = Some(candidate);
+                }
+            }
+        } else if row.is_none()
+            && let Some(mid) = request_id.checked_neg().filter(|id| *id > 0)
+        {
+            // A saved MAL URL survives promotion to AniList. A split MAL entry
+            // cannot choose one of several library releases for its controls.
+            let mut matches = series::get_all_by_mal_id(db, mid).await?;
+            if matches.len() == 1 {
+                row = matches.pop();
+            }
+        }
         return Ok((row, request_id));
     }
     if let Some(row) = series::get_by_id(db, request_id).await? {
@@ -529,7 +575,17 @@ async fn resolve_series_context_raw(
         detail = upgraded_detail;
     }
 
-    if db_series.is_none() {
+    if detail.id != 0 {
+        let _ = metadata_cache::upsert_provider(db, detail.id, detail.id_mal, &detail).await;
+    }
+    if db_series.is_none() && by_anilist {
+        // Resolve again with the freshly cached identity evidence. This keeps
+        // cold requests under the same split/ambiguity rules as cached ones.
+        db_series = resolve_series_request(db, request_id, true)
+            .await
+            .map_err(|e| e.to_string())?
+            .0;
+    } else if db_series.is_none() {
         // AniList id first: a MAL id can name several AniList entries
         // (#292), and only a MAL-fallback row of it is this series.
         db_series = series::get_by_anilist_id(db, detail.id)
@@ -546,9 +602,6 @@ async fn resolve_series_context_raw(
         }
     }
 
-    if detail.id != 0 {
-        let _ = metadata_cache::upsert_provider(db, detail.id, detail.id_mal, &detail).await;
-    }
     if let Some(ref tracked) = db_series
         && should_persist_detail_cache(tracked.anilist_id, &detail)
     {
