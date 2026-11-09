@@ -376,7 +376,7 @@ async fn load(db: &SqlitePool) -> Result<GroupsPage, sqlx::Error> {
 async fn load_groups(
     db: &SqlitePool,
     include_disk_status: bool,
-    follow_seed: Option<&crate::models::release_follows::Follow>,
+    seed: Option<(i64, &str)>,
 ) -> Result<GroupsPage, sqlx::Error> {
     let cfg = config::get_config(db).await?.unwrap_or_default();
     let mut catalog = catalog(db, &cfg.title_language).await?;
@@ -479,16 +479,16 @@ async fn load_groups(
             e.excluded = exclusions.contains(*id, e.mal_id);
         }
     }
-    if let Some(follow) = follow_seed {
-        let entry = catalog.entries.entry(follow.anilist_id).or_default();
+    if let Some((id, title)) = seed {
+        let entry = catalog.entries.entry(id).or_default();
         if entry.title.is_empty() {
-            entry.title.clone_from(&follow.title);
+            entry.title = title.to_owned();
         }
     }
     Ok(GroupsPage {
         page: "library",
         title_language: cfg.title_language,
-        groups: catalog.group(follow_seed.map(|f| f.anilist_id)),
+        groups: catalog.group(seed.map(|(id, _)| id)),
         media_root: cfg.media_root,
     })
 }

@@ -765,14 +765,11 @@ pub async fn series_detail(
     let template = SeriesTemplate {
         page: "library".to_string(),
         route_id: db_id.unwrap_or(provider_id),
-        follow_anilist_id: db_series.as_ref().map_or(detail.id, |s| s.anilist_id),
-        follow_title: crate::services::library_link::pick_title(
-            &title_language,
-            &detail.title_english,
-            &detail.title_romaji,
-            &detail.title_native,
-        )
-        .to_owned(),
+        follow_anilist_id: if provider_id > 0 {
+            provider_id
+        } else {
+            detail.id
+        },
         detail,
         is_tracked,
         db_id,
@@ -1672,6 +1669,7 @@ async fn build_relation_groups(
 
         cards.push(RelationCard {
             id: card_id,
+            href: super::detail::path(related.id),
             tracked,
             title: preferred_title(
                 &related.title_english,

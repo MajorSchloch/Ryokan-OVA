@@ -851,10 +851,7 @@ async fn main() {
             "/api/library/recycle/{entry_id}/purge",
             post(handlers::library::recycle::purge_entry),
         )
-        .route(
-            "/series/{anilist_id}",
-            get(handlers::library::pages::series_detail),
-        )
+        .merge(handlers::library::detail::routes())
         .route(
             "/search",
             get(handlers::search::search_page).post(handlers::search::search_submit),

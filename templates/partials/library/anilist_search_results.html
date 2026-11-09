@@ -8,29 +8,19 @@
 {% else %}
 {% for r in entries %}
 <div class="anilist-result">
-    {% match r.external_href %}
-    {% when Some with (href) %}
-    <a href="{{ href }}" target="_blank" rel="noopener" class="anilist-cover-link" title="Open on {{ r.source_label }}">
+    <a href="{{ r.detail_href }}" class="anilist-cover-link" title="Open details for {{ r.title }}">
         <img src="{{ r.entry.cover_url }}" alt="" class="anilist-cover" loading="lazy">
     </a>
-    {% when None %}
-    <img src="{{ r.entry.cover_url }}" alt="" class="anilist-cover" loading="lazy">
-    {% endmatch %}
     <div class="anilist-info">
         <p class="anilist-title">
-            {% match r.external_href %}
-            {% when Some with (href) %}
-            <a href="{{ href }}" target="_blank" rel="noopener" class="anilist-title-link" title="Open on {{ r.source_label }}">{{ r.title }}</a>
-            {% when None %}
-            {{ r.title }}
-            {% endmatch %}
+            <a href="{{ r.detail_href }}" class="anilist-title-link">{{ r.title }}</a>
         </p>
         <p class="anilist-subtitle">{{ r.subtitle }}</p>
         <div class="anilist-meta">
             <span class="tag tag-res">{{ r.format_display }}</span>
             <span class="tag tag-res">{{ r.episodes_display }}</span>
             <span class="tag tag-status-{{ r.status_class }}">{{ r.status_label }}</span>
-            <span>{{ r.source_label }}</span>
+            {% if let Some(href) = r.external_href %}<a href="{{ href }}" target="_blank" rel="noopener" title="Open on {{ r.source_label }}">{{ r.source_label }}</a>{% else %}<span>{{ r.source_label }}</span>{% endif %}
         </div>
     </div>
     <button class="btn btn-primary btn-add" onclick="addSeries({{ r.entry.id }}, this)" data-entry="{{ r.data_entry_json }}">Add</button>

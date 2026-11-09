@@ -257,16 +257,19 @@ async fn release_follows_survive_restart_and_follow_sequels_across_an_excluded_m
     assert_eq!(services::release_follows::refresh(&db).await.unwrap(), 1);
     assert_eq!(services::release_follows::refresh(&db).await.unwrap(), 0);
     let announced = series::get_by_anilist_id(&db, 4).await.unwrap().unwrap();
-    let link = format!("href=\"/series/{}\">Title 4</a>", announced.id);
+    let link = format!(
+        "href=\"/anime/anilist/{}\">Title 4</a>",
+        announced.anilist_id
+    );
     let html = page(&reader, &server).await;
     assert_eq!(html.matches(&link).count(), 1);
     let first = section(&html, ">Finished TV</a>");
     assert!(first.contains(&link));
     assert!(first.contains("Matched releases"));
-    assert!(first.contains("href=\"/series/3?by=anilist\">Title 3</a>"));
+    assert!(first.contains("href=\"/anime/anilist/3\">Title 3</a>"));
     assert!(!first.contains("Existing sequel"));
     let other = section(&html, ">Another series</a>");
-    assert!(other.contains(&format!("href=\"/series/{existing}\">Existing sequel</a>")));
+    assert!(other.contains("href=\"/anime/anilist/13\">Existing sequel</a>"));
     assert!(!other.contains(&link));
     let success = release_follows::list(&db)
         .await

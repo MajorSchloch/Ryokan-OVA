@@ -330,9 +330,15 @@ pub(super) async fn draft(
 ) -> Result<Preview, Error> {
     let follows = release_follows::list(db).await.map_err(read_error)?;
     let follow_seed = follows.iter().find(|f| f.anilist_id == seed);
-    let view = load_groups(db, false, follow_seed)
-        .await
-        .map_err(read_error)?;
+    // The seed can be a browsed provider record, without a library row or a
+    // follow. This read-only projection never creates either kind of record.
+    let view = load_groups(
+        db,
+        false,
+        Some((seed, follow_seed.map_or("", |f| f.title.as_str()))),
+    )
+    .await
+    .map_err(read_error)?;
     let (group, seed) = view
         .groups
         .into_iter()
@@ -342,14 +348,14 @@ pub(super) async fn draft(
                 .iter()
                 .find(|e| {
                     (e.provider_id == seed || e.library_provider_id == Some(seed))
-                        && (e.series_id.is_some() || follow_seed.is_some())
+                        && (e.series_id.is_some() || follow_seed.is_some() || e.related.is_some())
                 })
                 .map(|e| e.provider_id)?;
             Some((group, id))
         })
         .ok_or((
             StatusCode::NOT_FOUND,
-            "This release is outside your library.",
+            "Open this release's detail page to load its franchise, then try again.",
         ))?;
     project(
         group,
