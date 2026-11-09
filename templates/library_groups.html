@@ -31,7 +31,7 @@
                     {% if let Some(n) = entry.episodes %}{% if *n == 1 %} · Episode 1{% else if *n > 1 %} · Episodes 1–{{ n }}{% endif %}{% endif %}
                 </div>
                 <div class="group-ownership">
-                    {% if entry.series_id.is_some() %}<strong>In library</strong><span>{{ entry.files }}</span>{% if entry.provider_id > 0 %}<a href="/library/groups/{{ entry.provider_id }}/preview">Preview franchise</a>{% endif %}{% else %}<strong>Outside library</strong>{% endif %}
+                    {% if entry.series_id.is_some() %}<strong>In library</strong><span>{{ entry.files }}</span><a href="/library/groups/{{ entry.provider_id }}/preview">Franchise</a>{% else %}<strong>Outside library</strong>{% endif %}
                 </div>
                 {% for link in entry.links %}
                 <div class="group-relation{% if link.outside %} outside-entry{% endif %}">{{ link.label }} {{ link.peer }}</div>

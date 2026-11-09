@@ -74,7 +74,7 @@ async fn load(db: &SqlitePool) -> Result<Table, sqlx::Error> {
     let mut follows: HashMap<_, _> = follows.into_iter().map(|f| (f.anilist_id, f)).collect();
     let mapped: HashMap<_, _> = sqlx::query_as::<_, (i64, i64)>(sqlx::AssertSqlSafe(format!(
         "{} SELECT l.series_id, l.anilist_id FROM local_anilist_ids l
-            JOIN release_follows f ON f.anilist_id = l.anilist_id",
+            WHERE l.anilist_id IN (SELECT anilist_id FROM release_follows UNION SELECT anilist_id FROM franchise_choices WHERE selected=1)",
         series::LOCAL_ANILIST_IDS
     )))
     .fetch_all(db)
@@ -90,9 +90,10 @@ async fn load(db: &SqlitePool) -> Result<Table, sqlx::Error> {
             &s.title_romaji,
             &s.title_native,
         );
-        let followed = mapped
-            .get(&s.id)
-            .is_some_and(|id| follows.remove(id).is_some());
+        let followed = mapped.contains_key(&s.id);
+        if let Some(id) = mapped.get(&s.id) {
+            follows.remove(id);
+        }
         rows.push(Entry {
             title: if preferred.is_empty() {
                 s.title.clone()

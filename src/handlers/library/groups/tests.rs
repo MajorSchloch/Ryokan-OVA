@@ -274,3 +274,199 @@ async fn grouped_library_previews_a_follow_on_an_untracked_sequel_without_backfi
     .unwrap_err();
     assert_eq!(err.0, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn franchise_follow_merges_season_follows_and_saves_only_reviewed_releases() {
+    use crate::models::release_follows;
+    use axum::{Form, extract::Path};
+    use axum_htmx::HxRequest;
+    let db = crate::test_support::in_memory_pool().await;
+    let second = seed_series(&db, SECOND, SECOND_TITLE).await;
+    sqlx::query(
+        "UPDATE series SET monitor_mode='none', folder_name='My existing folder' WHERE id=?",
+    )
+    .bind(second)
+    .execute(&db)
+    .await
+    .unwrap();
+    // The first season is only available from its own cached detail and outgoing edges.
+    cache(&db, FIRST, &[("SEQUEL", SECOND), ("ALTERNATIVE", SUNNY)]).await;
+    release_follows::start(&db, SECOND, SECOND_TITLE, false, false, false)
+        .await
+        .unwrap();
+    release_follows::start(&db, SUNNY, SUNNY_TITLE, true, false, true)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE release_follows SET started_on='2021-01-02' WHERE anilist_id=?")
+        .bind(SECOND)
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO followed_releases(follow_id,anilist_id,title) SELECT id,901,'Prior match' FROM release_follows WHERE anilist_id=?")
+        .bind(SUNNY).execute(&db).await.unwrap();
+    crate::models::sync_exclusions::add(&db, SUNNY, None, SUNNY_TITLE)
+        .await
+        .unwrap();
+    let form = |version: String| {
+        Form(vec![
+            ("version".into(), version),
+            ("selection".into(), "1".into()),
+            ("owner".into(), FIRST.to_string()),
+            ("name".into(), "Fate".into()),
+            ("include".into(), "movies".into()),
+            ("release".into(), FIRST.to_string()),
+            ("release".into(), SECOND.to_string()),
+            ("release".into(), SUNNY.to_string()),
+        ])
+    };
+    let initial = preview::draft(&db, SECOND, &[]).await.unwrap().version;
+    // No partial merge, monitoring changes, or series insert after an interrupted save.
+    sqlx::query("CREATE TRIGGER fail_choice BEFORE INSERT ON franchise_choices BEGIN SELECT RAISE(ABORT,'test failure'); END")
+        .execute(&db).await.unwrap();
+    assert!(
+        follow::save(
+            State(db.clone()),
+            Path(SECOND),
+            HxRequest(false),
+            form(initial.clone())
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(release_follows::list(&db).await.unwrap().len(), 2);
+    assert_eq!(crate::test_support::count_series(&db).await, 1);
+    sqlx::query("DROP TRIGGER fail_choice")
+        .execute(&db)
+        .await
+        .unwrap();
+    let response = follow::save(
+        State(db.clone()),
+        Path(SECOND),
+        HxRequest(false),
+        form(initial.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response.headers()["location"],
+        format!("/library/groups/{FIRST}/preview")
+    );
+    let stale = follow::save(
+        State(db.clone()),
+        Path(FIRST),
+        HxRequest(false),
+        form(initial),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(stale.0, StatusCode::CONFLICT);
+    let follows = release_follows::list_with_matches(&db).await.unwrap();
+    assert_eq!(follows.len(), 1);
+    let f = &follows[0];
+    assert_eq!(
+        (f.anilist_id, f.title.as_str(), f.started_on.as_str()),
+        (FIRST, "Fate", "2021-01-02")
+    );
+    assert!(f.movies && !f.tv && !f.alternatives);
+    assert_eq!(f.matches[0].anilist_id, 901);
+    let second_row = series::get_by_id(&db, second).await.unwrap().unwrap();
+    assert_eq!(
+        (
+            second_row.folder_name.as_str(),
+            second_row.monitor_mode.as_str()
+        ),
+        ("My existing folder", "none")
+    );
+    assert_eq!(crate::test_support::count_series(&db).await, 2);
+    assert!(
+        series::get_by_anilist_id(&db, SUNNY)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    sqlx::query("DELETE FROM provider_metadata_cache")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM provider_relations_cache")
+        .execute(&db)
+        .await
+        .unwrap();
+    let saved = preview::draft(&db, SECOND, &[]).await.unwrap();
+    assert_eq!(saved.owner, Some(FIRST));
+    assert_eq!(saved.rows.iter().filter(|r| r.selected).count(), 2);
+    assert!(
+        saved
+            .rows
+            .iter()
+            .any(|r| r.entry.provider_id == SUNNY && r.entry.excluded && !r.selected)
+    );
+    follow::save(
+        State(db.clone()),
+        Path(SECOND),
+        HxRequest(false),
+        form(saved.version),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM grabbed_torrents")
+            .fetch_one(&db)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(crate::test_support::count_series(&db).await, 2);
+    release_follows::start(&db, SECOND, SECOND_TITLE, true, true, true)
+        .await
+        .unwrap();
+    assert_eq!(release_follows::list(&db).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn franchise_singleton_grows_without_starting_a_second_follow() {
+    use axum::{Form, extract::Path};
+    use axum_htmx::HxRequest;
+    let db = crate::test_support::in_memory_pool().await;
+    seed_series(&db, FIRST, TITLE).await;
+    seed_series(&db, -500, "Standalone MAL title").await;
+    let initial = preview::draft(&db, FIRST, &[]).await.unwrap();
+    assert_eq!(initial.owner, Some(FIRST));
+    assert_eq!(initial.rows.len(), 1);
+    assert!(initial.rows[0].selected);
+    assert!(models::release_follows::list(&db).await.unwrap().is_empty());
+    let mal = preview::draft(&db, -500, &[])
+        .await
+        .unwrap()
+        .render()
+        .unwrap();
+    assert!(mal.contains("Standalone MAL title") && !mal.contains("Save franchise follow"));
+    follow::save(
+        State(db.clone()),
+        Path(FIRST),
+        HxRequest(false),
+        Form(vec![
+            ("version".into(), initial.version),
+            ("selection".into(), "1".into()),
+            ("owner".into(), FIRST.to_string()),
+            ("release".into(), FIRST.to_string()),
+            ("include".into(), "tv".into()),
+        ]),
+    )
+    .await
+    .unwrap();
+    cache(&db, FIRST, &[("SEQUEL", SECOND), ("CHARACTER", SUNNY)]).await;
+    seed_series(&db, SUNNY, SUNNY_TITLE).await;
+    let later = preview::draft(&db, FIRST, &[]).await.unwrap();
+    assert_eq!(later.owner, Some(FIRST));
+    assert_eq!(later.rows.len(), 2);
+    assert!(
+        later
+            .rows
+            .iter()
+            .any(|r| r.entry.provider_id == SECOND && !r.selected)
+    );
+    assert_eq!(preview::draft(&db, SUNNY, &[]).await.unwrap().rows.len(), 1);
+    assert_eq!(models::release_follows::list(&db).await.unwrap().len(), 1);
+}
