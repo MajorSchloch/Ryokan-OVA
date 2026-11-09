@@ -117,6 +117,39 @@ async fn adoption_removes_only_the_old_default_year_template() {
 }
 
 #[tokio::test]
+async fn older_promotional_specials_and_spinoffs_do_not_name_the_parent() {
+    let db = in_memory_pool().await;
+    enable(&db).await.unwrap();
+    let peer = |id, title: &str, format: &str, year, relation: &str| {
+        serde_json::json!({
+            "id":id,"id_mal":null,"title_romaji":title,"title_english":title,"title_native":"",
+            "cover_url":"","format":format,"status":"FINISHED","status_display":"","episodes":1,
+            "relation_type":relation,"season_year":year,"media_type":"ANIME"
+        })
+    };
+    let detail = serde_json::json!({
+        "id":1,"id_mal":null,"title_romaji":"Main Show","title_english":"Main Show","title_native":"",
+        "cover_url":"","banner_url":"","format":"TV","status":"FINISHED","status_display":"",
+        "episodes":12,"duration":24,"season":"SPRING","season_year":2017,"description":"","genres":[],
+        "average_score":null,"average_score_display":null,"score_is_ten_point":false,"score_class":"",
+        "next_airing_episode":null,"next_airing_at":null,"synonyms":[],"streaming_episodes":[],
+        "relations":[peer(2,"Promotional Pilot","SPECIAL",2016,"ALTERNATIVE"),
+            peer(3,"Short Side Story","ONA",2015,"SPIN_OFF"),peer(4,"Main Show Season 2","TV",2020,"SEQUEL")]
+    });
+    // Exercise the real cached-detail decoder, including each related format.
+    let _: AnimeDetail = serde_json::from_value(detail.clone()).unwrap();
+    sqlx::query("INSERT INTO provider_metadata_cache(provider_id,detail_json) VALUES(1,?)")
+        .bind(detail.to_string())
+        .execute(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        add(&db, 4, "Main Show Season 2").await.folder_name,
+        "Main Show/Main Show Season 2"
+    );
+}
+
+#[tokio::test]
 async fn cached_identity_relations_join_a_franchise_through_an_untracked_bridge() {
     let db = in_memory_pool().await;
     let first = add(&db, 1, "Original").await;

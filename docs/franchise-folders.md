@@ -10,7 +10,7 @@ Fresh installations assign a franchise parent to every new release. A one-off us
 
 Storage membership is separate from download follows and selections. A folder move does not create a follow or start a download. Stored membership keeps the library group intact when relation caches expire.
 
-The path planner uses provider IDs, cached anime relations, and explicit storage choices. It can reuse a known franchise through an untracked intermediate release. It does not compare similar title text. An ambiguous link between two saved franchise folders requires review. A later metadata refresh never renames a stored path.
+The path planner uses provider IDs, cached anime relations, and explicit storage choices. It can reuse a known franchise through an untracked intermediate release. Main releases take priority over promotional specials, music, and identified side stories when a new parent needs a name. It does not compare similar title text. An ambiguous link between two saved franchise folders requires review. A later metadata refresh never renames a stored path.
 
 Existing installations retain their path policy on upgrade. After a preview and backup, stop Ryokan and enable the new default with the existing data and media mounts:
 

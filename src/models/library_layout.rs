@@ -38,6 +38,7 @@ pub struct Catalog {
     members: HashMap<i64, String>,
     edges: HashMap<i64, BTreeSet<i64>>,
     names: HashMap<i64, (String, Option<i32>)>,
+    extras: HashSet<i64>,
     folders: Vec<(i64, String)>,
     disk: HashSet<String>,
     planned: HashMap<i64, Assignment>,
@@ -69,9 +70,10 @@ impl Catalog {
         }
         let prefs = config::get_naming_prefs(&mut *db).await;
         result.language = prefs.title_language.clone();
-        for row in sqlx::query("SELECT anilist_id,title,title_english,title_romaji,title_native,season_year,folder_name FROM series ORDER BY id")
+        for row in sqlx::query("SELECT anilist_id,title,title_english,title_romaji,title_native,season_year,folder_name,format FROM series ORDER BY id")
             .fetch_all(&mut *db).await? {
             let id = row.get("anilist_id");
+            result.note_format(id,row.get("format"));
             let name = pick_title(&prefs.title_language,row.get("title_english"),row.get("title_romaji"),row.get("title_native"));
             let name = if name.is_empty() {row.get::<&str,_>("title")} else {name};
             result.names.insert(id,(name.into(),row.get("season_year")));
@@ -129,11 +131,13 @@ impl Catalog {
              .fetch_all(&mut *db).await? {
             let Ok(detail) = serde_json::from_str::<AnimeDetail>(&json) else {continue};
             if detail.id != id {continue}
+            result.note_format(id,&detail.format);
             let title = pick_title(&prefs.title_language,&detail.title_english,&detail.title_romaji,&detail.title_native);
             if !title.is_empty() {result.names.insert(id,(title.into(),detail.season_year));}
             for peer in detail.relations {
                 result.edge(id,peer.id,&peer.relation_type,&peer.media_type);
                 if peer.media_type=="ANIME" {
+                    result.note_format(peer.id,&peer.format);
                     let title=pick_title(&prefs.title_language,&peer.title_english,&peer.title_romaji,&peer.title_native);
                     if !title.is_empty() {result.names.entry(peer.id).or_insert((title.into(),peer.season_year));}
                 }
@@ -199,8 +203,23 @@ impl Catalog {
         {
             return;
         }
+        match relation {
+            "SIDE_STORY" | "SPIN_OFF" | "SUMMARY" => {
+                self.extras.insert(peer);
+            }
+            "PARENT" | "PARENT_STORY" | "FULL_STORY" => {
+                self.extras.insert(owner);
+            }
+            _ => {}
+        }
         self.edges.entry(owner).or_default().insert(peer);
         self.edges.entry(peer).or_default().insert(owner);
+    }
+
+    fn note_format(&mut self, id: i64, format: &str) {
+        if matches!(format, "SPECIAL" | "MUSIC") {
+            self.extras.insert(id);
+        }
     }
 
     pub fn plan(
@@ -261,6 +280,7 @@ impl Catalog {
                     .min_by_key(|id| {
                         let (title, year) = &self.names[id];
                         (
+                            self.extras.contains(id),
                             year.is_none(),
                             year.unwrap_or(i32::MAX),
                             title.to_ascii_lowercase(),
