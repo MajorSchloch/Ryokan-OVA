@@ -493,15 +493,14 @@ pub async fn set_folder(
     Json(form): Json<SetFolderForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     // Validate the folder name before touching the DB or the filesystem.
-    let sanitized = crate::services::media::sanitize_folder_name(&form.folder_name);
-    if sanitized.is_empty() || sanitized != form.folder_name {
+    if !crate::services::media::valid_link_folder(&form.folder_name) {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
             "Invalid folder name".to_string(),
         ));
     }
 
-    series::update_folder(&state.db, form.series_id, &sanitized)
+    series::update_folder(&state.db, form.series_id, &form.folder_name)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let _ = monitoring_service::recompute_series_monitoring(&state.db, form.series_id).await;

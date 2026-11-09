@@ -445,8 +445,6 @@ static RE_SEPARATOR_RUN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s+-\s+(?:-\s+)+").expect("RE_SEPARATOR_RUN compiles"));
 static RE_DOT_RUN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\.{2,}").expect("RE_DOT_RUN compiles"));
-static RE_UNDERSCORE_RUN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"_{2,}").expect("RE_UNDERSCORE_RUN compiles"));
 static RE_SPACE_RUN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s{2,}").expect("RE_SPACE_RUN compiles"));
 
@@ -457,13 +455,12 @@ const EDGE_SEPARATORS: &[char] = &[' ', '-', '.', '_'];
 /// it. Loops because one removal can expose the next (`[ - ]` needs
 /// the separator gone before the brackets read as empty).
 fn clean_literal(text: &str) -> String {
-    let mut s = text.to_string();
+    let mut s = text.replace('_', " ");
     loop {
         let before = s.clone();
         s = RE_EMPTY_BRACKETS.replace_all(&s, "").into_owned();
         s = RE_SEPARATOR_RUN.replace_all(&s, " - ").into_owned();
         s = RE_DOT_RUN.replace_all(&s, ".").into_owned();
-        s = RE_UNDERSCORE_RUN.replace_all(&s, "_").into_owned();
         s = RE_SPACE_RUN.replace_all(&s, " ").into_owned();
         if s == before {
             return s;
