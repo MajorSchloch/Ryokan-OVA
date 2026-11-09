@@ -400,7 +400,15 @@ pub async fn run_import(
         // name is unusable (`.` / `..` from a title written before
         // `sanitize_folder_name` handled dots), which would otherwise
         // put the files in the media root or above it.
-        let usable = media::usable_folder_name(&row.folder_name);
+        if media::usable_library_path(&row.folder_name)
+            && !media::valid_library_location(Path::new(&media_root), &row.folder_name)
+        {
+            gr.errors
+                .push("The franchise release path contains a linked or invalid directory".into());
+            report.groups.push(gr);
+            continue;
+        }
+        let usable = media::usable_library_path(&row.folder_name);
         if created || !usable {
             let base = if !usable {
                 let generated = naming::series_folder(
@@ -773,6 +781,15 @@ pub async fn run_import(
         }
     }
 
+    if let Err(e) = crate::services::jellyfin_view::sync(&state.db, &media_root).await {
+        logger::warn(
+            &state.db,
+            LogCategory::Library,
+            "Manual import: Jellyfin view synchronization failed",
+            &e,
+        )
+        .await;
+    }
     let summary = format!(
         "root={}, mode={}, created={}, merged={}, written={}, replaced={}, skipped={}, failed={}, bytes={}, cancelled={}",
         sess.root.display(),

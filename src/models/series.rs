@@ -423,11 +423,17 @@ async fn taken_folders<'e>(
 /// `base` with `suffix`, the base cut at a character boundary so the
 /// name stays within NAME_MAX (255 bytes).
 fn with_suffix(base: &str, suffix: &str) -> String {
-    let mut end = base.len().min(255usize.saturating_sub(suffix.len()));
-    while !base.is_char_boundary(end) {
+    let (parent, leaf) = base.rsplit_once('/').unwrap_or(("", base));
+    let mut end = leaf.len().min(255usize.saturating_sub(suffix.len()));
+    while !leaf.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}{suffix}", base[..end].trim_end())
+    let leaf = format!("{}{suffix}", leaf[..end].trim_end());
+    if parent.is_empty() {
+        leaf
+    } else {
+        format!("{parent}/{leaf}")
+    }
 }
 
 /// The series folder for a new row: `base`, or when another series has
@@ -446,8 +452,17 @@ pub async fn unique_series_folder<'e>(
     except: Option<i64>,
 ) -> Result<String, sqlx::Error> {
     let taken = taken_folders(db, except).await?;
+    if let Some((parent, _)) = base.split_once('/')
+        && taken.contains(&parent.to_ascii_lowercase())
+    {
+        return Err(sqlx::Error::Protocol(
+            "Another series owns the franchise folder".into(),
+        ));
+    }
     Ok(unique_folder_among(base, year, |name| {
-        taken.contains(&name.to_ascii_lowercase())
+        taken
+            .iter()
+            .any(|owned| crate::services::media::library_paths_overlap(owned, name))
     }))
 }
 
@@ -634,6 +649,42 @@ pub(super) async fn insert_new(
             &names,
         )
     };
+    // A saved layout also owns releases discovered after its initial move.
+    // Receipts are written before automatic tracking; explicit choices are
+    // written before manual tracking. Existing rows never pass this branch.
+    let roots: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT f.library_folder FROM release_follows f
+         WHERE f.library_folder != '' AND (
+           EXISTS(SELECT 1 FROM franchise_choices c WHERE c.follow_id=f.id AND c.anilist_id=?1 AND c.selected=1)
+           OR (EXISTS(SELECT 1 FROM followed_releases r WHERE r.follow_id=f.id AND r.anilist_id=?1)
+             AND NOT EXISTS(SELECT 1 FROM franchise_choices c WHERE c.anilist_id=?1 AND (c.selected=0 OR c.follow_id!=f.id))))",
+    ).bind(core.anilist_id).fetch_all(&mut *db).await?;
+    let folder = match roots.as_slice() {
+        [] => folder,
+        [root] if crate::services::media::usable_folder_name(root) => {
+            let prefs = crate::models::config::get_naming_prefs(&mut *db).await;
+            let title = crate::services::library_link::pick_title(
+                &prefs.title_language,
+                core.title_english,
+                core.title_romaji,
+                core.title_native,
+            );
+            let title = if title.is_empty() { core.title } else { title };
+            let mut name = crate::services::media::sanitize_folder_name(title);
+            name.truncate(name.floor_char_boundary(255));
+            let name = if name.is_empty() {
+                format!("AniList {}", core.anilist_id)
+            } else {
+                name
+            };
+            format!("{root}/{name}")
+        }
+        _ => {
+            return Err(sqlx::Error::Protocol(
+                "Conflicting or invalid franchise library folders".into(),
+            ));
+        }
+    };
     let folder = unique_series_folder(&mut *db, folder, core.season_year, None).await?;
 
     // Read the configured upgrade default in the INSERT itself. Every add
@@ -773,7 +824,9 @@ pub async fn other_series_in_folder(
     folder_name: &str,
 ) -> Result<Option<String>, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT title FROM series WHERE lower(folder_name) = lower(?) AND id != ? \
+        "SELECT title FROM series WHERE id != ?2 AND (
+         lower(folder_name) = lower(?1) OR instr(lower(folder_name), lower(?1) || '/') = 1
+         OR instr(lower(?1), lower(folder_name) || '/') = 1) \
          ORDER BY id LIMIT 1",
     )
     .bind(folder_name)

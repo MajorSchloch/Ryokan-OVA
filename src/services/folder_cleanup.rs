@@ -75,7 +75,7 @@ struct FolderRename {
     directory: (u64, u64),
 }
 
-fn dir_id(path: &Path) -> Result<Option<(u64, u64)>> {
+pub(crate) fn dir_id(path: &Path) -> Result<Option<(u64, u64)>> {
     match path.symlink_metadata() {
         Ok(m) if m.is_dir() => Ok(Some((m.dev(), m.ino()))),
         Ok(_) => Err(format!("Expected a real directory at {}", path.display()).into()),
@@ -84,11 +84,11 @@ fn dir_id(path: &Path) -> Result<Option<(u64, u64)>> {
     }
 }
 
-fn sync_dir(path: &Path) -> io::Result<()> {
+pub(crate) fn sync_dir(path: &Path) -> io::Result<()> {
     fs::File::open(path)?.sync_all()
 }
 
-fn publish(marker: &Path, rename: &FolderRename) -> Result<()> {
+pub(crate) fn publish(marker: &Path, rename: &impl Serialize) -> Result<()> {
     let parent = marker.parent().unwrap();
     let mut draft = tempfile::NamedTempFile::new_in(parent)?;
     serde_json::to_writer(&mut draft, rename)?;
@@ -99,7 +99,7 @@ fn publish(marker: &Path, rename: &FolderRename) -> Result<()> {
     Ok(())
 }
 
-fn move_directory(old: &Path, new: &Path) -> io::Result<()> {
+pub(crate) fn move_directory(old: &Path, new: &Path) -> io::Result<()> {
     // Ordinary POSIX rename can silently replace an existing empty directory.
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
@@ -165,7 +165,7 @@ fn check_collisions<'a>(
     Ok(())
 }
 
-fn clear_marker(marker: &Path) -> Result<()> {
+pub(crate) fn clear_marker(marker: &Path) -> Result<()> {
     fs::remove_file(marker)?;
     sync_dir(marker.parent().unwrap())?;
     Ok(())

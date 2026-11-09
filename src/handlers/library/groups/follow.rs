@@ -51,6 +51,18 @@ pub async fn save(
     if super::preview::version(&follows) != super::preview::version(&plan.follows) {
         return Err(STALE);
     }
+    let layouts: HashSet<_> = follows
+        .iter()
+        .filter(|f| !f.library_folder.is_empty())
+        .map(|f| f.library_folder.as_str())
+        .collect();
+    if layouts.len() > 1 {
+        return Err((
+            StatusCode::CONFLICT,
+            "These follows use different library folders. Review their paths before combining them.",
+        ));
+    }
+    let library_folder = layouts.iter().next().copied().unwrap_or("");
     let name = if plan.name_override.is_empty() {
         &plan
             .rows
@@ -94,7 +106,7 @@ pub async fn save(
         }
         sqlx::query(
             "UPDATE release_follows SET anilist_id=?,title=?,started_on=?,tv=?,movies=?,ovas=?,
-             alternatives=?,revision=revision+1,check_status='pending' WHERE id=?",
+             alternatives=?,library_folder=?,revision=revision+1,check_status='pending' WHERE id=?",
         )
         .bind(owner)
         .bind(name)
@@ -103,6 +115,7 @@ pub async fn save(
         .bind(policy.movies)
         .bind(policy.ovas)
         .bind(policy.alternatives)
+        .bind(library_folder)
         .bind(primary.id)
         .execute(&mut *tx)
         .await
@@ -155,6 +168,17 @@ async fn save_choices(
         if excluded != entry.excluded {
             return Err(STALE);
         }
+        sqlx::query(
+            "INSERT INTO franchise_choices(anilist_id,follow_id,title,selected) VALUES(?,?,?,?)
+            ON CONFLICT(anilist_id) DO UPDATE SET title=excluded.title,selected=excluded.selected",
+        )
+        .bind(id)
+        .bind(follow)
+        .bind(&entry.title)
+        .bind(row.selected)
+        .execute(&mut **tx)
+        .await
+        .map_err(read_error)?;
         if let Some(local) = entry.series_id {
             let present: bool =
                 sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM series WHERE id=?)")
@@ -180,17 +204,6 @@ async fn save_choices(
                 ));
             }
         }
-        sqlx::query(
-            "INSERT INTO franchise_choices(anilist_id,follow_id,title,selected) VALUES(?,?,?,?)
-            ON CONFLICT(anilist_id) DO UPDATE SET title=excluded.title,selected=excluded.selected",
-        )
-        .bind(id)
-        .bind(follow)
-        .bind(&entry.title)
-        .bind(row.selected)
-        .execute(&mut **tx)
-        .await
-        .map_err(read_error)?;
     }
     Ok(())
 }

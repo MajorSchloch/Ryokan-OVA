@@ -1150,7 +1150,7 @@ async fn load_series_import_ctx(
     // Empty (never set) or unusable (`.`, `..`, from a title written
     // before `sanitize_folder_name` handled dots and spaces together):
     // regenerate it from the template, which can't produce either.
-    let folder_name = if !media::usable_folder_name(&series.folder_name) {
+    let folder_name = if !media::usable_library_path(&series.folder_name) {
         if nfo::best_title(&series).trim().is_empty() {
             return Err(format!(
                 "series '{}' has no usable title for folder name",
@@ -1176,6 +1176,10 @@ async fn load_series_import_ctx(
     } else {
         series.folder_name.clone()
     };
+
+    if !media::valid_library_location(Path::new(&cfg.media_root), &folder_name) {
+        return Err("The franchise release path contains a linked or invalid directory".into());
+    }
 
     // `series_title` flows into `<showtitle>` in every episode NFO and
     // into the renamed filename stem, so it respects the user's
@@ -3374,7 +3378,7 @@ pub async fn write_series_sidecars(state: &AppState, series_id: i64) -> Result<(
         .map_err(|e| format!("series lookup failed: {e}"))?
         .ok_or_else(|| format!("series {series_id} not found"))?;
     // `.` / `..` would put the sidecars in the media root or above it.
-    if !media::usable_folder_name(&series_row.folder_name) {
+    if !media::valid_library_location(Path::new(&cfg.media_root), &series_row.folder_name) {
         return Err(format!("series {series_id} has no usable folder name"));
     }
     let cached_detail = metadata_cache::get_by_series_id(&state.db, series_id)
@@ -3452,6 +3456,17 @@ pub async fn run_once(state: &AppState) {
         Ok(Some(c)) => c,
         _ => return,
     };
+
+    if let Err(e) = super::jellyfin_view::sync(&state.db, &cfg.media_root).await {
+        logger::error(
+            &state.db,
+            LogCategory::PostProcess,
+            "Jellyfin view synchronization failed",
+            &e,
+        )
+        .await;
+        return;
+    }
 
     // When post-processing is disabled, we still want the UI checkmark to
     // flip as soon as qBit reports the torrent complete — otherwise the
@@ -4090,6 +4105,16 @@ pub async fn run_once(state: &AppState) {
         }
     }
 
+    if any_imported && let Err(e) = super::jellyfin_view::sync(&state.db, &cfg.media_root).await {
+        logger::error(
+            &state.db,
+            LogCategory::PostProcess,
+            "Jellyfin view synchronization failed after import",
+            &e,
+        )
+        .await;
+        return;
+    }
     if any_imported && let Some(jellyfin) = state.jellyfin.read().await.as_ref() {
         if let Err(e) = jellyfin.refresh_library().await {
             logger::warn(

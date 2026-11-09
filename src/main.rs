@@ -382,6 +382,18 @@ fn resolve_live_db_path() -> std::path::PathBuf {
 #[tokio::main]
 async fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| {
+        matches!(
+            arg.as_str(),
+            "--preview-library-folder" | "--move-library-folder" | "--set-franchise-library-folder"
+        )
+    }) {
+        if let Err(err) = services::library_move::run(&args).await {
+            eprintln!("Library move: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if args
         .iter()
         .any(|arg| arg == "--preview-folder-cleanup" || arg == "--apply-folder-cleanup")
@@ -742,6 +754,11 @@ async fn main() {
             )
             .await;
         });
+    }
+    if let Ok(Some(config)) = models::config::get_config(&db).await {
+        services::jellyfin_view::sync(&db, &config.media_root)
+            .await
+            .expect("Jellyfin library view is not ready");
     }
     if let Ok(Some(config)) = models::config::get_config(&db).await
         && !config.jellyfin_url.is_empty()
