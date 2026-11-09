@@ -40,6 +40,8 @@ A file edit alone can leave Jellyfin's stored lowercase key in place. Jellyfin l
 
 Re-running the same plan skips completed changes. File hashes and provider maps protect newer edits. If a run stops partway, retain its plan and backup directory and run it again after resolving the reported error.
 
+Jellyfin can read the corrected NFO before the API step and retain both `anilist` and `AniList` with the same ID. The resume check accepts this casing change. It still rejects a changed AniList value or any changed ID from another provider, including an already canonical map.
+
 ## Verification
 
 Confirm that the item API returns `ProviderIds.AniList` with the original ID and that AniList poster search returns artwork.

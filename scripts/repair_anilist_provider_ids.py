@@ -310,11 +310,14 @@ def apply(plan, backup, folder=None, jellyfin=None):
             before = jellyfin.item(entry["id"])
             ids = before.get("ProviderIds") or {}
             wanted = normalize_ids(ids)
+            # Jellyfin may read the patched NFO before this API step and add a
+            # canonical key alongside the legacy key. The normalized map still
+            # has to match every reviewed ID, including all other providers.
+            if wanted != entry["after"]:
+                raise ValueError("Jellyfin IDs changed since preview. Preview again.")
             if ids == wanted:
                 report["already_correct"].append(entry["id"])
                 continue
-            if ids != entry["before"] or wanted != entry["after"]:
-                raise ValueError("Jellyfin IDs changed since preview. Preview again.")
             saved = backup / ("jellyfin-" + entry["id"] + ".json")
             if not saved.exists():
                 with saved.open("x") as out:
