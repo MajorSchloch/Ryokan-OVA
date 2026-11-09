@@ -316,7 +316,16 @@ mod from_search {
             tvdb_season: 2,
             tmdb_id: 1,
         };
-        let out = build_sonarr_series_from_search(&entry(), "English Title", ids, None, &cfg).await;
+        let out = build_sonarr_series_from_search(
+            &crate::test_support::in_memory_pool().await,
+            &entry(),
+            "English Title",
+            ids,
+            None,
+            &cfg,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.seasons[0].season_number, 2, "the TVDB season");
         assert_eq!(out.id, 0);
         assert!(out.monitored);
@@ -341,8 +350,16 @@ mod from_search {
             tvdb_season: 1,
             tmdb_id: 0,
         };
-        let out =
-            build_sonarr_series_from_search(&entry(), "Foo: Bar - Part 2!", ids, None, &cfg).await;
+        let out = build_sonarr_series_from_search(
+            &crate::test_support::in_memory_pool().await,
+            &entry(),
+            "Foo: Bar - Part 2!",
+            ids,
+            None,
+            &cfg,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.clean_title, "foobarpart2");
     }
 }
