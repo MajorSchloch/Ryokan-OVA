@@ -65,6 +65,8 @@ jobs:
           tool: cargo-nextest
       - name: Format check
         run: cargo fmt --all -- --check
+      - name: AniList repair tests
+        run: python3 -m unittest discover -s scripts -p 'test_repair_anilist_provider_ids.py'
       # `licenses/THIRD_PARTY_LICENSES.html` is regenerated and
       # auto-committed by `.github/workflows/license-notices.yml` on
       # push to `dev` when Cargo.lock changes. No freshness check
