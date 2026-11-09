@@ -217,6 +217,22 @@ async fn anilist_page_membership_respects_unique_legacy_mappings_and_split_parts
             .id,
         fallback
     );
+    sqlx::query("INSERT INTO discovery_media_ids(anilist_id,mal_id) VALUES(13,800)")
+        .execute(&db)
+        .await
+        .unwrap();
+    assert!(
+        resolve_series_request(&db, 12, true)
+            .await
+            .unwrap()
+            .0
+            .is_none(),
+        "A known premiere split cannot be treated as a unique MAL match"
+    );
+    sqlx::query("DELETE FROM discovery_media_ids")
+        .execute(&db)
+        .await
+        .unwrap();
     cache(&db, 13, "Second part", &[]).await;
     sqlx::query("UPDATE provider_metadata_cache SET mal_id=800 WHERE provider_id=13")
         .execute(&db)
