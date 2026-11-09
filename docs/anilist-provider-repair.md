@@ -38,7 +38,11 @@ The Jellyfin repair reads the complete item through `GET /Users/{adminUserId}/It
 
 A file edit alone can leave Jellyfin's stored lowercase key in place. Jellyfin loads the provider named by an NFO's `uniqueid` type attribute, so both the file and the existing item need attention. [NFO documentation](https://jellyfin.org/docs/general/server/metadata/nfo/), [NFO parser](https://github.com/jellyfin/jellyfin/blob/master/MediaBrowser.XbmcMetadata/Parsers/BaseNfoParser.cs)
 
+Before bulk repair, stop Ryokan's writers and save a consistent Jellyfin database backup with each profile's watch data. After repair, compare the stored metadata with that backup. Jellyfin's automatic NFO reader can apply other fields from an existing NFO when it reads the corrected file. Restore changed field values through the complete item-update payload before ending maintenance. The tool's per-request checks do not replace this whole-run comparison.
+
 Re-running the same plan skips completed changes. File hashes and provider maps protect newer edits. If a run stops partway, retain its plan and backup directory and run it again after resolving the reported error.
+
+Jellyfin can read the corrected NFO before the API step and retain both `anilist` and `AniList` with the same ID. The resume check accepts this casing change. It still rejects a changed AniList value or any changed ID from another provider, including an already canonical map.
 
 ## Verification
 
@@ -60,6 +64,8 @@ Query the item and `GET /Items/{itemId}/RemoteImages?Type=Primary&ProviderName=A
 The vm622 pilot used Jellyfin 12.4.0 and AniList 15.0.0.0. The repair changed `86 EIGHTY-SIX` from `anilist=116589` to `AniList=116589`. AniList poster search changed from zero results to one. A second repair run made no changes.
 
 The pilot also completed a forced `MetadataRefreshMode=FullRefresh` with the other flags above. Jellyfin's `DateLastRefreshed` advanced, and the canonical ID and artwork result survived. This refresh changed the language and country preferences; the pilot restored both from the saved item. Final verification covered the original editable metadata, 32 file observations, and watch data for all seven profiles. The repair uses the item update to retain existing field values. A forced provider refresh is unnecessary for the bulk repair.
+
+The vm622 bulk repair corrected 180 NFO files and 180 Jellyfin entries. Verification found no remaining casing fixes and no changes on the second run. It covered 4,047 file observations and seven profiles. The metadata audit found one season premiere date changed by an automatic NFO reread; the original date was restored through the item-update API.
 
 ## Remaining titles
 

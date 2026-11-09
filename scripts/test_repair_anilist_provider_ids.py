@@ -133,6 +133,39 @@ class ProviderRepairTests(unittest.TestCase):
             self.assertEqual(client.writes, 1)
             self.assertEqual(json.loads((Path(temp) / "backup/jellyfin-abc.json").read_text()), before)
 
+    def test_nfo_watcher_casing_change_can_resume_but_other_id_edits_cannot(self):
+        class Client:
+            server_id = "server"
+
+            def __init__(self):
+                self.item_data = {"ProviderIds": {"anilist": "12", "AniList": "12", "Tmdb": "99"}}
+                self.writes = 0
+
+            def item(self, _):
+                return copy.deepcopy(self.item_data)
+
+            def call(self, path, method, body):
+                self.item_data = copy.deepcopy(body)
+                self.writes += 1
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "media"
+            root.mkdir()
+            plan = {"version": 1, "root": str(root), "nfos": [], "issues": [],
+                    "server_id": "server", "jellyfin": [
+                        {"id": "abc", "path": "Example", "before": {"anilist": "12", "Tmdb": "99"},
+                         "after": {"AniList": "12", "Tmdb": "99"}}]}
+            client = Client()
+            result = apply(plan, Path(temp) / "backup", "Example", client)
+            self.assertEqual(result["jellyfin_changed"], ["abc"])
+            self.assertEqual(client.item_data["ProviderIds"], plan["jellyfin"][0]["after"])
+            for changed in ({"anilist": "13", "Tmdb": "99"}, {"anilist": "12", "Tmdb": "100"},
+                            {"AniList": "13", "Tmdb": "99"}):
+                client.item_data["ProviderIds"] = changed
+                with self.assertRaisesRegex(ValueError, "IDs changed"):
+                    apply(plan, Path(temp) / "backup", "Example", client)
+            self.assertEqual(client.writes, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
