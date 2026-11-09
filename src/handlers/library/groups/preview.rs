@@ -327,6 +327,21 @@ pub async fn page(
             .into_iter()
             .map(|s| s.folder_name)
             .collect::<Vec<_>>();
+        let pending: HashSet<i64> = sqlx::query_scalar(
+            "SELECT series_id FROM grabbed_torrents WHERE state='pending'
+             UNION SELECT r.series_id FROM grabbed_torrent_series r
+                 JOIN grabbed_torrents g ON g.id=r.grab_id WHERE g.state='pending'
+             UNION SELECT series_id FROM pending_grabs WHERE series_id IS NOT NULL",
+        )
+        .fetch_all(&db)
+        .await
+        .map_err(read_error)?
+        .into_iter()
+        .collect();
+        let active = preview
+            .rows
+            .iter()
+            .any(|r| r.selected && r.entry.series_id.is_some_and(|id| pending.contains(&id)));
         preview = tokio::task::spawn_blocking(move || {
             let releases = preview
                 .rows
@@ -347,6 +362,9 @@ pub async fn page(
             );
             preview.files_requested = true;
             preview.file_issues = report.issues;
+            if active {
+                preview.file_issues.push("Downloads or imports are active for a selected release. Refresh this preview after they finish.".into());
+            }
             for files in report.releases {
                 if let Some(row) = preview
                     .rows

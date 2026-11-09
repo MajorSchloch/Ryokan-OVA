@@ -498,6 +498,8 @@ async fn franchise_file_preview_reads_selected_files_without_saving_the_draft() 
         [],
     )
     .unwrap();
+    sqlx::query("INSERT INTO grabbed_torrents(hash,torrent_name,series_id,episode_numbers,state) VALUES('preview-active','Selected download',?,'[1]','pending')")
+        .bind(id).execute(&db).await.unwrap();
     sqlx::query("PRAGMA query_only=ON")
         .execute(&db)
         .await
@@ -511,6 +513,7 @@ async fn franchise_file_preview_reads_selected_files_without_saving_the_draft() 
     .unwrap();
     assert!(html.contains("1 media files") && html.contains("Show - S01E01.en.ass"));
     assert!(html.contains("Proposed path"));
+    assert!(html.contains("Downloads or imports are active"));
     assert_eq!(crate::test_support::count_series(&db).await, 1);
     assert!(models::release_follows::list(&db).await.unwrap().is_empty());
     assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
