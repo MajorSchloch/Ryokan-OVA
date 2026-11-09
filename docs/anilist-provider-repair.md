@@ -38,6 +38,8 @@ The Jellyfin repair reads the complete item through `GET /Users/{adminUserId}/It
 
 A file edit alone can leave Jellyfin's stored lowercase key in place. Jellyfin loads the provider named by an NFO's `uniqueid` type attribute, so both the file and the existing item need attention. [NFO documentation](https://jellyfin.org/docs/general/server/metadata/nfo/), [NFO parser](https://github.com/jellyfin/jellyfin/blob/master/MediaBrowser.XbmcMetadata/Parsers/BaseNfoParser.cs)
 
+Before bulk repair, stop Ryokan's writers and save a consistent Jellyfin database backup with each profile's watch data. After repair, compare the stored metadata with that backup. Jellyfin's automatic NFO reader can apply other fields from an existing NFO when it reads the corrected file. Restore changed field values through the complete item-update payload before ending maintenance. The tool's per-request checks do not replace this whole-run comparison.
+
 Re-running the same plan skips completed changes. File hashes and provider maps protect newer edits. If a run stops partway, retain its plan and backup directory and run it again after resolving the reported error.
 
 Jellyfin can read the corrected NFO before the API step and retain both `anilist` and `AniList` with the same ID. The resume check accepts this casing change. It still rejects a changed AniList value or any changed ID from another provider, including an already canonical map.
