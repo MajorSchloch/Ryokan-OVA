@@ -1,0 +1,82 @@
+# Franchise folders and Jellyfin paths
+
+The library uses a general franchise model. A franchise can contain one release or many releases. Its selected releases retain their AniList IDs, episode numbers, monitoring settings, and individual metadata.
+
+The physical layout is `<media root>/<franchise>/<release>/...`. Existing flat release folders remain supported. Folder names do not define watch order. Release order and a future recommended watch order belong to franchise metadata.
+
+The eventual Jellyfin view should show one franchise entry with its releases and watch order inside. This change supplies storage and compatibility support for that view. It does not implement the franchise presentation layer.
+
+## Jellyfin compatibility view
+
+Jellyfin's TV library can interpret a franchise folder as a series and its release folders as seasons. A private Jellyfin 12.4.0 rehearsal confirmed that this loses the releases' separate provider identities.
+
+The optional compatibility view gives Jellyfin its original flat paths through managed directory links. Ryokan retains the physical franchise paths. The view copies no media. A persisted alias keeps a release's Jellyfin path stable after its physical folder moves.
+
+Set both variables in Ryokan:
+
+```text
+RYOKAN_JELLYFIN_VIEW_ROOT=/data/anime-jellyfin
+RYOKAN_JELLYFIN_VIEW_SOURCE=/data/ryokan-anime
+```
+
+The first path must be writable inside Ryokan. The second names the real-media mount inside Jellyfin. It can differ from the real-media mount inside Ryokan.
+
+For a media root at `/srv/media/anime` on the host, the required mounts are:
+
+| Consumer | Host directory | Container path |
+| --- | --- | --- |
+| Ryokan | `/srv/media/anime` | `/data/anime` |
+| Ryokan | `/srv/media/anime-jellyfin` | `/data/anime-jellyfin` |
+| Jellyfin | `/srv/media/anime-jellyfin` | `/data/anime` |
+| Jellyfin | `/srv/media/anime` | `/data/ryokan-anime` |
+
+Keep Jellyfin's configured library path at `/data/anime`. Keep Tdarr on the real media root. Preserve each consumer's existing access permissions.
+
+Ryokan builds the view at startup, before and after automatic imports, after manual imports, and during file removal. Periodic post-processing also reconciles the view. It retains untracked files and releases removed from Ryokan with their files kept. It removes links whose media folders disappear.
+
+The view refuses foreign files, changed links, overlapping owners, and another root's state file. Its pending state supports interrupted link updates. Keep `.ryokan-library-view.json` and the `series_library_aliases` database table with the recovery material.
+
+## Review and move a release
+
+The commands below use placeholders. Replace them with IDs and paths from the reviewed franchise preview.
+
+```text
+/app/ryokan --preview-library-folder SERIES_ID 'Franchise/Release'
+/app/ryokan --move-library-folder SERIES_ID 'Franchise/Release'
+```
+
+The preview is read-only. The move requires Ryokan to be stopped because it takes the application's library lease. Stop other writers and consumer scans for the cutover. Keep torrents seeding. Preserve any existing Tdarr pause.
+
+Back up both applications' metadata and Compose files before the cutover. Record every old and new path. Initialize and verify the compatibility view before changing Jellyfin's mount. Check current file observations again before applying the reviewed moves.
+
+The move renames the whole release directory on the same filesystem. It preserves media, subtitles, artwork, NFO bytes, and directory identity. Linked paths, mount changes, occupied destinations, and overlapping owners require review. Resolve affected recycle-bin entries first.
+
+An interrupted filesystem move leaves a durable recovery marker beside the database. Normal startup refuses that marker. Repeat the same command to finish the move and database update. The marker binds recovery to the original directory inode. The same completed command makes no further change.
+
+One-off titles can move below their own name, such as `Title` to `Title/Title`. The journal protects the intermediate staging step. The reverse command can restore the original flat layout. It refuses to remove a franchise parent that contains other files.
+
+A tracked release without a current directory receives only its future import path. No empty release directory is created.
+
+After every selected release uses its destination, save the franchise's future path:
+
+```text
+/app/ryokan --set-franchise-library-folder OWNER_ANILIST_ID 'Franchise'
+```
+
+New selected releases then receive paths below that franchise. Existing release paths stay fixed. Selected releases must have a verified AniList identity. Saving the same franchise path again is a no-op.
+
+## Cutover checks and recovery
+
+Start Ryokan first and verify its compatibility view. Then start Jellyfin with the reviewed mounts. Verify the existing item IDs, AniList IDs, artwork search, playback, and watch history for every profile. Check WatchGuard references and Tdarr's cached paths before ending maintenance.
+
+The private compatibility rehearsal kept two releases, two seasons, and three episodes separate. All seven Jellyfin item IDs survived the simulated physical move and a server restart. A custom overview and premiere date survived too.
+
+To reverse a move, stop the writers and use the same move command with the original path. Move all selected releases back before clearing a franchise's saved folder with an empty string. Keep the new binary available for recovery. Restore flat paths before returning to an older Ryokan binary that cannot read nested paths.
+
+## Verification
+
+```sh
+cargo nextest run --features test-support --lib -E 'test(library_move) or test(jellyfin_view) or test(library_paths_tests) or test(a_subsequent_import)'
+```
+
+Coverage includes legacy paths, nested scans, subsequent imports, sibling-safe deletion, future follows, stable aliases, kept files, conflict refusal, interrupted moves, one-off staging, repeat runs, and reverse moves.

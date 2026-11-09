@@ -500,6 +500,17 @@ pub async fn set_folder(
         ));
     }
 
+    if series::other_series_in_folder(&state.db, form.series_id, &form.folder_name)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .is_some()
+    {
+        return Err((
+            axum::http::StatusCode::CONFLICT,
+            "Another release owns this folder or a parent folder".into(),
+        ));
+    }
+
     series::update_folder(&state.db, form.series_id, &form.folder_name)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

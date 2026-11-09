@@ -3124,6 +3124,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     for (column, definition) in [
         ("tv", "BOOLEAN NOT NULL DEFAULT 1"),
         ("revision", "INTEGER NOT NULL DEFAULT 0"),
+        ("library_folder", "TEXT NOT NULL DEFAULT ''"),
     ] {
         if !column_exists(db, "release_follows", column).await {
             let sql = format!("ALTER TABLE release_follows ADD COLUMN {column} {definition}");
@@ -3141,6 +3142,13 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await?;
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_franchise_choices_follow ON franchise_choices(follow_id)",
+    )
+    .execute(db)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS series_library_aliases (
+         series_id INTEGER PRIMARY KEY REFERENCES series(id) ON DELETE CASCADE,
+         folder_name TEXT NOT NULL UNIQUE COLLATE NOCASE)",
     )
     .execute(db)
     .await?;

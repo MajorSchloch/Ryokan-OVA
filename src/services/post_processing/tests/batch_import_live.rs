@@ -1476,6 +1476,54 @@ async fn live_batch_import_skips_extras_and_imports_episodes() {
 }
 
 #[tokio::test]
+async fn a_subsequent_import_uses_the_nested_release_without_recreating_the_old_folder() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    let (root, downloads, media) = temp_dirs("franchise-release");
+    let source = "[Group] Show - 01 [1080p].mkv";
+    std::fs::write(downloads.join(source), b"new episode").unwrap();
+    let db = in_memory_pool().await;
+    seed_config(&db, &media).await;
+    sqlx::query("UPDATE config SET post_processing_mode='copy'")
+        .execute(&db)
+        .await
+        .unwrap();
+    let sid = seed_series(&db, 9003, "Show").await;
+    crate::models::series::update_folder(&db, sid, "Franchise/Release")
+        .await
+        .unwrap();
+    let grab =
+        grabbed_torrents::record_grab(&db, "franchise-new-episode", "Show batch", sid, &[1], true)
+            .await
+            .unwrap()
+            .unwrap();
+    let client = Arc::new(BatchClient::new(
+        complete_torrent("franchise-new-episode", &downloads),
+        vec![complete_file(source)],
+    ));
+    let state = build_test_app_state(db.clone(), Some(client));
+    post_processing::run_once(&state).await;
+    assert_eq!(grab_state(&db, grab).await, "imported");
+    let files =
+        crate::services::media::scan_series_folder(media.to_str().unwrap(), "Franchise/Release")
+            .await;
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].episode_number, 1);
+    assert_eq!(files[0].season_number, Some(1));
+    assert!(!media.join("Show").exists());
+    assert!(media.join("Franchise/Release/tvshow.nfo").exists());
+    assert!(
+        std::fs::read_to_string(media.join("Franchise/Release/tvshow.nfo"))
+            .unwrap()
+            .contains("type=\"AniList\"")
+    );
+    assert_eq!(
+        std::fs::read(downloads.join(source)).unwrap(),
+        b"new episode"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn live_batch_import_prefers_highest_version_in_slot() {
     let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
     let (root, downloads, media) = temp_dirs("version");

@@ -219,6 +219,10 @@ fn project(
             }
         })
         .unwrap_or_default();
+    let folder = managed
+        .filter(|f| !f.library_folder.is_empty())
+        .map(|f| f.library_folder.clone())
+        .unwrap_or(folder);
     let folder = if folder.is_empty() || media_root.trim().is_empty() {
         String::new()
     } else {
@@ -249,7 +253,7 @@ fn project(
         .map(|entry| {
             let selected = selected.contains(&entry.provider_id);
             let source = (!media_root.trim().is_empty()
-                && media::usable_folder_name(&entry.folder_name))
+                && media::usable_library_path(&entry.folder_name))
             .then(|| {
                 std::path::Path::new(media_root)
                     .join(&entry.folder_name)
@@ -257,7 +261,13 @@ fn project(
                     .to_string()
             });
             let destination = if selected && !folder.is_empty() {
-                release_names[&entry.provider_id].clone()
+                let current = std::path::Path::new(media_root).join(&entry.folder_name);
+                current
+                    .strip_prefix(&folder)
+                    .ok()
+                    .filter(|p| p.to_str().is_some_and(media::usable_folder_name))
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| release_names[&entry.provider_id].clone())
             } else {
                 String::new()
             };
@@ -292,12 +302,13 @@ pub(super) fn version(follows: &[release_follows::Follow]) -> String {
         .iter()
         .map(|f| {
             format!(
-                "{}-{}-{}{}{}",
+                "{}-{}-{}{}{}-{}",
                 f.id,
                 f.revision,
                 u8::from(f.movies),
                 u8::from(f.ovas),
-                u8::from(f.alternatives)
+                u8::from(f.alternatives),
+                f.library_folder
             )
         })
         .collect::<Vec<_>>()
