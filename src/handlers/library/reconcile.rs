@@ -183,8 +183,31 @@ pub(super) async fn resolve_series_request(
             .bind(request_id)
             .fetch_optional(db)
             .await?;
-            if let Some(id) = local_id {
-                row = series::get_by_id(db, id).await?;
+            if let Some(id) = local_id
+                && let Some(candidate) = series::get_by_id(db, id).await?
+            {
+                let confirmed: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM series_metadata_cache WHERE series_id=? AND provider_id=?)",
+                )
+                .bind(id)
+                .bind(request_id)
+                .fetch_one(db)
+                .await?;
+                // An attached metadata record identifies this exact part.
+                // A MAL-only match must also respect splits discovered in
+                // premiere snapshots, not just the detail cache above.
+                let unique = if confirmed {
+                    true
+                } else if let Some(mid) = candidate.mal_id {
+                    series::get_by_mal_id_for_entry(db, request_id, mid)
+                        .await?
+                        .is_some_and(|row| row.id == id)
+                } else {
+                    false
+                };
+                if unique {
+                    row = Some(candidate);
+                }
             }
         } else if row.is_none()
             && let Some(mid) = request_id.checked_neg().filter(|id| *id > 0)
