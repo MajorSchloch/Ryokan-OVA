@@ -3152,6 +3152,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .execute(db)
     .await?;
+    crate::models::library_layout::migrate(db).await?;
 
     // Older receipts have no check timestamp or saved title.
     for (table, column) in [

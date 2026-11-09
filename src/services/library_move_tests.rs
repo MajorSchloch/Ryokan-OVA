@@ -41,6 +41,15 @@ async fn move_keeps_media_identity_and_bytes_and_can_repeat_and_reverse() {
         apply(&db, root, &marker, id, "Franchise/Release")
             .await
             .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT folder FROM library_franchise_members WHERE provider_id=1"
+            )
+            .fetch_one(&db)
+            .await
+            .unwrap(),
+            "Franchise"
+        );
     }
     assert_eq!(dir_id(&root.join("Franchise/Release")).unwrap(), identity);
     assert_eq!(
@@ -56,6 +65,13 @@ async fn move_keeps_media_identity_and_bytes_and_can_repeat_and_reverse() {
     );
     assert!(!marker.exists());
     apply(&db, root, &marker, id, "Show").await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM library_franchise_members")
+            .fetch_one(&db)
+            .await
+            .unwrap(),
+        0
+    );
     assert_eq!(dir_id(&root.join("Show")).unwrap(), identity);
     assert_eq!(
         fs::read(root.join("Show/Season 01/S01E01.mkv")).unwrap(),

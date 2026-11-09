@@ -267,9 +267,16 @@ mod from_search {
     #[tokio::test]
     async fn build_from_search_with_no_db_series_uses_id_zero_and_blank_added() {
         let cfg = Config::default();
-        let out =
-            build_radarr_movie_from_search(&entry(Some(80)), "English Title", 333, None, &cfg)
-                .await;
+        let out = build_radarr_movie_from_search(
+            &crate::test_support::in_memory_pool().await,
+            &entry(Some(80)),
+            "English Title",
+            333,
+            None,
+            &cfg,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.id, 0);
         // Blank `added` for not-yet-imported entries — Seerr uses the
         // empty string as a "library has it?" signal in some versions.
@@ -286,8 +293,16 @@ mod from_search {
     #[tokio::test]
     async fn build_from_search_clean_title_strips_non_alphanumeric() {
         let cfg = Config::default();
-        let out =
-            build_radarr_movie_from_search(&entry(None), "Foo: Bar — Movie!", 0, None, &cfg).await;
+        let out = build_radarr_movie_from_search(
+            &crate::test_support::in_memory_pool().await,
+            &entry(None),
+            "Foo: Bar — Movie!",
+            0,
+            None,
+            &cfg,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.clean_title, "foobarmovie");
     }
 }

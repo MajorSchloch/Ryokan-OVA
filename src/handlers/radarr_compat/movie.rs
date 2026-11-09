@@ -58,7 +58,9 @@ pub async fn movie_lookup(
         };
 
         movies.push(
-            build_radarr_movie_from_search(&r, title, tmdb_id, db_series.as_ref(), &cfg).await,
+            build_radarr_movie_from_search(&state.db, &r, title, tmdb_id, db_series.as_ref(), &cfg)
+                .await
+                .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?,
         );
     }
 

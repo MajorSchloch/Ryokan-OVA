@@ -10,6 +10,7 @@ pub mod external_accounts;
 pub mod grabbed_torrents;
 pub mod group_source_map;
 pub mod indexers;
+pub mod library_layout;
 pub mod local_metadata;
 pub mod log;
 pub mod login_device;
