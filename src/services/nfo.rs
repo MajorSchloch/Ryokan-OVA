@@ -205,8 +205,9 @@ pub async fn write_series_nfo(
         xml.push_str("  <genre>Animation</genre>\n");
     }
 
+    // The AniList plugin uses this exact provider key when reading persisted IDs.
     xml.push_str(&format!(
-        "  <uniqueid type=\"anilist\" default=\"true\">{}</uniqueid>\n",
+        "  <uniqueid type=\"AniList\" default=\"true\">{}</uniqueid>\n",
         series.anilist_id
     ));
 
@@ -315,7 +316,7 @@ pub async fn write_season_nfo(
     }
 
     xml.push_str(&format!(
-        "  <uniqueid type=\"anilist\" default=\"true\">{}</uniqueid>\n",
+        "  <uniqueid type=\"AniList\" default=\"true\">{}</uniqueid>\n",
         series.anilist_id
     ));
 
@@ -586,7 +587,8 @@ mod tests {
         // Status maps to Jellyfin's vocabulary.
         assert!(xml.contains("<status>Ended</status>"));
         // Identifiers preserved.
-        assert!(xml.contains("<uniqueid type=\"anilist\" default=\"true\">12345</uniqueid>"));
+        assert!(xml.contains("<uniqueid type=\"AniList\" default=\"true\">12345</uniqueid>"));
+        assert!(!xml.contains("type=\"anilist\""));
         assert!(xml.contains("<uniqueid type=\"myanimelist\">67890</uniqueid>"));
     }
 
@@ -767,7 +769,8 @@ mod tests {
         assert!(xml.contains("<seasonnumber>1</seasonnumber>"));
         // AniList unique id so Jellyfin matches the season to the
         // series, not to an unrelated TVDB entry.
-        assert!(xml.contains("<uniqueid type=\"anilist\" default=\"true\">12345</uniqueid>"));
+        assert!(xml.contains("<uniqueid type=\"AniList\" default=\"true\">12345</uniqueid>"));
+        assert!(!xml.contains("type=\"anilist\""));
         // Plot/year/rating enrichment when detail is provided.
         assert!(xml.contains("<plot>A brilliant story. About things.</plot>"));
         assert!(xml.contains("<year>2024</year>"));
@@ -778,7 +781,8 @@ mod tests {
     async fn season_nfo_without_detail_still_has_seasonnumber_and_id() {
         let xml = render_season_nfo(None, "english", true).await;
         assert!(xml.contains("<seasonnumber>1</seasonnumber>"));
-        assert!(xml.contains("<uniqueid type=\"anilist\" default=\"true\">12345</uniqueid>"));
+        assert!(xml.contains("<uniqueid type=\"AniList\" default=\"true\">12345</uniqueid>"));
+        assert!(!xml.contains("type=\"anilist\""));
         assert!(!xml.contains("<plot>"));
     }
 
