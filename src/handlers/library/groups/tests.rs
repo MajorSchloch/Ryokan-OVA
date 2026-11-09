@@ -211,3 +211,66 @@ async fn grouped_library_reaches_sunny_day_when_only_the_first_part_is_tracked()
             .any(|l| l.peer == SECOND_TITLE && l.outside)
     );
 }
+
+#[tokio::test]
+async fn grouped_library_previews_a_follow_on_an_untracked_sequel_without_backfill() {
+    use axum::extract::{Path, Query};
+    let db = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    models::migrate(&db).await.unwrap();
+    config::save_config(
+        &db,
+        &Config {
+            media_root: "/data/anime".into(),
+            ..Config::default()
+        },
+    )
+    .await
+    .unwrap();
+    cache(&db, FIRST, &[("SEQUEL", SECOND), ("CHARACTER", SUNNY)]).await;
+    crate::models::release_follows::start(&db, SECOND, SECOND_TITLE, true, false, false)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA query_only=ON")
+        .execute(&db)
+        .await
+        .unwrap();
+    let query = vec![
+        ("selection".into(), "1".into()),
+        ("release".into(), SECOND.to_string()),
+        ("name".into(), "Fate/stay night".into()),
+        ("include".into(), "movies".into()),
+    ];
+    let Html(html) = preview::page(State(db.clone()), Path(SECOND), Query(query))
+        .await
+        .unwrap();
+    let doc = scraper::Html::parse_document(&html);
+    let select = |s| scraper::Selector::parse(s).unwrap();
+    assert_eq!(
+        doc.select(&select("#franchise-owner option[selected]"))
+            .next()
+            .unwrap()
+            .value()
+            .attr("value"),
+        Some("19603")
+    );
+    assert_eq!(doc.select(&select("[name=release]")).count(), 2);
+    assert_eq!(doc.select(&select("[name=release][checked]")).count(), 1);
+    assert!(html.contains("Fate+stay night [AniList 19603]/"));
+    assert!(html.contains(
+        "2015-04-05 - TV - Fate+stay night - Unlimited Blade Works 2nd Season [AniList 20792]"
+    ));
+    assert!(html.contains("Movies on"));
+    assert_eq!(crate::test_support::count_series(&db).await, 0);
+    let err = preview::page(
+        State(db),
+        Path(SECOND),
+        Query(vec![("release".into(), SUNNY.to_string())]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.0, StatusCode::BAD_REQUEST);
+}

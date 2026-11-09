@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %} - Franchise preview{% endblock %}
+{% block content %}
+<div class="page-header recycle-header">
+    <h2>Franchise preview</h2>
+    <a class="btn btn-secondary" href="/library/groups">Library groups</a>
+</div>
+<p>Ryokan suggests an owner from the earliest known premiere in its cache. You can change the owner and preview individual releases.</p>
+<div class="franchise-layout">
+<form method="get" action="/library/groups/{{ seed }}/preview" class="franchise-preview">
+    <input type="hidden" name="selection" value="1">
+    <div class="form-group"><label for="franchise-owner">Proposed follow owner</label>
+    <select id="franchise-owner" name="owner">
+        <option value="">Choose a release</option>
+        {% for row in rows %}<option value="{{ row.entry.provider_id }}"{% if owner.as_ref() == Some(&row.entry.provider_id) %} selected{% endif %}>{{ row.entry.title }} · AniList {{ row.entry.provider_id }}</option>{% endfor %}
+    </select></div>
+    <div class="form-group"><label for="franchise-name">Franchise folder name (optional)</label>
+    <input id="franchise-name" name="name" type="text" value="{{ name_override }}" placeholder="Use the follow owner’s title"></div>
+    <h3>Current follows</h3>
+    {% for follow in follows %}
+    <p><strong>{{ follow.title }}</strong> · AniList {{ follow.anilist_id }} · Since {{ follow.started_on }}<br>
+    TV on · Movies {% if follow.movies %}on{% else %}off{% endif %} · OVAs {% if follow.ovas %}on{% else %}off{% endif %} · Alternatives {% if follow.alternatives %}on{% else %}off{% endif %}</p>
+    {% endfor %}
+    {% if follows.is_empty() %}<p>No current follow for these releases.</p>{% else if follows.len() > 1 %}<p>Review the separate follow settings before combining them.</p>{% endif %}
+    <fieldset><legend>Proposed follow settings</legend>
+        <p>Choose which future releases to follow. Select existing releases separately below.</p>
+        <label class="checkbox-row"><input type="checkbox" name="include" value="tv"{% if policy.tv %} checked{% endif %}> TV and online series</label>
+        <label class="checkbox-row"><input type="checkbox" name="include" value="movies"{% if policy.movies %} checked{% endif %}> Movies</label>
+        <label class="checkbox-row"><input type="checkbox" name="include" value="ovas"{% if policy.ovas %} checked{% endif %}> OVAs</label>
+        <label class="checkbox-row"><input type="checkbox" name="include" value="alternatives"{% if policy.alternatives %} checked{% endif %}> Alternative versions of the selected formats</label>
+    </fieldset>
+    <fieldset class="franchise-releases"><legend>Releases in premiere order</legend>
+        {% for row in rows %}
+        <label class="checkbox-row"><input type="checkbox" name="release" value="{{ row.entry.provider_id }}"{% if row.selected %} checked{% endif %}>
+        <span><strong>{{ row.entry.title }}</strong><small>{% if !row.entry.format.is_empty() %}{{ row.entry.format }} · {% endif %}{% if row.entry.date.is_empty() %}Date unknown{% else %}{{ row.entry.date }}{% endif %}
+        · AniList {{ row.entry.provider_id }}{% if let Some(n) = row.entry.episodes %}{% if *n > 1 %} · Episodes 1–{{ n }}{% endif %}{% endif %} · {% if row.entry.series_id.is_some() %}In library{% else %}Outside library{% endif %}</small></span></label>
+        {% endfor %}
+    </fieldset>
+    <button class="btn btn-primary" type="submit">Update preview</button>
+</form>
+<section class="franchise-preview" aria-labelledby="franchise-folder">
+    <h3 id="franchise-folder">Proposed franchise folder</h3>
+    <p>Each release keeps its AniList ID and Ryokan episode numbers. Preview choices do not change files or monitoring.</p>
+    {% if owner.is_none() %}<p>Choose the release that should own this franchise.</p>
+    {% else if folder.is_empty() %}<p>Set a media root in Settings to see the proposed paths.</p>
+    {% else %}
+    <p><code>{{ folder }}/</code></p>
+    <ol>{% for row in rows %}{% if row.selected %}
+        <li><code>{{ row.destination }}/</code><small>
+        {% if let Some(source) = row.source %}Current folder · <code>{{ source }}/</code>
+        {% else if row.entry.series_id.is_some() %}Current folder unavailable{% else %}Outside library{% endif %}</small></li>
+    {% endif %}{% endfor %}</ol>
+    {% if selection_empty %}<p>Select a release to preview its folder.</p>{% endif %}
+    {% endif %}
+</section>
+</div>
+{% endblock %}

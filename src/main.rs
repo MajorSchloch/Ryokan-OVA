@@ -381,6 +381,17 @@ fn resolve_live_db_path() -> std::path::PathBuf {
 
 #[tokio::main]
 async fn main() {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args
+        .iter()
+        .any(|arg| arg == "--preview-folder-cleanup" || arg == "--apply-folder-cleanup")
+    {
+        if let Err(err) = services::folder_cleanup::run(&args).await {
+            eprintln!("Folder cleanup: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let database_url = services::paths::database_url();
     if database_url.is_none() {
         std::fs::create_dir_all(services::paths::data_dir()).expect("Cannot create data directory");
@@ -772,6 +783,10 @@ async fn main() {
         )
         .route("/library/table", get(handlers::library::table::page))
         .route("/library/groups", get(handlers::library::groups::page))
+        .route(
+            "/library/groups/{seed}/preview",
+            get(handlers::library::groups::preview::page),
+        )
         .merge(handlers::release_follows::routes())
         .route("/library/recycle", get(handlers::library::recycle::page))
         // #122 manual import wizard. Form-POST + server render; the
