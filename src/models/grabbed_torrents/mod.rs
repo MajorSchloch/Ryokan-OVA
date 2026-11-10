@@ -3,6 +3,8 @@ use sqlx::{Row, SqlitePool};
 mod import_policy;
 pub mod migration_replay;
 mod numbering;
+#[cfg(test)]
+mod requirements_failure_tests;
 pub mod source_replay;
 pub use import_policy::{
     ensure_migration_replay_allowed, get_replacement_episode, legacy_imported_name_for_series,
@@ -930,6 +932,50 @@ pub async fn mark_failed_with_reason(
         .execute(db)
         .await?;
     Ok(())
+}
+
+/// Fail only the completed attempt which the importer actually inspected.
+/// Reactivation clears `completed_seen_at`, even when it happens within the
+/// same second as the original grab, so a stale import cannot fail it again.
+pub(crate) async fn fail_pending_requirements_attempt(
+    db: &SqlitePool,
+    grab: &GrabbedTorrent,
+    completed_seen_at: &str,
+) -> Result<bool, sqlx::Error> {
+    let updated = sqlx::query(
+        "UPDATE grabbed_torrents SET state='failed',failure_reason=? \
+         WHERE id=? AND hash=? AND series_id=? AND torrent_name=? AND grabbed_at=? \
+         AND state='pending' AND completed_seen_at=?",
+    )
+    .bind(crate::services::post_processing::REQUIREMENTS_REJECTED_REASON)
+    .bind(grab.id)
+    .bind(&grab.hash)
+    .bind(grab.series_id)
+    .bind(&grab.torrent_name)
+    .bind(&grab.grabbed_at)
+    .bind(completed_seen_at)
+    .execute(db)
+    .await?;
+    Ok(updated.rows_affected() == 1)
+}
+
+pub(crate) async fn pending_requirements_attempt_is_current(
+    db: &SqlitePool,
+    grab: &GrabbedTorrent,
+    completed_seen_at: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM grabbed_torrents WHERE id=? AND hash=? AND series_id=? \
+         AND torrent_name=? AND grabbed_at=? AND state='pending' AND completed_seen_at=?)",
+    )
+    .bind(grab.id)
+    .bind(&grab.hash)
+    .bind(grab.series_id)
+    .bind(&grab.torrent_name)
+    .bind(&grab.grabbed_at)
+    .bind(completed_seen_at)
+    .fetch_one(db)
+    .await
 }
 
 /// Record a failed URL fetch and its episode attempts together. A retry can
@@ -1861,6 +1907,9 @@ impl GrabbedTorrentWithSeries {
             "misgrab" => "Misgrab",
             crate::services::post_processing::IMPORT_STALLED_REASON => "Import stalled",
             crate::services::redownload::CLIENT_ERROR_REASON => "Download failed",
+            crate::services::post_processing::REQUIREMENTS_REJECTED_REASON => {
+                "Media requirements not met"
+            }
             other => other,
         }
     }
