@@ -372,6 +372,15 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             }
 
             let label = auto_search::target_label(&target);
+            // Keep the library slot for every upgrade/protection decision and
+            // for persistence. A standalone release still needs
+            // a numberless provider search, as the episode controls do.
+            let search_target = match &target {
+                auto_search::SearchTarget::Episode(ep) => {
+                    auto_search::SearchTarget::for_episode(&detail, *ep)
+                }
+                auto_search::SearchTarget::Single => target.clone(),
+            };
             // batch_episode_match=true so BD season packs can match episode targets.
             let eligible = |result: &crate::services::nyaa::SearchResult,
                             incoming: &ClassificationResult| {
@@ -408,7 +417,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 &state.db,
                 &detail,
                 &cfg,
-                &target,
+                &search_target,
                 true,
                 true,
                 &cfs,
