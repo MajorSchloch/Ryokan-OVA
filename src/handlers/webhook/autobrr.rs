@@ -13,6 +13,9 @@
 //!      `grabbed_torrents`, matches the release title to a
 //!      tracked series via [`crate::services::rss::match_library_title`],
 //!      and adds the torrent to the active download client.
+//!      In minimum-and-target mode, pushes only fill missing episodes;
+//!      RSS/search plan upgrades to existing files. The importer still
+//!      verifies the downloaded file's actual requirements.
 //!
 //! ## Wire shape
 //!
@@ -57,9 +60,122 @@ use subtle::ConstantTimeEq;
 use crate::AppState;
 use crate::handlers::auth::sanitize_for_log_capped;
 use crate::models::log::LogCategory;
-use crate::models::{config, grabbed_torrents};
+use crate::models::{config, episode_tags, grabbed_torrents, series};
 use crate::services::download_client::{self, AddOutcome};
-use crate::services::{logger, rss};
+use crate::services::{logger, media, media_requirements, rss, source};
+
+/// Requirements-mode pushes only fill missing slots. Existing files are left
+/// to the observed-file upgrade planner in RSS/search, or an explicit picker.
+/// One local release folder is checked; no upstream metadata or probe runs.
+async fn requirements_gate(
+    db: &sqlx::SqlitePool,
+    cfg: &config::Config,
+    tracked: &series::Series,
+    episodes: &[i32],
+    title: &str,
+) -> Result<(), String> {
+    if !cfg.media_requirements_enabled {
+        return Ok(());
+    }
+    let policy = media_requirements::Policy::from_config(cfg);
+    if policy.minimum_resolution == source::Resolution::Unknown
+        || policy.target_resolution == source::Resolution::Unknown
+        || policy.target_resolution.rank() < policy.minimum_resolution.rank()
+    {
+        return Err("Choose a valid minimum and good enough target in Settings.".into());
+    }
+    let incoming = source::classify_release_sync(title, None);
+    if incoming.resolution == source::Resolution::Unknown {
+        return Err("Release resolution is unknown; use manual search to review it.".into());
+    }
+    if incoming.resolution.rank() < policy.minimum_resolution.rank() {
+        return Err("Release is below the configured minimum resolution.".into());
+    }
+    if episodes.is_empty()
+        || episodes.len() > crate::services::anilist::MAX_PLAUSIBLE_EPISODES as usize
+        || episodes
+            .iter()
+            .any(|ep| crate::services::anilist::plausible_episode_count((*ep).into()).is_none())
+    {
+        return Err("Release episode coverage is unknown; use manual search to review it.".into());
+    }
+    let root = tokio::fs::canonicalize(&cfg.media_root)
+        .await
+        .map_err(|_| "The media folder is unavailable; existing files could not be checked.")?;
+    if !media::valid_library_location(&root, &tracked.folder_name) {
+        return Err("The release folder could not be checked safely.".into());
+    }
+    let folder = root.join(&tracked.folder_name);
+    match tokio::fs::symlink_metadata(&folder).await {
+        Ok(meta) if meta.is_symlink() || !meta.is_dir() => {
+            return Err("The release folder could not be checked safely.".into());
+        }
+        Ok(_) => {
+            let real = tokio::fs::canonicalize(&folder)
+                .await
+                .map_err(|_| "The release folder is unavailable.")?;
+            if real == root || !real.starts_with(&root) {
+                return Err("The release folder is outside the media folder.".into());
+            }
+        }
+        // A newly tracked release may not have its franchise folder yet.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("The release folder is unreadable.".into()),
+    }
+    let inventory = media::library_slots(
+        root.to_string_lossy().into_owned(),
+        std::collections::HashSet::from([tracked.folder_name.clone()]),
+    )
+    .await;
+    let have = inventory
+        .get(&tracked.folder_name)
+        .ok_or("Existing files could not be checked; use manual search to review this release.")?;
+    if episodes.iter().any(|ep| have.contains(ep)) {
+        return Err(if tracked.allow_upgrades {
+            "This push overlaps existing episodes. Use RSS or search to plan upgrades, or choose a replacement manually."
+        } else {
+            "Upgrades are turned off for this release; existing episodes were kept."
+        }
+        .into());
+    }
+    let tags = episode_tags::get_for_series(db, tracked.id)
+        .await
+        .map_err(|_| "Episode protection settings could not be checked.")?;
+    if episodes
+        .iter()
+        .any(|ep| tags.get(ep).is_some_and(|tag| tag.manual_override))
+    {
+        return Err("A covered episode is pinned; use manual search to review it.".into());
+    }
+    if episodes
+        .iter()
+        .any(|ep| tags.get(ep).is_some_and(|tag| tag.state == "grabbed"))
+    {
+        return Err("A covered episode is already downloading.".into());
+    }
+    // Pushes record pending jobs before episode quality tags exist. Also check
+    // routed packs so another hash cannot download the same missing episode.
+    let coverage = serde_json::to_string(episodes).map_err(|_| "Invalid episode coverage.")?;
+    let pending: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM grabbed_torrents g, json_each(g.episode_numbers) e, json_each(?1) wanted
+            WHERE g.series_id=?2 AND g.state='pending' AND e.value=wanted.value
+            UNION ALL
+            SELECT 1 FROM grabbed_torrents g JOIN grabbed_torrent_series r ON r.grab_id=g.id,
+                json_each(r.episode_numbers) e, json_each(?1) wanted
+            WHERE r.series_id=?2 AND g.state='pending' AND e.value=wanted.value
+        )",
+    )
+    .bind(coverage)
+    .bind(tracked.id)
+    .fetch_one(db)
+    .await
+    .map_err(|_| "Active downloads could not be checked.")?;
+    if pending {
+        return Err("A covered episode is already downloading.".into());
+    }
+    Ok(())
+}
 
 /// JSON body autobrr POSTs. Field names match the Ryokan-native
 /// shape documented in the module header. Everything but
@@ -368,6 +484,28 @@ pub async fn webhook_autobrr(
         }
     };
     let (series, ep_nums) = matched;
+
+    let cfg = match config::get_config(&state.db).await {
+        Ok(Some(cfg)) => cfg,
+        _ => {
+            return err_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Library settings are unavailable.",
+            );
+        }
+    };
+    if let Err(reason) =
+        requirements_gate(&state.db, &cfg, &series, &ep_nums, &payload.torrent_name).await
+    {
+        logger::info(
+            &state.db,
+            LogCategory::Grab,
+            &format!("autobrr: skipping {safe_release}: {reason}"),
+            &safe_release,
+        )
+        .await;
+        return skipped(reason);
+    }
 
     // Hand off to the download client. Multi-client routing: the
     // matched indexer's pin, else the Nyaa client for a built-in Nyaa
