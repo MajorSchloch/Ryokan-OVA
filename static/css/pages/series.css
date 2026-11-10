@@ -1150,6 +1150,8 @@
 .ep-media-verdict { margin: 0 0 14px; font-size: 13px; font-weight: 600; }
 .ep-media-verdict-missing { color: var(--red); }
 .ep-media-verdict-present { color: var(--green); }
+.ep-media-verdict-preferred { color: var(--yellow); }
+.ep-media-verdict-neutral { color: var(--text-dim); }
 
 .ep-media-requirements { margin-bottom: 18px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius-md); background-color: var(--bg); }
 .ep-media-requirements h5 { margin: 0 0 12px; font-size: 13px; }
