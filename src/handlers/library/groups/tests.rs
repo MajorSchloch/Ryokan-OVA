@@ -42,7 +42,7 @@ async fn franchise_preview_browses_cached_releases_without_library_or_follow_rec
         .map(|a| a.value().attr("href").unwrap())
         .collect();
     assert_eq!(hrefs, ["/anime/anilist/19603", "/anime/anilist/20792"]);
-    assert!(response.0.contains("No current follow for these releases."));
+    assert!(response.0.contains("A new follow starts today."));
     for table in [
         "series",
         "release_follows",
@@ -312,7 +312,12 @@ async fn grouped_library_previews_a_follow_on_an_untracked_sequel_without_backfi
     assert_eq!(doc.select(&select("[name=release][checked]")).count(), 1);
     assert!(html.contains("Fate+stay night/"));
     assert!(html.contains("Fate+stay night - Unlimited Blade Works 2nd Season"));
-    assert!(html.contains("Movies on"));
+    assert_eq!(
+        doc.select(&select("#follow-future-releases input[checked]"))
+            .map(|input| input.value().attr("value").unwrap())
+            .collect::<Vec<_>>(),
+        ["movies"]
+    );
     assert_eq!(crate::test_support::count_series(&db).await, 0);
     let err = preview::page(
         State(db),
@@ -569,6 +574,297 @@ async fn franchise_file_preview_reads_selected_files_without_saving_the_draft() 
         std::fs::metadata(temp.path().join("Source/Season 01/Show - S01E01.mkv"))
             .unwrap()
             .len(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn follow_editor_separates_release_choices_from_advanced_organization() {
+    use crate::models::{library_layout, monitoring};
+    let db = crate::test_support::in_memory_pool().await;
+    let id = seed_series(&db, FIRST, TITLE).await;
+    cache(&db, FIRST, &[("SEQUEL", SECOND)]).await;
+    sqlx::query("UPDATE series SET episodes=13, cover_url='/static/test-cover.jpg' WHERE id=?")
+        .bind(id)
+        .execute(&db)
+        .await
+        .unwrap();
+    monitoring::replace_series_states(
+        &db,
+        id,
+        &[
+            monitoring::EpisodeMonitorState {
+                episode_number: 1,
+                monitored: true,
+            },
+            monitoring::EpisodeMonitorState {
+                episode_number: 2,
+                monitored: false,
+            },
+        ],
+    )
+    .await
+    .unwrap();
+    let mut tx = db.begin().await.unwrap();
+    library_layout::record_move(&mut tx, id, "Fate/First season")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let page_id = library_layout::page_for_provider(&db, FIRST)
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    let Html(html) = preview::page(State(db.clone()), Path(FIRST), Query(vec![]))
+        .await
+        .unwrap();
+    let doc = scraper::Html::parse_document(&html);
+    let select = |s| scraper::Selector::parse(s).unwrap();
+    let advanced = doc
+        .select(&select("details.follow-editor-advanced"))
+        .next()
+        .unwrap();
+    assert!(advanced.value().attr("open").is_none());
+    assert_eq!(
+        advanced
+            .select(&select("[name=owner], [name=name]"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        advanced
+            .select(&select(".follow-editor-folder-preview"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        doc.select(&select("#follow-current-releases [name=release]"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        doc.select(&select("#follow-current-releases [name=release][checked]"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        doc.select(&select("#follow-future-releases [name=include]"))
+            .count(),
+        4
+    );
+    assert_eq!(
+        doc.select(&select(
+            "#follow-current-releases [name=owner], #follow-future-releases code"
+        ))
+        .count(),
+        0
+    );
+    assert!(html.contains("Monitoring 1 of 13 episodes"));
+    assert!(html.contains("src=\"/static/test-cover.jpg\""));
+    assert_eq!(
+        doc.select(&select(".follow-editor-heading > a"))
+            .next()
+            .unwrap()
+            .value()
+            .attr("href"),
+        Some(format!("/franchises/{page_id}").as_str())
+    );
+    assert_eq!(
+        doc.select(&select("[name=return_to]"))
+            .next()
+            .unwrap()
+            .value()
+            .attr("value"),
+        Some(format!("/franchises/{page_id}").as_str())
+    );
+}
+
+#[tokio::test]
+async fn follow_editor_keeps_first_add_return_context_through_preview_and_save() {
+    use axum::Form;
+    use axum_htmx::HxRequest;
+    let db = crate::test_support::in_memory_pool().await;
+    cache(&db, FIRST, &[("SEQUEL", SECOND)]).await;
+    let initial = preview::draft(&db, FIRST, &[]).await.unwrap();
+    let html = initial.render().unwrap();
+    let doc = scraper::Html::parse_document(&html);
+    let back = scraper::Selector::parse(".follow-editor-heading > a").unwrap();
+    assert_eq!(
+        doc.select(&back).next().unwrap().value().attr("href"),
+        Some("/anime/anilist/19603")
+    );
+    let context = "/?search=Fate&sort=added_desc&individual=true";
+    let response = follow::save(
+        State(db.clone()),
+        Path(FIRST),
+        HxRequest(false),
+        Form(vec![
+            ("version".into(), initial.version),
+            ("selection".into(), "1".into()),
+            ("owner".into(), FIRST.to_string()),
+            ("release".into(), FIRST.to_string()),
+            ("include".into(), "movies".into()),
+            ("return_to".into(), context.into()),
+        ]),
+    )
+    .await
+    .unwrap();
+    let location = response.headers()["location"].to_str().unwrap();
+    assert_eq!(
+        location,
+        format!(
+            "/library/groups/{FIRST}/preview?return_to={}",
+            urlencoding::encode(context)
+        )
+    );
+    let Query(query) =
+        Query::<Vec<(String, String)>>::try_from_uri(&location.parse().unwrap()).unwrap();
+    let html = preview::draft(&db, FIRST, &query)
+        .await
+        .unwrap()
+        .render()
+        .unwrap();
+    let doc = scraper::Html::parse_document(&html);
+    assert_eq!(
+        doc.select(&back).next().unwrap().value().attr("href"),
+        Some(context)
+    );
+    assert!(
+        doc.select(&back)
+            .next()
+            .unwrap()
+            .text()
+            .collect::<String>()
+            .contains("Back to library")
+    );
+    // Untrusted return destinations are ignored and never become a redirect.
+    let html = preview::draft(
+        &db,
+        FIRST,
+        &[("return_to".into(), "//other.example/".into())],
+    )
+    .await
+    .unwrap()
+    .render()
+    .unwrap();
+    assert!(!html.contains("other.example"));
+}
+
+#[tokio::test]
+async fn follow_save_keeps_unchecked_library_files_and_explicit_episode_monitoring() {
+    use crate::models::{monitoring, release_follows};
+    use axum::Form;
+    use axum_htmx::HxRequest;
+    let db = crate::test_support::in_memory_pool().await;
+    let temp = tempfile::tempdir().unwrap();
+    config::save_config(
+        &db,
+        &Config {
+            media_root: temp.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let existing = seed_series(&db, SECOND, SECOND_TITLE).await;
+    sqlx::query("UPDATE series SET folder_name='Keep/Season', monitor_mode='existing', episodes=13 WHERE id=?")
+        .bind(existing).execute(&db).await.unwrap();
+    let file = temp.path().join("Keep/Season/Show - S01E01.mkv");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, b"existing media stays unchanged").unwrap();
+    monitoring::replace_series_states(
+        &db,
+        existing,
+        &[
+            monitoring::EpisodeMonitorState {
+                episode_number: 1,
+                monitored: false,
+            },
+            monitoring::EpisodeMonitorState {
+                episode_number: 2,
+                monitored: true,
+            },
+        ],
+    )
+    .await
+    .unwrap();
+    cache(&db, FIRST, &[("SEQUEL", SECOND), ("ALTERNATIVE", SUNNY)]).await;
+    release_follows::start(&db, SECOND, SECOND_TITLE, true, false, false)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE release_follows SET started_on='2020-02-03'")
+        .execute(&db)
+        .await
+        .unwrap();
+    models::sync_exclusions::add(&db, SUNNY, None, SUNNY_TITLE)
+        .await
+        .unwrap();
+    let before = preview::draft(&db, SECOND, &[]).await.unwrap();
+    follow::save(
+        State(db.clone()),
+        Path(SECOND),
+        HxRequest(false),
+        Form(vec![
+            ("version".into(), before.version),
+            ("selection".into(), "1".into()),
+            ("owner".into(), FIRST.to_string()),
+            ("release".into(), FIRST.to_string()),
+            ("release".into(), SUNNY.to_string()), // Exclusions still win over a crafted form.
+            ("include".into(), "movies".into()),
+        ]),
+    )
+    .await
+    .unwrap();
+    let follows = release_follows::list(&db).await.unwrap();
+    assert_eq!(follows.len(), 1);
+    assert_eq!(follows[0].anilist_id, FIRST);
+    assert_eq!(follows[0].started_on, "2020-02-03");
+    assert!(follows[0].movies && !follows[0].tv && !follows[0].ovas && !follows[0].alternatives);
+    let old = series::get_by_id(&db, existing).await.unwrap().unwrap();
+    assert_eq!(
+        (old.folder_name.as_str(), old.monitor_mode.as_str()),
+        ("Keep/Season", "existing")
+    );
+    assert_eq!(
+        monitoring::get_series_states(&db, existing)
+            .await
+            .unwrap()
+            .iter()
+            .map(|state| (state.episode_number, state.monitored))
+            .collect::<Vec<_>>(),
+        [(1, false), (2, true)]
+    );
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        b"existing media stays unchanged"
+    );
+    let added = series::get_by_anilist_id(&db, FIRST)
+        .await
+        .unwrap()
+        .unwrap();
+    let states = monitoring::get_series_states(&db, added.id).await.unwrap();
+    assert_eq!(states.len(), 13);
+    assert!(states.iter().all(|state| state.monitored));
+    assert!(
+        series::get_by_anilist_id(&db, SUNNY)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let saved = preview::draft(&db, FIRST, &[]).await.unwrap();
+    assert!(
+        !saved
+            .rows
+            .iter()
+            .find(|row| row.entry.provider_id == SECOND)
+            .unwrap()
+            .selected
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM grabbed_torrents")
+            .fetch_one(&db)
+            .await
+            .unwrap(),
         0
     );
 }

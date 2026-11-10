@@ -1,81 +1,102 @@
 {% extends "base.html" %}
-{% block title %} - Franchise follow{% endblock %}
+{% block title %} - Choose releases{% endblock %}
 {% block content %}
-<div class="page-header recycle-header">
-    <h2>Franchise</h2>
-    <a class="btn btn-secondary" href="/?individual=0">Anime Library</a>
+<div class="page-header follow-editor-heading">
+    <div><p class="follow-editor-eyebrow">Choose releases and follow</p><h2>{{ title }}</h2></div>
+    <a class="btn btn-secondary" href="{{ back_path }}">&larr; {{ back_label }}</a>
 </div>
 {% if seed < 0 %}
-{% for row in rows %}<h3>{{ row.entry.title }}</h3><p>1 release in your library. Ryokan needs an AniList match to check for future releases.</p>{% endfor %}
+{% for row in rows %}<h3>{{ row.entry.title }}</h3><p>This release is in your library. An AniList match is needed to follow future releases.</p>{% endfor %}
 {% else %}
-<p>Choose the releases you want. One follow watches for new releases across the franchise.</p>
-<div class="franchise-layout">
-<form hx-boost="false" method="get" action="/library/groups/{{ seed }}/preview" class="franchise-preview">
+<form hx-boost="false" method="get" action="/library/groups/{{ seed }}/preview" class="follow-editor">
     <input type="hidden" name="selection" value="1">
     <input type="hidden" name="version" value="{{ version }}">
-    <div class="form-group"><label for="franchise-owner">Main title</label>
-    <select id="franchise-owner" name="owner">
-        <option value="">Choose a release</option>
-        {% for row in rows %}<option value="{{ row.entry.provider_id }}"{% if owner.as_ref() == Some(&row.entry.provider_id) %} selected{% endif %}>{{ row.entry.title }}</option>{% endfor %}
-    </select></div>
-    <div class="form-group"><label for="franchise-name">Franchise name (optional)</label>
-    <input id="franchise-name" name="name" type="text" value="{{ name_override }}" placeholder="Use the main title"></div>
-    <h3>Current follows</h3>
-    {% for follow in follows %}
-    <p><strong>{{ follow.title }}</strong> · AniList {{ follow.anilist_id }} · Since {{ follow.started_on }}<br>
-    TV {% if follow.tv %}on{% else %}off{% endif %} · Movies {% if follow.movies %}on{% else %}off{% endif %} · OVAs {% if follow.ovas %}on{% else %}off{% endif %} · Alternatives {% if follow.alternatives %}on{% else %}off{% endif %}</p>
-    {% endfor %}
-    {% if follows.is_empty() %}<p>No current follow for these releases.</p>{% else if follows.len() > 1 %}<p>Saving combines these follows and keeps their release history.</p>{% endif %}
-    <fieldset><legend>Future releases</legend>
-        <p>Ryokan checks for new releases from the main title and your selected releases. These settings apply to upcoming releases and releases that start on or after your follow date.</p>
-        <label class="checkbox-row"><input type="checkbox" name="include" value="tv"{% if policy.tv %} checked{% endif %}> TV and online series</label>
-        <label class="checkbox-row"><input type="checkbox" name="include" value="movies"{% if policy.movies %} checked{% endif %}> Movies</label>
-        <label class="checkbox-row"><input type="checkbox" name="include" value="ovas"{% if policy.ovas %} checked{% endif %}> OVAs</label>
-        <label class="checkbox-row"><input type="checkbox" name="include" value="alternatives"{% if policy.alternatives %} checked{% endif %}> Alternative versions of the selected formats</label>
-    </fieldset>
-    <fieldset class="franchise-releases"><legend>Releases in premiere order</legend>
+    <input type="hidden" name="return_to" value="{{ back_path }}">
+    <fieldset class="follow-editor-section" id="follow-current-releases">
+        <legend><span class="follow-step" aria-hidden="true">1</span> Current releases</legend>
+        <p class="form-hint">Choose the releases to include now. Existing library files and episode settings stay as set.</p>
+        <div class="follow-editor-releases">
         {% for row in rows %}
-        <div class="franchise-release"><label class="checkbox-row"><input type="checkbox" name="release" value="{{ row.entry.provider_id }}"{% if row.selected %} checked{% endif %}{% if row.entry.excluded %} disabled{% endif %}>
-        <span><strong>{{ row.entry.title }}</strong><small>{% if !row.entry.format.is_empty() %}{{ row.entry.format }} · {% endif %}{% if row.entry.date.is_empty() %}Date unknown{% else %}{{ row.entry.date }}{% endif %}
-        · AniList {{ row.entry.provider_id }}{% if let Some(n) = row.entry.episodes %}{% if *n > 1 %} · Episodes 1–{{ n }}{% endif %}{% endif %} · {% if row.entry.series_id.is_some() %}In library{% else %}Outside library{% endif %}{% if row.entry.excluded %} · Excluded from sync{% endif %}</small></span></label>
-        <a href="{{ crate::handlers::library::detail::path(row.entry.provider_id) }}" class="btn btn-secondary btn-sm" aria-label="Details for {{ row.entry.title }}">Details</a></div>
+        <div class="franchise-release follow-editor-release{% if row.entry.excluded %} follow-editor-release-excluded{% endif %}">
+            <label class="follow-editor-release-choice" for="follow-release-{{ row.entry.provider_id }}">
+                <input id="follow-release-{{ row.entry.provider_id }}" type="checkbox" name="release" value="{{ row.entry.provider_id }}" aria-describedby="follow-release-summary-{{ row.entry.provider_id }}"{% if row.selected %} checked{% endif %}{% if row.entry.excluded %} disabled{% endif %}>
+                <span class="follow-editor-cover">{% if !row.cover_url.is_empty() %}<img src="{{ row.cover_url }}" alt="" loading="lazy">{% else %}<span class="follow-editor-cover-empty" aria-hidden="true">No cover</span>{% endif %}</span>
+                <span class="follow-editor-release-copy">
+                    <strong>{{ row.entry.title }}</strong>
+                    <span class="follow-editor-release-meta">{% if !row.entry.format.is_empty() %}{{ row.entry.format.replace('_', " ") }} &middot; {% endif %}{% if row.entry.date.is_empty() %}Date unknown{% else %}{{ row.entry.date }}{% endif %}{% if let Some(count) = row.entry.episodes %} &middot; {{ count }} episode{% if *count != 1 %}s{% endif %}{% endif %}</span>
+                    <span class="follow-editor-membership">{% if row.entry.series_id.is_some() %}In library{% else %}Available to add{% endif %}{% if row.entry.excluded %} &middot; Excluded from sync{% endif %}</span>
+                    <span class="follow-editor-monitoring" id="follow-release-summary-{{ row.entry.provider_id }}">{{ row.monitoring_label }}</span>
+                </span>
+            </label>
+            <a href="{{ row.detail_path }}" class="btn btn-secondary btn-sm" aria-label="Details for {{ row.entry.title }}">Details</a>
+        </div>
         {% endfor %}
+        </div>
+        <p class="form-hint follow-editor-selection-hint">Selected releases outside your library will be added with all episodes monitored. Unchecked releases stay outside this follow.</p>
     </fieldset>
-    <p>Saving adds selected releases outside your library and monitors their episodes. Unchecked releases stay outside the follow. Existing library entries keep their episode settings and files.</p>
-    <button class="btn btn-secondary" type="submit">Update preview</button>
-    <button class="btn btn-secondary" type="submit" name="files" value="1">Preview files</button>
-    <button class="btn btn-primary" type="submit" formaction="/library/groups/{{ seed }}/follow" formmethod="post">Save franchise follow</button>
+    <fieldset class="follow-editor-section" id="follow-future-releases">
+        <legend><span class="follow-step" aria-hidden="true">2</span> Follow future releases</legend>
+        <p class="form-hint">Automatically add new matching releases. Includes upcoming releases and releases that start on or after <time datetime="{{ follow_started_on }}">{{ follow_started_on }}</time>.</p>
+        {% if follows.len() > 1 %}<p class="follow-editor-merge-note">Your current follows will combine into one. Review the future formats below; the earliest follow date will be kept.</p>{% endif %}
+        <div class="follow-editor-formats">
+            <label class="follow-editor-format"><input type="checkbox" name="include" value="tv"{% if policy.tv %} checked{% endif %}><span><strong>TV and online series</strong><small>New seasons and series</small></span></label>
+            <label class="follow-editor-format"><input type="checkbox" name="include" value="movies"{% if policy.movies %} checked{% endif %}><span><strong>Movies</strong><small>New films in this franchise</small></span></label>
+            <label class="follow-editor-format"><input type="checkbox" name="include" value="ovas"{% if policy.ovas %} checked{% endif %}><span><strong>OVAs and specials</strong><small>Extra releases and side stories</small></span></label>
+            <label class="follow-editor-format"><input type="checkbox" name="include" value="alternatives"{% if policy.alternatives %} checked{% endif %}><span><strong>Alternative versions</strong><small>Include alternatives of the selected formats</small></span></label>
+        </div>
+        {% if !follows.is_empty() %}<p class="form-hint follow-editor-follow-status">Following since <time datetime="{{ follow_started_on }}">{{ follow_started_on }}</time>.</p>{% else %}<p class="form-hint follow-editor-follow-status">A new follow starts today.</p>{% endif %}
+    </fieldset>
+    <details class="follow-editor-advanced"{% if advanced_open || files_requested || owner.is_none() %} open{% endif %}>
+        <summary>Advanced organization</summary>
+        <div class="follow-editor-advanced-body">
+            <p class="form-hint">Review the main title, release identifiers, and proposed folder names.</p>
+            <div class="follow-editor-organization-fields">
+                <div class="form-group"><label for="franchise-owner">Main title</label><select id="franchise-owner" name="owner" required>
+                    <option value="">Choose a release</option>
+                    {% for row in rows %}<option value="{{ row.entry.provider_id }}"{% if owner.as_ref() == Some(&row.entry.provider_id) %} selected{% endif %}>{{ row.entry.title }}</option>{% endfor %}
+                </select></div>
+                <div class="form-group"><label for="franchise-name">Franchise name <span class="form-hint">(optional)</span></label><input id="franchise-name" name="name" type="text" value="{{ name_override }}" placeholder="Use the main title"></div>
+            </div>
+            <div class="follow-editor-preview-actions">
+                <button class="btn btn-secondary" type="submit" name="advanced" value="1">Update organization preview</button>
+                <button class="btn btn-secondary" type="submit" name="files" value="1">Preview files</button>
+            </div>
+            <section class="follow-editor-folder-preview" aria-labelledby="franchise-folder">
+                <h3 id="franchise-folder">Proposed folders</h3>
+                <p class="form-hint">Saving the follow keeps existing folders and files in place. Folder moves require a separate migration.</p>
+                {% for issue in file_issues %}<p>{{ issue }}</p>{% endfor %}
+                {% if owner.is_none() %}<p>Choose the main title to preview its organization.</p>
+                {% else if folder.is_empty() %}<p>Set a media root in Settings to see proposed paths.</p>
+                {% else %}
+                <p><code>{{ folder }}/</code></p>
+                <ol>{% for row in rows %}{% if row.selected %}
+                    <li><strong>{{ row.entry.title }}</strong><code>{{ row.destination }}/</code><small>
+                    {% if let Some(source) = row.source %}Current folder: <code>{{ source }}/</code>
+                    {% else if row.entry.series_id.is_some() %}Current folder unavailable{% else %}Available to add{% endif %}</small>
+                    {% if let Some(scan) = row.file_preview %}
+                    <p>{{ scan.status }}{% if scan.status == "Scanned" %} &middot; {{ scan.media_files }} media files &middot; {{ scan.episodes }} episodes{% endif %}</p>
+                    {% if !scan.missing.is_empty() %}<p>Missing episodes:{% for number in scan.missing %} {{ number }}{% endfor %}</p>{% endif %}
+                    {% for issue in scan.issues %}<p>{{ issue }}</p>{% endfor %}
+                    {% if !scan.files.is_empty() %}<details><summary>{{ scan.files.len() }} file and directory paths</summary><ol>
+                        {% for file in scan.files %}<li><small>Current {{ file.kind }}</small><code>{{ file.from.display() }}</code><small>Proposed path</small><code>{{ file.to.display() }}</code></li>{% endfor %}
+                    </ol></details>{% endif %}
+                    {% endif %}</li>
+                {% endif %}{% endfor %}</ol>
+                {% if selection_empty %}<p>Select a release to preview its folder.</p>{% endif %}
+                {% endif %}
+            </section>
+            <details class="follow-editor-identifiers"><summary>Release identifiers</summary><dl>
+                {% for row in rows %}<div><dt>{{ row.entry.title }}</dt><dd>AniList {{ row.entry.provider_id }}</dd></div>{% endfor %}
+            </dl></details>
+            {% if !follows.is_empty() %}<details class="follow-editor-identifiers"><summary>Current follow history</summary><ul>
+                {% for follow in follows %}<li>{{ follow.title }} &middot; Since {{ follow.started_on }}</li>{% endfor %}
+            </ul></details>{% endif %}
+        </div>
+    </details>
+    <div class="follow-editor-submit">
+        <button class="btn btn-primary" type="submit" formaction="/library/groups/{{ seed }}/follow" formmethod="post">Save selection and follow</button>
+        <a class="btn btn-ghost" href="{{ back_path }}">Cancel</a>
+    </div>
 </form>
-<section class="franchise-preview" aria-labelledby="franchise-folder">
-    <h3 id="franchise-folder">Proposed franchise folder</h3>
-    <p>Ryokan identifies each release by its saved AniList ID. Folder names use titles, with a year or ID when names conflict.</p>
-    {% if files_requested %}<p>File paths observed now. Moving them requires a later migration step.</p>{% endif %}
-    {% for issue in file_issues %}<p>{{ issue }}</p>{% endfor %}
-    {% if owner.is_none() %}<p>Choose the release that should own this franchise.</p>
-    {% else if folder.is_empty() %}<p>Set a media root in Settings to see the proposed paths.</p>
-    {% else %}
-    <p><code>{{ folder }}/</code></p>
-    <ol>{% for row in rows %}{% if row.selected %}
-        <li><code>{{ row.destination }}/</code><small>
-        {% if let Some(source) = row.source %}Current folder · <code>{{ source }}/</code>
-        {% else if row.entry.series_id.is_some() %}Current folder unavailable{% else %}Outside library{% endif %}{% if row.entry.excluded %} · Excluded from sync{% endif %}</small>
-        {% if let Some(scan) = row.file_preview %}
-        <p>{{ scan.status }}{% if scan.status == "Scanned" %} · {{ scan.media_files }} media files · {{ scan.episodes }} episodes{% endif %}</p>
-        {% if !scan.missing.is_empty() %}<p>Missing episodes{% for n in scan.missing %} {{ n }}{% endfor %}</p>{% endif %}
-        {% for issue in scan.issues %}<p>{{ issue }}</p>{% endfor %}
-        {% if !scan.files.is_empty() %}
-        <details><summary>{{ scan.files.len() }} file and directory paths</summary>
-        <ol>{% for file in scan.files %}
-            <li><small>Current {{ file.kind }}</small><code>{{ file.from.display() }}</code><small>Proposed path</small><code>{{ file.to.display() }}</code></li>
-        {% endfor %}</ol>
-        </details>
-        {% endif %}
-        {% endif %}
-        </li>
-    {% endif %}{% endfor %}</ol>
-    {% if selection_empty %}<p>Select a release to preview its folder.</p>{% endif %}
-    {% endif %}
-</section>
-</div>
 {% endif %}
 {% endblock %}
