@@ -34,7 +34,7 @@
            class="wanted-tab {% if tab == "cutoff" %}active{% endif %}"
            role="tab"
            data-tab="cutoff"
-           aria-selected="{% if tab == "cutoff" %}true{% else %}false{% endif %}">Quality cutoff unmet</a>
+           aria-selected="{% if tab == "cutoff" %}true{% else %}false{% endif %}">{% if requirements_enabled %}Below good enough target{% else %}Quality cutoff unmet{% endif %}</a>
     </div>
     <label class="checkbox-row wanted-select-all-row">
         <input type="checkbox" id="wanted-select-all">
