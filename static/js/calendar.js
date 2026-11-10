@@ -22,6 +22,8 @@
     if (!document.getElementById('calendar-list')) return;
 
     function activeRange() {
+        var period = document.querySelector('.calendar-period');
+        if (period) return period.dataset.range;
         var t = document.querySelector('.calendar-range-tab.active');
         return t ? t.dataset.range : 'this_week';
     }
@@ -44,9 +46,23 @@
     }
 
     function calendarUrl() {
-        var url = '/calendar?range=' + encodeURIComponent(activeRange());
-        if (monitoredOnly()) url += '&monitored=true';
-        return url;
+        var url = new URL(window.location.href);
+        url.pathname = '/calendar';
+        url.hash = '';
+        url.searchParams.set('range', activeRange());
+        var period = document.querySelector('.calendar-period');
+        if (period) url.searchParams.set('date', period.dataset.date);
+        carryFilters(url);
+        return url.pathname + url.search;
+    }
+
+    function carryFilters(url) {
+        if (monitoredOnly()) url.searchParams.set('monitored', 'true');
+        else url.searchParams.delete('monitored');
+        var input = document.getElementById('calendar-series-search');
+        var search = input ? input.value.trim().slice(0, 128) : '';
+        if (search) url.searchParams.set('search', search);
+        else url.searchParams.delete('search');
     }
 
     // Patch each tab's `href` + `hx-get` to carry the current
@@ -54,11 +70,30 @@
     // clicking a range doesn't reset it.
     function syncRangeTabHrefs() {
         document.querySelectorAll('.calendar-range-tab').forEach(function (a) {
-            var url = '/calendar?range=' + encodeURIComponent(a.dataset.range);
-            if (monitoredOnly()) url += '&monitored=true';
-            a.setAttribute('href', url);
-            a.setAttribute('hx-get', url);
+            var url = new URL(calendarUrl(), window.location.origin);
+            url.searchParams.set('range', a.dataset.range);
+            a.setAttribute('href', url.pathname + url.search);
+            a.setAttribute('hx-get', url.pathname + url.search);
         });
+        document.querySelectorAll('.calendar-period-link').forEach(function (a) {
+            var url = new URL(a.href, window.location.origin);
+            carryFilters(url);
+            a.setAttribute('href', url.pathname + url.search);
+            a.setAttribute('hx-get', url.pathname + url.search);
+        });
+        var form = document.querySelector('.calendar-date-form');
+        if (form) {
+            ['monitored', 'search'].forEach(function (name) {
+                var value = new URL(calendarUrl(), window.location.origin).searchParams.get(name);
+                var field = form.querySelector('input[name="' + name + '"]');
+                if (!value) { if (field) field.remove(); return; }
+                if (!field) {
+                    field = document.createElement('input');
+                    field.type = 'hidden'; field.name = name; form.appendChild(field);
+                }
+                field.value = value;
+            });
+        }
     }
 
     // ── Monitored-only toggle (HTMX swap) ───────────────────────
@@ -186,20 +221,6 @@
         return todayEl;
     }
 
-    function maybeScrollToToday(todayEl) {
-        if (!todayEl || typeof todayEl.scrollIntoView !== 'function') return;
-        // Skip auto-scroll in grid view — the full month fits
-        // roughly one screen, and jumping to today's cell mid-grid
-        // hides the leading weeks. List view benefits from the
-        // jump because the day-grouped flow can be long.
-        if (todayEl.classList.contains('calendar-month-cell')) return;
-        // Defer to next frame so layout has settled.
-        requestAnimationFrame(function () {
-            todayEl.scrollIntoView({ behavior: 'auto', block: 'start' });
-            window.scrollBy({ top: -68, left: 0, behavior: 'auto' });
-        });
-    }
-
     // ── Local filter: series-name search ────────────────────────
     // Premiere status is now a passive visual indicator (badge in
     // list view, ★ + accent border in grid view), not a filter.
@@ -238,17 +259,31 @@
             var matches = !query || name.indexOf(query) !== -1;
             pill.classList.toggle('calendar-episode-hidden', !matches);
         });
+        var empty = scope.querySelector('.calendar-filter-empty');
+        if (empty) {
+            var cards = scope.querySelectorAll('.calendar-episode, .calendar-month-pill');
+            var visible = Array.prototype.some.call(cards, function (card) {
+                return !card.classList.contains('calendar-episode-hidden');
+            });
+            empty.hidden = !query || !cards.length || visible;
+        }
     }
 
     if (seriesSearchInput) {
-        seriesSearchInput.addEventListener('input', function () { applyLocalFilters(); });
+        seriesSearchInput.addEventListener('input', function () {
+            applyLocalFilters();
+            window.history.replaceState(window.history.state, '', calendarUrl());
+            syncRangeTabHrefs();
+        });
     }
 
     // Initial paint hydrators + first scroll-to-today.
     hydrateTimes();
-    var initialToday = applyTodayHighlight();
+    applyTodayHighlight();
     applyLocalFilters();
-    maybeScrollToToday(initialToday);
+    // Keep navigation visible; loading the current day must not scroll
+    // the date controls out of view.
+    syncRangeTabHrefs();
 
     // ── Re-hydrate after every HTMX swap of #calendar-list ──────
     // The handler returns the same partial used for the initial
@@ -273,17 +308,14 @@
             // range, so the URL already carries it). htmx doesn't
             // update `.active` on swap.
             try {
-                var src = ev.detail && ev.detail.ctx && ev.detail.ctx.sourceElement;
-                var range = src && src.dataset && src.dataset.range;
-                if (!range) {
-                    var url = new URL(window.location.href);
-                    range = url.searchParams.get('range') || activeRange();
-                }
+                var range = activeRange();
                 document.querySelectorAll('.calendar-range-tab').forEach(function (a) {
                     var on = a.dataset.range === range;
                     a.classList.toggle('active', on);
                     a.setAttribute('aria-selected', on ? 'true' : 'false');
                 });
+                root.dataset.viewMode = range === 'month' ? 'grid' : 'list';
+                syncRangeTabHrefs();
             } catch (_) {}
         });
     }
