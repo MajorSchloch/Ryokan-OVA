@@ -17,7 +17,45 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .execute(db)
     .await?;
+    // Public page identity is independent of paths and provider identity. No
+    // trigger is used: backups deliberately reject trigger-bearing databases.
+    let columns = sqlx::query("PRAGMA table_info(library_franchises)")
+        .fetch_all(db)
+        .await?;
+    if !columns
+        .iter()
+        .any(|row| row.get::<String, _>("name") == "page_id")
+    {
+        sqlx::query("ALTER TABLE library_franchises ADD COLUMN page_id TEXT")
+            .execute(db)
+            .await?;
+    }
+    sqlx::query("UPDATE library_franchises SET page_id=lower(hex(randomblob(16))) WHERE page_id IS NULL OR page_id=''")
+        .execute(db).await?;
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS library_franchises_page_id ON library_franchises(page_id)")
+        .execute(db).await?;
+    sqlx::query("CREATE TABLE IF NOT EXISTS library_franchise_page_aliases(page_id TEXT PRIMARY KEY, target_page_id TEXT NOT NULL)")
+        .execute(db).await?;
     Ok(())
+}
+
+/// Historical addresses survive explicitly regrouping every member into a new
+/// parent. Alias targets are flattened when a parent moves again.
+pub async fn resolve_page_id(
+    db: &SqlitePool,
+    page_id: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT page_id FROM library_franchises WHERE page_id=? UNION ALL SELECT a.target_page_id FROM library_franchise_page_aliases a JOIN library_franchises f ON f.page_id=a.target_page_id WHERE a.page_id=? LIMIT 1")
+        .bind(page_id).bind(page_id).fetch_optional(db).await
+}
+
+/// A saved franchise's public address. Reading a page never adopts paths.
+pub async fn page_for_provider(
+    db: &SqlitePool,
+    provider_id: i64,
+) -> Result<Option<(String, String)>, sqlx::Error> {
+    sqlx::query_as("SELECT f.page_id,f.folder FROM library_franchises f JOIN library_franchise_members m ON m.folder=f.folder WHERE m.provider_id=?")
+        .bind(provider_id).fetch_optional(db).await
 }
 
 pub async fn enabled<'e>(db: impl sqlx::SqliteExecutor<'e>) -> Result<bool, sqlx::Error> {
@@ -343,7 +381,7 @@ pub async fn record(
     id: i64,
     assignment: &Assignment,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO library_franchises(folder,owner_provider_id) VALUES(?,?) ON CONFLICT(folder) DO NOTHING")
+    sqlx::query("INSERT INTO library_franchises(folder,owner_provider_id,page_id) VALUES(?,?,lower(hex(randomblob(16)))) ON CONFLICT(folder) DO NOTHING")
         .bind(&assignment.root).bind(assignment.owner).execute(&mut *db).await?;
     let old: Option<String> =
         sqlx::query_scalar("SELECT folder FROM library_franchise_members WHERE provider_id=?")
@@ -367,6 +405,18 @@ pub async fn record_move(
         .bind(series_id)
         .fetch_one(&mut *db)
         .await?;
+    let previous: Option<(String, String, i64)> = sqlx::query_as(
+        "SELECT f.folder,f.page_id,(SELECT count(*) FROM library_franchise_members WHERE folder=f.folder) FROM library_franchises f JOIN library_franchise_members m ON m.folder=f.folder WHERE m.provider_id=?"
+    ).bind(provider).fetch_optional(&mut *db).await?;
+    let target_root = path.split_once('/').map(|(root, _)| root);
+    let target_exists: bool = if let Some(root) = target_root {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM library_franchises WHERE folder=?)")
+            .bind(root)
+            .fetch_one(&mut *db)
+            .await?
+    } else {
+        false
+    };
     sqlx::query("DELETE FROM library_franchise_members WHERE provider_id=?")
         .bind(provider)
         .execute(&mut *db)
@@ -382,6 +432,31 @@ pub async fn record_move(
             },
         )
         .await?;
+    }
+    if let (Some((old, page_id, 1)), Some(root)) = (previous, target_root) {
+        if !target_exists {
+            sqlx::query("DELETE FROM library_franchises WHERE folder=?")
+                .bind(old)
+                .execute(&mut *db)
+                .await?;
+            sqlx::query("UPDATE library_franchises SET page_id=? WHERE folder=?")
+                .bind(page_id)
+                .bind(root)
+                .execute(&mut *db)
+                .await?;
+        } else {
+            let target: String =
+                sqlx::query_scalar("SELECT page_id FROM library_franchises WHERE folder=?")
+                    .bind(root)
+                    .fetch_one(&mut *db)
+                    .await?;
+            if target != page_id {
+                sqlx::query("UPDATE library_franchise_page_aliases SET target_page_id=? WHERE target_page_id=?")
+                    .bind(&target).bind(&page_id).execute(&mut *db).await?;
+                sqlx::query("INSERT INTO library_franchise_page_aliases(page_id,target_page_id) VALUES(?,?) ON CONFLICT(page_id) DO UPDATE SET target_page_id=excluded.target_page_id")
+                    .bind(page_id).bind(target).execute(&mut *db).await?;
+            }
+        }
     }
     sqlx::query("UPDATE library_franchises SET owner_provider_id=(SELECT MIN(provider_id) FROM library_franchise_members WHERE folder=library_franchises.folder) WHERE NOT EXISTS(SELECT 1 FROM library_franchise_members WHERE provider_id=owner_provider_id AND folder=library_franchises.folder) AND EXISTS(SELECT 1 FROM library_franchise_members WHERE folder=library_franchises.folder)")
         .execute(&mut *db).await?;

@@ -4,7 +4,11 @@ use crate::{
     services::anilist,
     test_support::seed_series,
 };
-use axum::extract::{Path, Query};
+use axum::{
+    extract::{Path, Query, State},
+    http::StatusCode,
+    response::{Html, IntoResponse},
+};
 use serde_json::{Value, json};
 
 const FIRST: i64 = 19603;
@@ -169,7 +173,7 @@ async fn grouped_library_fate_release_order_ownership_and_local_numbers_are_read
             .iter()
             .any(|l| l.label == "Alternative to" && l.peer == SECOND_TITLE)
     );
-    let response = page(State(db.clone())).await.unwrap();
+    let response = Html(load(&db).await.unwrap().render().unwrap()).into_response();
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -262,7 +266,6 @@ async fn grouped_library_reaches_sunny_day_when_only_the_first_part_is_tracked()
 
 #[tokio::test]
 async fn grouped_library_previews_a_follow_on_an_untracked_sequel_without_backfill() {
-    use axum::extract::{Path, Query};
     let db = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -519,7 +522,6 @@ async fn franchise_singleton_grows_without_starting_a_second_follow() {
 
 #[tokio::test]
 async fn franchise_file_preview_reads_selected_files_without_saving_the_draft() {
-    use axum::extract::{Path, Query};
     let db = crate::test_support::in_memory_pool().await;
     let temp = tempfile::tempdir().unwrap();
     let id = seed_series(&db, FIRST, TITLE).await;

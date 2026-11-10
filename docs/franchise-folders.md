@@ -4,6 +4,18 @@ The library uses a general franchise model. A franchise can contain one release 
 
 The physical layout is `<media root>/<franchise>/<release>/...`. Existing flat release folders remain supported. Folder names do not define watch order. Release order and a future recommended watch order belong to franchise metadata.
 
+## Browse and manage franchises
+
+The library opens with one poster per franchise, including one-off titles. Select **Show individual releases** to see separate release cards and use release bulk actions. This preference survives reloads and visits to the table view.
+
+Library search finds a franchise by any known member title, including English, Romaji, and native names. A custom-list filter includes a franchise when one of its tracked releases belongs to the list. Sorting uses the franchise title, its latest addition, or the main title's personal score.
+
+Open a franchise poster to see release covers, formats, status, file completeness, and premiere order. **Choose releases & follow** opens the existing reviewed selection flow. One follow covers the franchise. A release detail page links back with **Part of [franchise]**. Releases with no known saved parent still offer **Explore franchise**.
+
+Saved franchises have local page addresses independent of their folder names and provider IDs. Metadata refreshes and identity promotion preserve them. Supported moves preserve the remaining parent's address; moving every member into a new parent keeps previous addresses usable through aliases. Browsing and view changes do not move files or change selections.
+
+Saved storage membership defines the grouping boundary. Cached provider relations can suggest outside releases, but cannot merge two saved parents. An outside release linked to more than one saved parent is not assigned to either automatically.
+
 ## Default paths and existing libraries
 
 Fresh installations assign a franchise parent to every new release. A one-off uses `Title/Title`. Names contain no generated date, format, or provider ID. A collision can add a year or numeric suffix. Custom release-folder templates still apply to the release name.
@@ -22,13 +34,13 @@ This command records existing nested paths and changes future assignments. It mo
 
 Add Series, automatic tracking, manual-import previews, and external request lookups use the same planner. A new folder assignment must use `Franchise/Release` after adoption. Existing flat paths remain valid until an explicit migration.
 
-The eventual Jellyfin view should show one franchise entry with its releases and watch order inside. This change supplies storage and compatibility support for that view. It does not implement the franchise presentation layer.
+The eventual Jellyfin view should show one franchise entry with its releases and watch order inside. Ryokan supplies storage and compatibility support for that view. Its franchise pages do not change Jellyfin’s presentation.
 
 ## Browse releases before adding them
 
 Release detail pages use provider identities: `/anime/anilist/130003` for an AniList release, or `/anime/mal/5680` for a MAL release. The same URL works before and after the release enters the library. Browsing can cache metadata, but does not create a library entry, follow, media folder, or download.
 
-Search result covers and titles open these Ryokan pages. Provider links remain available separately. Relation cards, library groups, and franchise previews also link to release details. A tracked release shows its library controls; an untracked release offers **Add to Library** and **Explore franchise**.
+Search result covers and titles open these Ryokan pages. Provider links remain available separately. Relation cards, franchise pages, and franchise previews also link to release details. A tracked release shows its library controls; an untracked release offers **Add to Library**. Releases with a saved parent link to its franchise page. Other releases offer **Explore franchise**.
 
 Legacy `/series/<library row id>` bookmarks redirect to the provider page. The existing `?by=anilist` links still identify provider IDs explicitly. Mutation and playback APIs retain their library row IDs. An AniList ID that equals another release's library row ID cannot select that release.
 

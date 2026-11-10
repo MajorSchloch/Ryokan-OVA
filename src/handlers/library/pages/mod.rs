@@ -32,6 +32,7 @@ use super::{Episode, ErrorTemplate, IndexTemplate, RelationCard, RelationGroup, 
 #[derive(Default, serde::Deserialize)]
 pub struct LibraryIndexQuery {
     pub view: Option<String>,
+    pub individual: Option<String>,
     /// #62 — `?list=<name>` filter. When present + non-empty,
     /// the index handler keeps only series whose
     /// `series_custom_lists` rows match. Echoed back to the
@@ -61,9 +62,13 @@ pub async fn index(
     headers: axum::http::HeaderMap,
     axum_htmx::HxRequest(boosted): axum_htmx::HxRequest,
 ) -> axum::response::Response {
-    if q.view.is_none() && q.list.is_none() && q.sort.is_none() && q.search.is_none() {
+    if q.view.is_none()
+        && q.individual.is_none()
+        && q.list.is_none()
+        && q.sort.is_none()
+        && q.search.is_none()
+    {
         let path = match crate::handlers::auth::cookie_value(&headers, "library_view") {
-            Some("groups") => Some("/library/groups"),
             Some("table") => Some("/library/table"),
             _ => None,
         };
@@ -71,6 +76,21 @@ pub async fn index(
             return crate::handlers::responses::htmx_aware_redirect(boosted, path);
         }
     }
+
+    let individual = q
+        .individual
+        .as_deref()
+        .map(|value| matches!(value, "1" | "true"))
+        .unwrap_or_else(|| {
+            match crate::handlers::auth::cookie_value(&headers, "library_individual") {
+                Some("1") => true,
+                Some("0") => false,
+                _ => {
+                    crate::handlers::auth::cookie_value(&headers, "library_view")
+                        == Some("poster-releases")
+                }
+            }
+        });
 
     // Fetch the library list and config concurrently — they're independent
     // and each was previously serialized on the other. `get_all` is the
@@ -116,6 +136,7 @@ pub async fn index(
         .await
         .unwrap_or_default();
     let custom_list_filter = q.list.unwrap_or_default();
+    let mut scope_ids = None;
     if !custom_list_filter.is_empty() {
         // In-memory filter against the just-loaded library. Cheaper
         // than a JOIN-based query when the library is already cached
@@ -133,21 +154,29 @@ pub async fn index(
                 .unwrap_or_default()
                 .into_iter()
                 .collect();
-        library.retain(|s| matching_ids.contains(&s.id));
+        if individual {
+            library.retain(|s| matching_ids.contains(&s.id));
+        }
+        scope_ids = Some(matching_ids);
     }
 
     // Library search. Case-insensitive substring match against the
     // three title fields. Composes with the list filter (set both →
     // series must satisfy both predicates).
     let search_query = q.search.unwrap_or_default();
-    if !search_query.trim().is_empty() {
-        let needle = search_query.trim().to_lowercase();
-        library.retain(|s| {
-            s.title_english.to_lowercase().contains(&needle)
-                || s.title_romaji.to_lowercase().contains(&needle)
-                || s.title_native.to_lowercase().contains(&needle)
-        });
-    }
+    // Keep all scoped releases in the DOM. Reloading a searched view and
+    // clearing its live search must restore the rest without a round trip.
+    let needle = search_query.trim().to_lowercase();
+    let hidden_release_ids: std::collections::HashSet<i64> = library
+        .iter()
+        .filter(|s| {
+            !needle.is_empty()
+                && ![&s.title, &s.title_english, &s.title_romaji, &s.title_native]
+                    .iter()
+                    .any(|title| title.to_lowercase().contains(&needle))
+        })
+        .map(|s| s.id)
+        .collect();
 
     // #62 — sort-by-user-score. SQL already returned series
     // ordered by added_at DESC ("recent"); this is an opt-in
@@ -353,6 +382,34 @@ pub async fn index(
         })
         .collect();
 
+    let (franchise_count, franchise_cards) = if individual {
+        (0, Vec::new())
+    } else {
+        match super::navigation::cards(
+            &state.db,
+            &cards,
+            scope_ids.as_ref(),
+            &search_query,
+            &sort_value,
+            &media_root,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::error!("Cannot load franchise posters: {error}");
+                return (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "Could not load franchises. Try again.",
+                )
+                    .into_response();
+            }
+        }
+    };
+    let visible_franchise_count = franchise_cards.iter().filter(|c| c.matches_search).count();
+    let visible_release_count = cards.len().saturating_sub(hidden_release_ids.len());
+    let cards = if individual { cards } else { Vec::new() };
+
     let recycle_enabled = cfg
         .as_ref()
         .map(|c| !c.recycle_bin_path.trim().is_empty())
@@ -370,6 +427,12 @@ pub async fn index(
     let template = IndexTemplate {
         page: "library".to_string(),
         cards,
+        franchise_cards,
+        individual,
+        franchise_count,
+        visible_franchise_count,
+        hidden_release_ids,
+        visible_release_count,
         title_language: cfg
             .map(|c| c.title_language)
             .unwrap_or_else(|| "english".to_string()),
@@ -385,11 +448,26 @@ pub async fn index(
         total_count,
         airing_count,
     };
-    (
-        super::view_cookie("poster"),
+    let mut response = (
+        super::view_cookie(if individual {
+            "poster-releases"
+        } else {
+            "poster"
+        }),
         Html(template.render().unwrap_or_default()),
     )
-        .into_response()
+        .into_response();
+    // Grouping survives a visit to the table, which owns its own landing-view
+    // preference. Query values still override either browser preference.
+    response.headers_mut().append(
+        axum::http::header::SET_COOKIE,
+        axum::http::HeaderValue::from_static(if individual {
+            "library_individual=1; Path=/; Max-Age=31536000; SameSite=Lax; HttpOnly"
+        } else {
+            "library_individual=0; Path=/; Max-Age=31536000; SameSite=Lax; HttpOnly"
+        }),
+    );
+    response
 }
 
 /// `/library/review` used to render its own page. It's now a System
@@ -762,9 +840,14 @@ pub async fn series_detail(
     // Issue #219 — the read lock releases before the template renders.
     let adult_without_indexers =
         super::adult_needs_indexer(detail.is_adult, state.indexers.read().await.len());
+    let parent_franchise = super::navigation::parent_for_provider(&state.db, provider_id)
+        .await
+        .ok()
+        .flatten();
     let template = SeriesTemplate {
         page: "library".to_string(),
         route_id: db_id.unwrap_or(provider_id),
+        parent_franchise,
         follow_anilist_id: if provider_id > 0 {
             provider_id
         } else {

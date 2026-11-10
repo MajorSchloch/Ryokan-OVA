@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %} - {{ title }}{% endblock %}
+{% block content %}
+<nav class="franchise-breadcrumb" aria-label="Breadcrumb"><a href="/?individual=0">Anime Library</a><span aria-hidden="true">/</span><span>{{ title }}</span></nav>
+<section class="franchise-heading" aria-labelledby="franchise-title">
+    <div class="franchise-heading-cover">{% if !cover_url.is_empty() %}<img src="{{ cover_url }}" alt="">{% else %}<div class="series-cover-placeholder">No Image</div>{% endif %}</div>
+    <div class="franchise-heading-content">
+        <p class="franchise-eyebrow">Franchise</p>
+        <h2 id="franchise-title">{{ title }}</h2>
+        <p>{{ tracked }} release{% if tracked != 1 %}s{% endif %} in your library &middot; {% if following %}Following future releases{% else %}Not following future releases{% endif %}</p>
+        <p class="franchise-completion">{{ progress.label }}</p>
+        <div class="card-progress card-progress-{{ progress.state }}" title="{{ progress.label }}"><div class="card-progress-fill" style="width: {{ progress.pct }}%"></div></div>
+        <div class="detail-actions">
+            {% if seed > 0 %}<a class="btn btn-primary" href="/library/groups/{{ seed }}/preview">{% if following %}Manage releases &amp; follow{% else %}Choose releases &amp; follow{% endif %}</a>{% endif %}
+        </div>
+        {% if seed > 0 %}<p class="form-hint">Choose the seasons, movies, and side stories you want. Follow this franchise once to watch for future releases.</p>{% else %}<p class="form-hint">Ryokan needs an AniList match before it can follow future releases for this title.</p>{% endif %}
+    </div>
+</section>
+<section aria-labelledby="franchise-releases-title">
+    <div class="franchise-section-heading"><h3 id="franchise-releases-title">Releases</h3><span class="form-hint">Premiere order</span></div>
+    <div class="franchise-release-grid">
+        {% for release in releases %}
+        <a class="franchise-release-card" href="{{ release.path }}">
+            <div class="franchise-release-cover">{% if !release.cover_url.is_empty() %}<img src="{{ release.cover_url }}" alt="" loading="lazy">{% else %}<div class="series-cover-placeholder">No Image</div>{% endif %}</div>
+            <div class="franchise-release-info">
+                <h4>{{ release.title }}</h4>
+                <div class="series-meta">{% if !release.format.is_empty() %}<span class="tag tag-res">{{ release.format }}</span>{% endif %}<span class="tag">{{ release.date }}</span></div>
+                {% if !release.status.is_empty() %}<p>{{ release.status }}</p>{% endif %}
+                <p class="franchise-release-membership">{% if release.in_library %}In library{% if !release.included %} &middot; Outside follow selection{% endif %}{% else %}Available to add{% endif %}</p>
+                <p class="form-hint">{{ release.files }}</p>
+            </div>
+        </a>
+        {% endfor %}
+    </div>
+</section>
+{% endblock %}

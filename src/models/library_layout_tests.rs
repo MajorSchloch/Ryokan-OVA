@@ -323,3 +323,115 @@ async fn an_unowned_nested_directory_without_an_nfo_is_a_collision() {
     edge(&db, 1, 2, "SEQUEL", "ANIME").await;
     assert_eq!(add(&db, 2, "Next").await.folder_name, "Family/Next (2020)");
 }
+
+#[tokio::test]
+async fn public_page_ids_backfill_idempotently_without_changing_storage_or_using_triggers() {
+    let db = in_memory_pool().await;
+    sqlx::query("DROP TABLE library_franchise_members; DROP TABLE library_franchises")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TABLE library_franchises(folder TEXT PRIMARY KEY COLLATE NOCASE,owner_provider_id INTEGER NOT NULL); CREATE TABLE library_franchise_members(provider_id INTEGER PRIMARY KEY,folder TEXT NOT NULL COLLATE NOCASE REFERENCES library_franchises(folder)); INSERT INTO library_franchises VALUES('Existing parent',123); INSERT INTO library_franchise_members VALUES(123,'Existing parent')")
+        .execute(&db).await.unwrap();
+    super::migrate(&db).await.unwrap();
+    let before = page_for_provider(&db, 123).await.unwrap().unwrap();
+    assert_eq!(before.0.len(), 32);
+    assert!(before.0.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_eq!(before.1, "Existing parent");
+    super::migrate(&db).await.unwrap();
+    assert_eq!(page_for_provider(&db, 123).await.unwrap().unwrap(), before);
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='library_franchises'").fetch_one(&db).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn singleton_page_identity_survives_root_rename_promotion_and_sequel_adoption() {
+    let db = in_memory_pool().await;
+    sqlx::query("UPDATE library_path_policy SET enabled=1 WHERE id=1")
+        .execute(&db)
+        .await
+        .unwrap();
+    let row = add(&db, 101, "One off").await;
+    let initial = page_for_provider(&db, 101).await.unwrap().unwrap().0;
+    move_binding(&db, &row, "New parent/One off").await;
+    assert_eq!(
+        page_for_provider(&db, 101).await.unwrap().unwrap().0,
+        initial
+    );
+    let mut tx = db.begin().await.unwrap();
+    promote(&mut tx, 101, 102).await.unwrap();
+    sqlx::query("UPDATE series SET anilist_id=102 WHERE id=?")
+        .bind(row.id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        page_for_provider(&db, 102).await.unwrap().unwrap().0,
+        initial
+    );
+    edge(&db, 102, 200, "SEQUEL", "ANIME").await;
+    let second = add(&db, 200, "Later sequel").await;
+    assert!(second.folder_name.starts_with("New parent/"));
+    assert_eq!(
+        page_for_provider(&db, 200).await.unwrap().unwrap().0,
+        initial
+    );
+}
+
+#[tokio::test]
+async fn moving_one_release_out_preserves_the_remaining_parent_page() {
+    let db = in_memory_pool().await;
+    sqlx::query("UPDATE library_path_policy SET enabled=1 WHERE id=1")
+        .execute(&db)
+        .await
+        .unwrap();
+    let first = add(&db, 101, "First").await;
+    edge(&db, 101, 200, "SEQUEL", "ANIME").await;
+    add(&db, 200, "Second").await;
+    let initial = page_for_provider(&db, 101).await.unwrap().unwrap().0;
+    move_binding(&db, &first, "Separate/First").await;
+    assert_eq!(
+        page_for_provider(&db, 200).await.unwrap().unwrap().0,
+        initial
+    );
+    assert_ne!(
+        page_for_provider(&db, 101).await.unwrap().unwrap().0,
+        initial
+    );
+}
+
+#[tokio::test]
+async fn sequential_parent_moves_keep_every_published_page_address_and_flatten_aliases() {
+    let db = in_memory_pool().await;
+    sqlx::query("UPDATE library_path_policy SET enabled=1 WHERE id=1")
+        .execute(&db)
+        .await
+        .unwrap();
+    let first = add(&db, 101, "First").await;
+    edge(&db, 101, 200, "SEQUEL", "ANIME").await;
+    let second = add(&db, 200, "Second").await;
+    let original = page_for_provider(&db, 101).await.unwrap().unwrap().0;
+    move_binding(&db, &first, "Renamed/First").await;
+    let interim = page_for_provider(&db, 101).await.unwrap().unwrap().0;
+    assert_eq!(
+        resolve_page_id(&db, &original).await.unwrap(),
+        Some(original.clone())
+    );
+    move_binding(&db, &second, "Renamed/Second").await;
+    assert_eq!(
+        resolve_page_id(&db, &original).await.unwrap(),
+        Some(interim.clone())
+    );
+    assert_eq!(
+        resolve_page_id(&db, &interim).await.unwrap(),
+        Some(interim.clone())
+    );
+    move_binding(&db, &first, "Again/First").await;
+    move_binding(&db, &second, "Again/Second").await;
+    let current = page_for_provider(&db, 101).await.unwrap().unwrap().0;
+    assert_eq!(
+        resolve_page_id(&db, &original).await.unwrap(),
+        Some(current.clone())
+    );
+    assert_eq!(resolve_page_id(&db, &interim).await.unwrap(), Some(current));
+}

@@ -3,23 +3,23 @@
 {% block content %}
 <div class="page-header recycle-header">
     <h2>Franchise</h2>
-    <a class="btn btn-secondary" href="/library/groups">Library groups</a>
+    <a class="btn btn-secondary" href="/?individual=0">Anime Library</a>
 </div>
 {% if seed < 0 %}
 {% for row in rows %}<h3>{{ row.entry.title }}</h3><p>1 release in your library. Ryokan needs an AniList match to check for future releases.</p>{% endfor %}
 {% else %}
-<p>Choose the release that owns the follow, then select the releases you want to include.</p>
+<p>Choose the releases you want. One follow watches for new releases across the franchise.</p>
 <div class="franchise-layout">
 <form hx-boost="false" method="get" action="/library/groups/{{ seed }}/preview" class="franchise-preview">
     <input type="hidden" name="selection" value="1">
     <input type="hidden" name="version" value="{{ version }}">
-    <div class="form-group"><label for="franchise-owner">Follow owner</label>
+    <div class="form-group"><label for="franchise-owner">Main title</label>
     <select id="franchise-owner" name="owner">
         <option value="">Choose a release</option>
-        {% for row in rows %}<option value="{{ row.entry.provider_id }}"{% if owner.as_ref() == Some(&row.entry.provider_id) %} selected{% endif %}>{{ row.entry.title }} · AniList {{ row.entry.provider_id }}</option>{% endfor %}
+        {% for row in rows %}<option value="{{ row.entry.provider_id }}"{% if owner.as_ref() == Some(&row.entry.provider_id) %} selected{% endif %}>{{ row.entry.title }}</option>{% endfor %}
     </select></div>
     <div class="form-group"><label for="franchise-name">Franchise name (optional)</label>
-    <input id="franchise-name" name="name" type="text" value="{{ name_override }}" placeholder="Use the follow owner’s title"></div>
+    <input id="franchise-name" name="name" type="text" value="{{ name_override }}" placeholder="Use the main title"></div>
     <h3>Current follows</h3>
     {% for follow in follows %}
     <p><strong>{{ follow.title }}</strong> · AniList {{ follow.anilist_id }} · Since {{ follow.started_on }}<br>
@@ -27,7 +27,7 @@
     {% endfor %}
     {% if follows.is_empty() %}<p>No current follow for these releases.</p>{% else if follows.len() > 1 %}<p>Saving combines these follows and keeps their release history.</p>{% endif %}
     <fieldset><legend>Future releases</legend>
-        <p>Ryokan checks for new sequels from the owner and selected releases. These settings apply to upcoming releases and releases that start on or after your follow date.</p>
+        <p>Ryokan checks for new releases from the main title and your selected releases. These settings apply to upcoming releases and releases that start on or after your follow date.</p>
         <label class="checkbox-row"><input type="checkbox" name="include" value="tv"{% if policy.tv %} checked{% endif %}> TV and online series</label>
         <label class="checkbox-row"><input type="checkbox" name="include" value="movies"{% if policy.movies %} checked{% endif %}> Movies</label>
         <label class="checkbox-row"><input type="checkbox" name="include" value="ovas"{% if policy.ovas %} checked{% endif %}> OVAs</label>

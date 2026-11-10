@@ -11,48 +11,48 @@ use crate::{
     },
 };
 use askama::Template;
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::{Html, IntoResponse, Response},
-};
+use axum::response::Response;
 use futures_util::TryStreamExt;
 use sqlx::{Row, SqlitePool};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 #[derive(Template)]
 #[template(path = "library_groups.html")]
-struct GroupsPage {
-    page: &'static str,
-    title_language: String,
-    groups: Vec<Group>,
-    media_root: String,
+pub(super) struct GroupsPage {
+    pub(super) page: &'static str,
+    pub(super) title_language: String,
+    pub(super) groups: Vec<Group>,
+    pub(super) media_root: String,
 }
 
-struct Group {
-    title: String,
-    tracked: usize,
-    outside: usize,
-    entries: Vec<Entry>,
+pub(super) struct Group {
+    pub(super) page_id: Option<String>,
+    pub(super) owner: Option<i64>,
+    pub(super) title: String,
+    pub(super) tracked: usize,
+    pub(super) outside: usize,
+    pub(super) entries: Vec<Entry>,
 }
 
 #[derive(Default)]
-struct Entry {
-    provider_id: i64,
-    folder_name: String,
-    library_provider_id: Option<i64>,
-    franchise_name: Option<String>,
-    related: Option<RelatedEntry>,
-    mal_id: Option<i64>,
-    excluded: bool,
-    choice: Option<bool>,
-    title: String,
-    format: String,
-    episodes: Option<i32>,
-    date: String,
-    season: String,
-    series_id: Option<i64>,
-    files: String,
+pub(super) struct Entry {
+    pub(super) provider_id: i64,
+    pub(super) folder_name: String,
+    pub(super) library_provider_id: Option<i64>,
+    pub(super) franchise_name: Option<String>,
+    pub(super) franchise_page_id: Option<String>,
+    pub(super) franchise_owner: Option<i64>,
+    pub(super) related: Option<RelatedEntry>,
+    pub(super) mal_id: Option<i64>,
+    pub(super) excluded: bool,
+    pub(super) choice: Option<bool>,
+    pub(super) title: String,
+    pub(super) format: String,
+    pub(super) episodes: Option<i32>,
+    pub(super) date: String,
+    pub(super) season: String,
+    pub(super) series_id: Option<i64>,
+    pub(super) files: String,
     links: Vec<RelationLabel>,
 }
 
@@ -165,25 +165,67 @@ impl Catalog {
     }
 
     fn group(mut self, follow_seed: Option<i64>) -> Vec<Group> {
+        // An outside relation reachable from two saved parents is ambiguous.
+        // Leave it discoverable on its own detail page rather than assigning
+        // a crossover or shared extra to whichever parent sorts first.
+        let mut discovery_roots = HashMap::<i64, BTreeSet<String>>::new();
+        let mut inspected = HashSet::new();
+        for (&id, entry) in &self.entries {
+            if entry.franchise_page_id.is_some() || !inspected.insert(id) {
+                continue;
+            }
+            let mut pending = vec![id];
+            let mut component = Vec::new();
+            let mut roots = BTreeSet::new();
+            while let Some(current) = pending.pop() {
+                component.push(current);
+                for &(other, _) in self.neighbors.get(&current).into_iter().flatten() {
+                    let Some(entry) = self.entries.get(&other) else {
+                        continue;
+                    };
+                    if let Some(root) = &entry.franchise_page_id {
+                        roots.insert(root.clone());
+                    } else if inspected.insert(other) {
+                        pending.push(other);
+                    }
+                }
+            }
+            for member in component {
+                discovery_roots.insert(member, roots.clone());
+            }
+        }
         let mut groups = Vec::new();
         let mut seen = HashSet::new();
         // Start only at tracked entries. Provider caches can contain unrelated titles.
-        let seeds: Vec<_> = self
+        let mut seeds: Vec<_> = self
             .entries
             .iter()
             .filter(|(id, e)| e.series_id.is_some() || follow_seed == Some(**id))
             .map(|(&id, _)| id)
             .collect();
+        seeds.sort_by_key(|id| (self.entries[id].franchise_page_id.is_none(), *id));
         for seed in seeds {
             if !seen.insert(seed) {
                 continue;
             }
+            let page_id = self.entries[&seed].franchise_page_id.clone();
             let mut pending = vec![seed];
             let mut members = Vec::new();
             while let Some(id) = pending.pop() {
                 members.push(id);
                 for &(other, _) in self.neighbors.get(&id).into_iter().flatten() {
-                    if self.entries.contains_key(&other) && seen.insert(other) {
+                    // A provider relation is discovery, not permission to merge
+                    // separately saved franchises, even through a shared extra.
+                    let allowed = self.entries.get(&other).is_some_and(|entry| {
+                        entry.franchise_page_id == page_id
+                            || (entry.franchise_page_id.is_none()
+                                && page_id.as_ref().is_none_or(|root| {
+                                    discovery_roots.get(&other).is_some_and(|roots| {
+                                        roots.len() == 1 && roots.contains(root)
+                                    })
+                                }))
+                    });
+                    if allowed && seen.insert(other) {
                         pending.push(other);
                     }
                 }
@@ -236,7 +278,10 @@ impl Catalog {
                         .title
                         .clone()
                 });
+            let owner = rows.iter().find_map(|e| e.franchise_owner);
             groups.push(Group {
+                page_id,
+                owner,
                 title,
                 tracked,
                 outside: rows.len() - tracked,
@@ -351,7 +396,7 @@ async fn catalog(db: &SqlitePool, lang: &str) -> Result<Catalog, sqlx::Error> {
     Ok(catalog)
 }
 
-fn file_status(facts: &super::inventory::Inventory) -> String {
+pub(super) fn file_status(facts: &super::inventory::Inventory) -> String {
     let Some(count) = facts.on_disk else {
         return "File status unknown".into();
     };
@@ -369,11 +414,12 @@ fn file_status(facts: &super::inventory::Inventory) -> String {
     }
 }
 
+#[cfg(test)]
 async fn load(db: &SqlitePool) -> Result<GroupsPage, sqlx::Error> {
     load_groups(db, true, None).await
 }
 
-async fn load_groups(
+pub(super) async fn load_groups(
     db: &SqlitePool,
     include_disk_status: bool,
     seed: Option<(i64, &str)>,
@@ -391,6 +437,7 @@ async fn load_groups(
         .filter(|s| s.anilist_id > 0)
         .map(|s| s.anilist_id)
         .collect();
+    let mut library_ids = HashMap::new();
     for s in library {
         let mut id = s.anilist_id;
         if id < 0
@@ -401,6 +448,7 @@ async fn load_groups(
         {
             id = al;
         }
+        library_ids.insert(s.anilist_id, id);
         let e = catalog.entries.entry(id).or_default();
         e.mal_id = s.mal_id.or(e.mal_id);
         e.series_id = Some(s.id);
@@ -429,10 +477,18 @@ async fn load_groups(
         }
     }
     // Storage membership survives cache changes without creating an acquisition follow.
-    let storage:Vec<(String,i64,i64)>=sqlx::query_as("SELECT f.folder,f.owner_provider_id,m.provider_id FROM library_franchises f JOIN library_franchise_members m ON m.folder=f.folder")
-        .fetch_all(db).await?;
-    for (name, root, member) in storage {
-        catalog.entries.entry(root).or_default().franchise_name = Some(name);
+    let storage: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT f.folder,f.page_id,f.owner_provider_id,m.provider_id FROM library_franchises f JOIN library_franchise_members m ON m.folder=f.folder"
+    ).fetch_all(db).await?;
+    for (name, page_id, root, member) in storage {
+        let root = library_ids.get(&root).copied().unwrap_or(root);
+        let member = library_ids.get(&member).copied().unwrap_or(member);
+        for id in [root, member] {
+            let entry = catalog.entries.entry(id).or_default();
+            entry.franchise_name = Some(name.clone());
+            entry.franchise_page_id = Some(page_id.clone());
+            entry.franchise_owner = Some(root);
+        }
         if root != member {
             catalog
                 .neighbors
@@ -454,7 +510,12 @@ async fn load_groups(
     .fetch_all(db)
     .await?;
     for (root, name, member, title, selected) in choices {
-        catalog.entries.entry(root).or_default().franchise_name = Some(name);
+        catalog
+            .entries
+            .entry(root)
+            .or_default()
+            .franchise_name
+            .get_or_insert(name);
         let entry = catalog.entries.entry(member).or_default();
         entry.choice = Some(selected);
         if entry.title.is_empty() {
@@ -493,22 +554,8 @@ async fn load_groups(
     })
 }
 
-pub async fn page(State(db): State<SqlitePool>) -> Result<Response, (StatusCode, &'static str)> {
-    let page = load(&db).await.map_err(|err| {
-        tracing::error!("Cannot read library groups: {err}");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Could not read library groups.",
-        )
-    })?;
-    page.render()
-        .map(|html| (super::view_cookie("groups"), Html(html)).into_response())
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Could not display library groups.",
-            )
-        })
+pub async fn page(axum_htmx::HxRequest(htmx): axum_htmx::HxRequest) -> Response {
+    crate::handlers::responses::htmx_aware_redirect(htmx, "/?individual=0")
 }
 
 #[cfg(test)]
