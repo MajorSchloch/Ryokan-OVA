@@ -2396,3 +2396,64 @@ async fn older_quality_form_preserves_subtitle_requirements() {
     assert_eq!(saved.required_subtitle_languages, "en,de");
     assert_eq!(saved.subtitle_language_match, "any");
 }
+
+#[tokio::test]
+async fn quality_requirements_save_spanish_4k_and_reject_invalid_target_atomically() {
+    let db = crate::test_support::in_memory_pool().await;
+    config::save_config(&db, &config::Config::default())
+        .await
+        .unwrap();
+    let body = serde_json::json!({"preferred_groups":"Keep", "blocked_groups":"", "preferred_source":"web", "preferred_resolution":"1080", "cutoff_source":"bluray", "cutoff_resolution":"1080", "finished_series_quality":"same", "prefer_subs":"1", "media_requirements_enabled":"1", "minimum_resolution":"1080", "target_resolution":"2160", "minimum_subtitle_check":"0", "target_subtitle_check":"1", "required_subtitle_languages":"Spanish", "subtitle_language_match":"all"});
+    let _ = settings_quality_submit(
+        State(crate::test_support::build_test_app_state(db.clone(), None)),
+        HxRequest(true),
+        axum::Form(serde_json::from_value(body.clone()).unwrap()),
+    )
+    .await;
+    let saved = config::get_config(&db).await.unwrap().unwrap();
+    assert!(saved.media_requirements_enabled);
+    assert_eq!(saved.minimum_resolution, "1080");
+    assert_eq!(saved.target_resolution, "2160");
+    assert_eq!(saved.required_subtitle_languages, "es");
+    assert!(!saved.minimum_subtitle_check);
+    assert!(saved.target_subtitle_check);
+    let mut invalid = body;
+    invalid["target_resolution"] = "720".into();
+    invalid["required_subtitle_languages"] = "de".into();
+    let _ = settings_quality_submit(
+        State(crate::test_support::build_test_app_state(db.clone(), None)),
+        HxRequest(false),
+        axum::Form(serde_json::from_value(invalid).unwrap()),
+    )
+    .await;
+    let after = config::get_config(&db).await.unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_value(saved).unwrap(),
+        serde_json::to_value(after).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn old_quality_form_keeps_media_requirement_gates() {
+    let db = crate::test_support::in_memory_pool().await;
+    let cfg = config::Config {
+        media_requirements_enabled: true,
+        minimum_resolution: "1080".into(),
+        target_resolution: "2160".into(),
+        minimum_subtitle_check: false,
+        ..Default::default()
+    };
+    config::save_config(&db, &cfg).await.unwrap();
+    let form:QualityForm=serde_json::from_value(serde_json::json!({"preferred_groups":"", "blocked_groups":"", "preferred_source":"web", "preferred_resolution":"1080", "cutoff_source":"bluray", "cutoff_resolution":"1080", "finished_series_quality":"same", "prefer_subs":"1"})).unwrap();
+    let _ = settings_quality_submit(
+        State(crate::test_support::build_test_app_state(db.clone(), None)),
+        HxRequest(true),
+        axum::Form(form),
+    )
+    .await;
+    let saved = config::get_config(&db).await.unwrap().unwrap();
+    assert!(saved.media_requirements_enabled);
+    assert_eq!(saved.minimum_resolution, "1080");
+    assert_eq!(saved.target_resolution, "2160");
+    assert!(!saved.minimum_subtitle_check);
+}

@@ -804,6 +804,11 @@ mod subtitle_policy_tests {
         let cfg = Config {
             required_subtitle_languages: "en,de".into(),
             subtitle_language_match: "any".into(),
+            media_requirements_enabled: true,
+            minimum_resolution: "1080".into(),
+            target_resolution: "2160".into(),
+            minimum_subtitle_check: false,
+            target_subtitle_check: true,
             ..Default::default()
         };
         save_config(&db, &cfg).await.unwrap();
@@ -812,5 +817,10 @@ mod subtitle_policy_tests {
         assert_eq!(stored.required_subtitle_languages, "en,de");
         assert_eq!(stored.subtitle_language_match, "any");
         assert_eq!(stored.qbit_url, cfg.qbit_url);
+        assert!(stored.media_requirements_enabled);
+        assert_eq!(stored.minimum_resolution, "1080");
+        assert_eq!(stored.target_resolution, "2160");
+        assert!(!stored.minimum_subtitle_check);
+        assert!(stored.target_subtitle_check);
     }
 }

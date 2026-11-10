@@ -1,3 +1,73 @@
+        <div class="cf-section" id="media-requirements-settings">
+            <h3>Minimum &amp; good enough</h3>
+            <p class="form-hint">Accept a usable file first. Stop automatic upgrades when its actual resolution and subtitle tracks meet your target.</p>
+            <div class="form-group">
+                <label for="media_requirements_enabled">Upgrade rules</label>
+                <select name="media_requirements_enabled" id="media_requirements_enabled" aria-describedby="media-rules-hint">
+                    <option value="1" {% if config.media_requirements_enabled %}selected{% endif %}>Minimum + good enough</option>
+                    <option value="0" {% if !config.media_requirements_enabled %}selected{% endif %}>Advanced source and score cutoffs</option>
+                </select>
+                <span class="form-hint" id="media-rules-hint">Minimum + good enough uses these requirements for imports, search, RSS and upgrades. A file at the target keeps its place, even when a remux, revision or higher score appears. Each release keeps its own Upgrades switch.</span>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="minimum_resolution">Minimum resolution</label>
+                    <select name="minimum_resolution" id="minimum_resolution">
+                        <option value="480" {% if config.minimum_resolution == "480" %}selected{% endif %}>480p</option>
+                        <option value="576" {% if config.minimum_resolution == "576" %}selected{% endif %}>576p</option>
+                        <option value="720" {% if config.minimum_resolution == "720" %}selected{% endif %}>720p</option>
+                        <option value="1080" {% if config.minimum_resolution == "1080" %}selected{% endif %}>1080p</option>
+                        <option value="2160" {% if config.minimum_resolution == "2160" %}selected{% endif %}>2160p (4K)</option>
+                    </select>
+                    <span class="form-hint">Accept files at this resolution or above. Lower or unknown resolution is held before import.</span>
+                </div>
+                <div class="form-group">
+                    <label for="target_resolution">Good enough resolution</label>
+                    <select name="target_resolution" id="target_resolution">
+                        <option value="480" {% if config.target_resolution == "480" %}selected{% endif %}>480p</option>
+                        <option value="576" {% if config.target_resolution == "576" %}selected{% endif %}>576p</option>
+                        <option value="720" {% if config.target_resolution == "720" %}selected{% endif %}>720p</option>
+                        <option value="1080" {% if config.target_resolution == "1080" %}selected{% endif %}>1080p</option>
+                        <option value="2160" {% if config.target_resolution == "2160" %}selected{% endif %}>2160p (4K)</option>
+                    </select>
+                    <span class="form-hint">Stop resolution upgrades here. Files above this target are kept. This must be at least the minimum.</span>
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="required_subtitle_languages">Subtitle languages</label>
+                    <input type="text" name="required_subtitle_languages" id="required_subtitle_languages" value="{{ config.required_subtitle_languages }}" placeholder="English, Spanish or language codes" aria-describedby="subtitle-requirements-hint">
+                    <span class="form-hint" id="subtitle-requirements-hint">Use names or codes, such as en, es or de. Leave empty when subtitles are not required. Forced and signs-only tracks do not count.</span>
+                </div>
+                <div class="form-group">
+                    <label for="subtitle_language_match">Language match</label>
+                    <select name="subtitle_language_match" id="subtitle_language_match">
+                        <option value="all" {% if config.subtitle_language_match != "any" %}selected{% endif %}>All listed languages</option>
+                        <option value="any" {% if config.subtitle_language_match == "any" %}selected{% endif %}>Any listed language</option>
+                    </select>
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="minimum_subtitle_check">Minimum subtitle requirement</label>
+                    <select name="minimum_subtitle_check" id="minimum_subtitle_check">
+                        <option value="1" {% if config.minimum_subtitle_check %}selected{% endif %}>Require selectable subtitles</option>
+                        <option value="0" {% if !config.minimum_subtitle_check %}selected{% endif %}>Allow unverified subtitles temporarily</option>
+                    </select>
+                    <span class="form-hint">Selectable embedded tracks or valid matching subtitle files must declare the listed languages. Unverified accepts files even when captions are absent or their language is unknown; review them yourself.</span>
+                </div>
+                <div class="form-group">
+                    <label for="target_subtitle_check">Good enough subtitles</label>
+                    <select name="target_subtitle_check" id="target_subtitle_check">
+                        <option value="1" {% if config.target_subtitle_check %}selected{% endif %}>Prefer selectable subtitles in these languages</option>
+                        <option value="0" {% if !config.target_subtitle_check %}selected{% endif %}>Use the minimum subtitle rule</option>
+                    </select>
+                    <span class="form-hint">With selectable subtitles preferred, burned-in or unknown captions stay below target. A replacement must improve an unmet target without losing known resolution or required subtitles.</span>
+                </div>
+            </div>
+            <p class="form-hint">Ryokan checks actual files before replacement and preserves the old file if checks fail. Matching subtitle files travel with the video. Language labels cannot prove translation quality or detect captions burned into the picture. Advanced mode retains the existing selectable subtitle import check.</p>
+        </div>
+
         <div class="cf-section">
             <h3>Group preferences</h3>
             <div class="form-row">
@@ -123,23 +193,6 @@
                     </span>
                     <input type="checkbox" name="seadex_enabled" value="1" {% if config.seadex_enabled %}checked{% endif %}>
                 </label>
-            </div>
-        </div>
-
-        <div class="cf-section">
-            <h3>Subtitle requirements</h3>
-            <div class="form-group">
-                <label for="required_subtitle_languages">Required subtitle languages</label>
-                <input type="text" name="required_subtitle_languages" id="required_subtitle_languages" value="{{ config.required_subtitle_languages }}" placeholder="en" aria-describedby="subtitle-requirements-hint">
-                <span class="form-hint" id="subtitle-requirements-hint">Use comma-separated names or codes, such as English or en,de. Leave empty to disable. Ryokan checks selectable embedded tracks and matching external subtitle files before import. Matching required files are imported even when optional extra files are off. Forced or signs-only tracks do not count.</span>
-            </div>
-            <div class="form-group">
-                <label for="subtitle_language_match">Language match</label>
-                <select name="subtitle_language_match" id="subtitle_language_match">
-                    <option value="all" {% if config.subtitle_language_match != "any" %}selected{% endif %}>All listed languages</option>
-                    <option value="any" {% if config.subtitle_language_match == "any" %}selected{% endif %}>Any listed language</option>
-                </select>
-                <span class="form-hint">An unreadable file or unknown language cannot pass this check. Language labels cannot prove translation quality or detect subtitles burned into the picture.</span>
             </div>
         </div>
 

@@ -8,7 +8,7 @@ Every monitored episode that has already aired and is not on disk or downloading
 
 ## Quality cutoff unmet
 
-Every episode on disk whose quality is below your cutoff (Settings → Quality & Releases), for series that allow upgrades. Each entry shows the quality of the file you have. This is the same list the daily upgrade search works through.
+Every episode on disk that is below the selected upgrade target (Settings → Quality & Releases), for series that allow upgrades. In Minimum + good enough mode, actual resolution and selectable subtitle languages determine this status. In advanced mode, the existing source and resolution cutoff applies. Each entry shows the quality of the file you have. This is the same list the daily upgrade search works through.
 
 ## Searching
 
