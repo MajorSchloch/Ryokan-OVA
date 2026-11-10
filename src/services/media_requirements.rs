@@ -108,14 +108,22 @@ impl Policy {
         }
     }
 
+    fn valid(&self) -> bool {
+        self.minimum_resolution != Resolution::Unknown
+            && self.target_resolution != Resolution::Unknown
+            && self.target_resolution.rank() >= self.minimum_resolution.rank()
+    }
+
     pub fn minimum_met(&self, observed: &Observed) -> bool {
-        observed.resolution != Resolution::Unknown
+        self.valid()
+            && observed.resolution != Resolution::Unknown
             && observed.resolution.rank() >= self.minimum_resolution.rank()
             && (!self.minimum_subtitle_check || observed.subtitles_satisfied)
     }
 
     pub fn target_met(&self, observed: &Observed) -> bool {
-        observed.resolution != Resolution::Unknown
+        self.valid()
+            && observed.resolution != Resolution::Unknown
             && observed.resolution.rank() >= self.target_resolution.rank()
             && (!(self.target_subtitle_check || self.minimum_subtitle_check)
                 || observed.subtitles_satisfied)
@@ -160,6 +168,12 @@ impl Policy {
         if !self.enabled {
             return Ok(());
         }
+        if !self.valid() {
+            return Err(
+                "Media requirement: choose a valid minimum and good enough target in Settings."
+                    .into(),
+            );
+        }
         let observed = self.observe(info);
         if observed.resolution == Resolution::Unknown {
             return Err("Media requirement: video resolution could not be verified.".into());
@@ -188,6 +202,9 @@ impl Policy {
         incoming: &ClassificationResult,
         title: &str,
     ) -> Result<UpgradeKind, UpgradeRejection> {
+        if !self.valid() {
+            return Err(UpgradeRejection::RequirementsMinimum);
+        }
         if existing.resolution == Resolution::Unknown {
             return Err(UpgradeRejection::RequirementsUnverified);
         }
@@ -571,6 +588,22 @@ mod tests {
             assert_eq!(value.resolution, Resolution::Unknown);
             assert!(!p.minimum_met(&value));
             assert!(!p.target_met(&value));
+        }
+    }
+    #[test]
+    fn invalid_restored_policy_never_meets_a_gate_or_authorizes_a_candidate() {
+        for (minimum, target) in [("bad", "1080"), ("720", "bad"), ("1080", "720")] {
+            let p = Policy::from_config(&Config {
+                media_requirements_enabled: true,
+                minimum_resolution: minimum.into(),
+                target_resolution: target.into(),
+                ..Default::default()
+            });
+            let actual = observed(Resolution::R1080p, true);
+            assert!(!p.minimum_met(&actual));
+            assert!(!p.target_met(&actual));
+            let candidate = super::super::source::classify_release_sync("Show [2160p]", None);
+            assert!(p.judge_candidate(&actual, &candidate, "Show").is_err());
         }
     }
 }
