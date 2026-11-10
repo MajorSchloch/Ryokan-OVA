@@ -131,7 +131,7 @@
             <div class="form-group">
                 <label for="required_subtitle_languages">Required subtitle languages</label>
                 <input type="text" name="required_subtitle_languages" id="required_subtitle_languages" value="{{ config.required_subtitle_languages }}" placeholder="en" aria-describedby="subtitle-requirements-hint">
-                <span class="form-hint" id="subtitle-requirements-hint">Use comma-separated names or codes, such as English or en,de. Leave empty to disable. Ryokan checks actual tracks before import and imports matching required subtitle files even when optional extra files are off. Forced or signs-only tracks do not count.</span>
+                <span class="form-hint" id="subtitle-requirements-hint">Use comma-separated names or codes, such as English or en,de. Leave empty to disable. Ryokan checks selectable embedded tracks and matching external subtitle files before import. Matching required files are imported even when optional extra files are off. Forced or signs-only tracks do not count.</span>
             </div>
             <div class="form-group">
                 <label for="subtitle_language_match">Language match</label>
