@@ -1006,10 +1006,13 @@ impl DownloadClient for AutoSearchRecordingClient {
     }
     async fn add_torrent_with_file_filter(
         &self,
-        _url: &str,
-        _hash: &str,
+        url: &str,
+        hash: &str,
         _pick: &mut (dyn for<'a> FnMut(&'a [String]) -> Option<Vec<usize>> + Send),
     ) -> Result<SelectiveOutcome, String> {
+        // Both dispatch routes are client additions. Record once and
+        // preserve the same optional add gate for race tests.
+        self.add_torrent(url, hash).await?;
         Ok(SelectiveOutcome::FullDownload)
     }
     async fn list_scoped(&self) -> Result<Vec<DownloadItem>, String> {
@@ -1702,6 +1705,10 @@ async fn seed_unhandled_misgrab(
 const WRONG_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const RIGHT_HASH: &str = "cccccccccccccccccccccccccccccccccccccccc";
 
+#[path = "auto_search_e2e/cour_season_identity.rs"]
+mod cour_season_identity;
+#[path = "auto_search_e2e/numeric_title_identity.rs"]
+mod numeric_title_identity;
 #[path = "auto_search_e2e/requirements_retry.rs"]
 mod requirements_retry;
 #[path = "auto_search_e2e/upgrade_sweep.rs"]
