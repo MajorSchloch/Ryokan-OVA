@@ -50,6 +50,7 @@
 //! otherwise land there.
 
 pub mod discovery;
+mod navigation;
 
 use askama::Template;
 use axum::{
@@ -59,7 +60,9 @@ use axum::{
 };
 use axum_htmx::{HxBoosted, HxRequest};
 use chrono::{Datelike, TimeZone};
+use navigation::Navigation;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::AppState;
 use crate::models::config;
@@ -69,20 +72,6 @@ use crate::services::calendar::{self, DEFAULT_FORWARD_DAYS, UpcomingEpisode};
 const ICAL_CACHE_CONTROL: &str = "private, max-age=600";
 
 const NOW_PLUS_7_DAYS_THRESHOLD: i64 = 7 * 86400;
-
-/// "Next week" needs an offset start (skip the first 7 days). All
-/// other week-shaped ranges start from now. Returns
-/// `(from_offset_days, length_days)`.
-///
-/// `month` is *not* served by this function — it's a calendar-month
-/// grid view, not a sliding-window list, so the handler computes
-/// its own from/to from the calendar month containing "now."
-fn range_to_window(range: &str) -> (i64, i64) {
-    match range {
-        "next_week" | "next-week" => (7, 7),
-        _ => (0, 7),
-    }
-}
 
 /// Compute the from/to window for the month-grid view: the calendar
 /// weeks (Sun-start) covering the month containing `now_utc`. The
@@ -122,7 +111,7 @@ fn saturday_on_or_after(d: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<ch
     d + chrono::Duration::days(offset)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct CalendarPageQuery {
     /// `this_week` (default), `next_week`, or `month`.
     #[serde(default)]
@@ -131,6 +120,25 @@ pub struct CalendarPageQuery {
     /// off — surfaces every airing series.
     #[serde(default)]
     pub monitored: Option<bool>,
+    #[serde(default)]
+    pub date: Option<String>,
+    #[serde(default)]
+    pub search: Option<String>,
+    /// Preserve additional calendar context in navigation links.
+    #[serde(flatten)]
+    pub context: BTreeMap<String, String>,
+}
+
+impl CalendarPageQuery {
+    fn search_text(&self) -> String {
+        self.search
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .chars()
+            .take(128)
+            .collect()
+    }
 }
 
 #[derive(Template)]
@@ -158,6 +166,9 @@ struct CalendarPageTemplate {
     /// their library; drives the empty-state copy ("add a series"
     /// vs. "no episodes airing in this range").
     library_is_empty: bool,
+    navigation: Navigation,
+    search: String,
+    load_failed: bool,
 }
 
 /// Per-episode template input. Pre-formats per-day-grouping
@@ -257,27 +268,22 @@ pub async fn page(
         .ok()
         .flatten()
         .unwrap_or_default();
-    let range = params.range.unwrap_or_else(|| "this_week".to_string());
     let monitored_only = params.monitored.unwrap_or(false);
 
     let now_utc = chrono::Utc::now();
-    let now = now_utc.timestamp();
+    let navigation = Navigation::new(&params, now_utc);
+    let range = navigation.range.to_string();
+    let search = params.search_text();
     let view_mode = if range == "month" { "grid" } else { "list" };
 
     // Window selection: list ranges slide N days from now;
     // grid uses the calendar weeks containing the current
     // month so the rendered grid is always a clean rectangle.
-    let (from, to) = if view_mode == "grid" {
-        month_grid_window(now_utc)
-    } else {
-        let (offset_days, length_days) = range_to_window(&range);
-        let f = now + offset_days * 86400;
-        (f, f + length_days * 86400)
-    };
+    let (from, to) = (navigation.from, navigation.to);
 
-    let episodes = calendar::fetch_upcoming(&state.db, &cfg, from, to, monitored_only)
-        .await
-        .unwrap_or_default();
+    let fetched = calendar::fetch_upcoming(&state.db, &cfg, from, to, monitored_only).await;
+    let load_failed = fetched.is_err();
+    let episodes = fetched.unwrap_or_default();
 
     let library_is_empty = library_has_no_positive_al_series(&state.db).await;
 
@@ -295,10 +301,18 @@ pub async fn page(
         .collect();
 
     let (day_buckets, month_grid) = if view_mode == "grid" {
-        (
-            Vec::new(),
-            build_month_grid(&episode_views, now_utc, from, to),
-        )
+        let anchor = navigation.date.and_hms_opt(0, 0, 0).unwrap().and_utc();
+        let mut grid = build_month_grid(&episode_views, anchor, from, to);
+        let today = now_utc
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        for cell in grid.weeks.iter_mut().flatten() {
+            cell.is_today = cell.day_key == today;
+        }
+        (Vec::new(), grid)
     } else {
         (group_by_day(&episode_views), MonthGrid::default())
     };
@@ -308,19 +322,17 @@ pub async fn page(
     // carries `HX-Request` but expects a full body, so it falls
     // through to the page render below.
     if is_htmx && !is_boosted {
-        return if view_mode == "grid" {
-            let partial = CalendarGridPartial {
-                month_grid,
-                library_is_empty,
-            };
-            Html(partial.render().unwrap_or_default())
-        } else {
-            let partial = CalendarListPartial {
-                day_buckets,
-                library_is_empty,
-            };
-            Html(partial.render().unwrap_or_default())
+        let partial = CalendarBodyPartial {
+            day_buckets,
+            month_grid,
+            library_is_empty,
+            navigation,
+            view_mode: view_mode.to_string(),
+            monitored_only,
+            search,
+            load_failed,
         };
+        return Html(partial.render().unwrap_or_default());
     }
 
     // Full page render — includes chrome (range tabs, filters,
@@ -336,22 +348,24 @@ pub async fn page(
         month_grid,
         calendar_keys,
         library_is_empty,
+        navigation,
+        search,
+        load_failed,
     };
     Html(tmpl.render().unwrap_or_default())
 }
 
 #[derive(Template)]
-#[template(path = "partials/calendar/list.html")]
-struct CalendarListPartial {
+#[template(path = "partials/calendar/body.html")]
+struct CalendarBodyPartial {
     day_buckets: Vec<DayBucket>,
     library_is_empty: bool,
-}
-
-#[derive(Template)]
-#[template(path = "partials/calendar/grid.html")]
-struct CalendarGridPartial {
     month_grid: MonthGrid,
-    library_is_empty: bool,
+    navigation: Navigation,
+    view_mode: String,
+    monitored_only: bool,
+    search: String,
+    load_failed: bool,
 }
 
 /// Build the Sun→Sat calendar grid for the month containing
