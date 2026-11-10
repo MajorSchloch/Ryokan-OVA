@@ -79,6 +79,9 @@ impl Policy {
             .map(|v| {
                 let width = v.width.unwrap_or(0);
                 let height = v.height.unwrap_or(0);
+                if width == 0 || height == 0 {
+                    return Resolution::Unknown;
+                }
                 // Preserve the tier of widescreen crops (1920x800, 3840x1600).
                 let by_width = match width {
                     3800.. => Resolution::R2160p,
@@ -540,5 +543,34 @@ mod tests {
                 .await
                 .contains_key(&1)
         );
+    }
+    #[test]
+    fn incomplete_or_zero_dimensions_never_satisfy_a_gate() {
+        let p = policy();
+        for dimensions in [
+            serde_json::json!({"width":1920}),
+            serde_json::json!({"height":1080}),
+            serde_json::json!({"width":0,"height":1080}),
+            serde_json::json!({"width":1920,"height":0}),
+        ] {
+            let mut video = dimensions;
+            video["codec_type"] = "video".into();
+            let json = serde_json::json!({"streams":[video]}).to_string();
+            let info = media_info::parse_probe_json(
+                &json,
+                media_info::FileIdentity {
+                    size: 1,
+                    mtime_ns: "1".into(),
+                    device: None,
+                    inode: None,
+                },
+                false,
+            )
+            .unwrap();
+            let value = p.observe(&info);
+            assert_eq!(value.resolution, Resolution::Unknown);
+            assert!(!p.minimum_met(&value));
+            assert!(!p.target_met(&value));
+        }
     }
 }

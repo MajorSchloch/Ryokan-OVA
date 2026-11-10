@@ -181,38 +181,6 @@ fn safe_return_to(value: &str) -> Option<String> {
     allowed.then(|| value.to_owned())
 }
 
-fn monitoring_label(row: &series::Series, states: &[monitoring::EpisodeMonitorState]) -> String {
-    let states: Vec<_> = states
-        .iter()
-        .filter(|state| state.episode_number > 0)
-        .collect();
-    if !states.is_empty() {
-        let count = states.iter().filter(|state| state.monitored).count();
-        if count == 0 {
-            return "Unmonitored".into();
-        }
-        let total = row
-            .episodes
-            .filter(|total| *total > 0)
-            .map(|total| total as usize)
-            .unwrap_or(states.len());
-        if count == total {
-            return format!("Monitoring all {total} episodes");
-        }
-        return format!("Monitoring {count} of {total} episodes");
-    }
-    match row.monitor_mode_enum() {
-        monitoring::MonitorMode::None => "Unmonitored".into(),
-        monitoring::MonitorMode::All => match row.episodes.filter(|count| *count > 0) {
-            Some(total) => format!("Monitoring all {total} episodes"),
-            None => "Monitoring all episodes".into(),
-        },
-        monitoring::MonitorMode::Future => "Monitoring future episodes".into(),
-        monitoring::MonitorMode::Missing => "Monitoring missing episodes".into(),
-        monitoring::MonitorMode::Existing => "Monitoring existing episodes".into(),
-    }
-}
-
 pub(super) type Error = (StatusCode, &'static str);
 
 fn project(
@@ -508,7 +476,8 @@ pub(super) async fn draft(
             let states = monitoring::get_series_states(db, series.id)
                 .await
                 .map_err(read_error)?;
-            row.monitoring_label = monitoring_label(series, &states);
+            row.monitoring_label =
+                crate::handlers::library::availability::monitoring_label(series, &states);
             if !series.cover_url.is_empty() {
                 row.cover_url.clone_from(&series.cover_url);
             }
