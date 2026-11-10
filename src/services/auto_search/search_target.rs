@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use crate::models::episode_tags::EpisodeQualityTag;
 use crate::services::anilist::AnimeDetail;
 use crate::services::media;
+use crate::services::media_requirements::{Observed, Policy};
 use crate::services::source::{self, ClassificationResult, Resolution, Source};
 
 use super::resolve_existing_classification;
@@ -185,9 +186,143 @@ pub fn build_upgrade_targets(
     targets
 }
 
+/// Requirements mode uses observed file capabilities, never release-title
+/// source/CF rank. Unknown files and overlapping ranges stay out of automatic
+/// single-episode searches. All existing pin/downloading safeguards apply.
+pub fn build_requirements_upgrade_targets(
+    disk_files: &[media::EpisodeFile],
+    candidate_episodes: &[i32],
+    quality_tags: &HashMap<i32, EpisodeQualityTag>,
+    policy: &Policy,
+    observed: &HashMap<i32, Observed>,
+) -> Vec<(SearchTarget, ClassificationResult)> {
+    let candidates: HashSet<i32> = candidate_episodes.iter().copied().collect();
+    let ranged: HashSet<i32> = disk_files
+        .iter()
+        .filter(|file| file.is_multi_episode())
+        .flat_map(|file| file.episodes())
+        .collect();
+    let mut seen = HashSet::new();
+    let mut targets = Vec::new();
+    for file in disk_files {
+        let ep = file.episode_number;
+        if !file.is_own_season()
+            || file.is_special
+            || !candidates.contains(&ep)
+            || ranged.contains(&ep)
+            || !seen.insert(ep)
+        {
+            continue;
+        }
+        if quality_tags
+            .get(&ep)
+            .is_some_and(|tag| tag.manual_override || tag.state == "grabbed")
+        {
+            continue;
+        }
+        let Some(facts) = observed
+            .get(&ep)
+            .filter(|facts| facts.resolution != Resolution::Unknown && !policy.target_met(facts))
+        else {
+            continue;
+        };
+        let mut existing = resolve_existing_classification(file, quality_tags.get(&ep));
+        existing.resolution = facts.resolution;
+        targets.push((SearchTarget::Episode(ep), existing));
+    }
+    targets.sort_by_key(|(target, _)| match target {
+        SearchTarget::Episode(ep) => *ep,
+        SearchTarget::Single => 0,
+    });
+    targets
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn requirement_file(ep: i32) -> media::EpisodeFile {
+        media::EpisodeFile {
+            filename: format!("Show - S01E{ep:02}.mkv"),
+            episode_number: ep,
+            episode_last: ep,
+            season_number: Some(1),
+            quality: "BluRay-2160p".into(),
+            size_bytes: 1,
+            size_display: String::new(),
+            modified_secs: None,
+            is_special: false,
+        }
+    }
+
+    #[test]
+    fn requirement_targets_use_actual_capabilities_and_preserve_protections() {
+        let cfg = crate::models::config::Config {
+            media_requirements_enabled: true,
+            ..Default::default()
+        };
+        let policy = Policy::from_config(&cfg);
+        let mut files: Vec<_> = (1..=8).map(requirement_file).collect();
+        // Any overlapping multi-episode file protects the whole span.
+        let mut span = requirement_file(7);
+        span.episode_last = 8;
+        files.push(span);
+        let facts = |resolution, subtitles_satisfied| Observed {
+            resolution,
+            subtitles_satisfied,
+        };
+        let observations = HashMap::from([
+            (1, facts(Resolution::R1080p, true)), // complete despite legacy source quality
+            (2, facts(Resolution::R1080p, false)), // subtitle deficit
+            (3, facts(Resolution::R720p, true)),  // actual resolution deficit
+            (4, facts(Resolution::Unknown, false)),
+            (5, facts(Resolution::R720p, false)),
+            (6, facts(Resolution::R720p, false)),
+            (7, facts(Resolution::R720p, false)),
+            (8, facts(Resolution::R720p, false)),
+        ]);
+        let tag = |ep, manual_override, state: &str| EpisodeQualityTag {
+            episode_number: ep,
+            quality_tag: String::new(),
+            release_title: String::new(),
+            release_group: String::new(),
+            state: state.into(),
+            source: String::new(),
+            resolution: String::new(),
+            is_remux: false,
+            is_bdmv: false,
+            web_kind: String::new(),
+            classification_confidence: 0.0,
+            needs_review: false,
+            manual_override,
+            classification_evidence: String::new(),
+            classification_attempted_at: None,
+        };
+        let tags = HashMap::from([(5, tag(5, true, "imported")), (6, tag(6, false, "grabbed"))]);
+        let targets = build_requirements_upgrade_targets(
+            &files,
+            &(1..=8).collect::<Vec<_>>(),
+            &tags,
+            &policy,
+            &observations,
+        );
+        let episodes: Vec<_> = targets
+            .iter()
+            .map(|(target, existing)| {
+                if let SearchTarget::Episode(ep) = target {
+                    assert_eq!(existing.resolution, observations[ep].resolution);
+                    *ep
+                } else {
+                    panic!("expected episode")
+                }
+            })
+            .collect();
+        assert_eq!(episodes, [2, 3]);
+        assert!(
+            build_requirements_upgrade_targets(&files, &[2], &tags, &policy, &HashMap::new())
+                .is_empty()
+        );
+    }
 
     fn detail_with(format: &str, episodes: Option<i32>) -> AnimeDetail {
         AnimeDetail {

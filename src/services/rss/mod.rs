@@ -515,7 +515,7 @@ async fn fetch_all_sources(
     //    want indexer-RSS / direct-RSS feeds polled). Master flag
     //    has already been honored at the sync_once_inner top.
     if nyaa_rss_enabled(cfg) {
-        match fetch_feeds(cfg.allow_non_english, has_music_series).await {
+        match fetch_feeds(auto_search::allows_non_english(cfg), has_music_series).await {
             Ok(nyaa_items) => items.extend(nyaa_items),
             Err(err) => {
                 logger::warn(
@@ -740,11 +740,24 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         i64,
         HashMap<i32, crate::models::episode_tags::EpisodeQualityTag>,
     > = HashMap::new();
+    let mut observations: HashMap<
+        i64,
+        HashMap<i32, crate::services::media_requirements::Observed>,
+    > = HashMap::new();
 
     // Upgrade policy for the on-disk gate: quality cutoff, proper
     // policy, and the Custom Format cutoff / increment, read once per
     // sync. `now_secs` anchors the RSS revision window.
     let policy = source::UpgradePolicy::from_config(&cfg);
+    let requirements = crate::services::media_requirements::Policy::from_config(&cfg);
+    let pt_indexer_ids: HashSet<i64> = state
+        .indexers
+        .read()
+        .await
+        .iter()
+        .filter(|indexer| indexer.is_private_tracker())
+        .map(|indexer| indexer.id())
+        .collect();
     let now_secs = chrono::Utc::now().timestamp();
 
     let mut items_seen = 0;
@@ -1106,6 +1119,16 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                 .unwrap_or_default();
             quality_tags_cache.entry(found.series.id).or_insert(tags)
         };
+        if requirements.enabled && !observations.contains_key(&found.series.id) {
+            let observed = crate::services::media_requirements::observe_files(
+                &state.db,
+                &cfg,
+                &found.series.folder_name,
+                disk_files,
+            )
+            .await;
+            observations.insert(found.series.id, observed);
+        }
         // Classify the incoming release once per item using the full
         // pre-disk pipeline (filename + group-map + temporal +
         // description-body-when-ambiguous). Stashed on
@@ -1147,20 +1170,43 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             &no_seadex_hashes,
         );
         let gate = UpgradeGate {
-            series_allows_upgrades: found.series.allow_upgrades,
+            series_allows_upgrades: found.series.allow_upgrades
+                && (!requirements.enabled
+                    || found.series.allow_pt_upgrades
+                    || !matches!(&item.source, RssSource::Indexer { id, .. } if pt_indexer_ids.contains(id))),
             policy: &policy,
             cfs: &cfs,
             now_secs,
             incoming_revision: media::parse_release_revision(&item.title),
             incoming_group: &item.group,
             incoming_cf_score,
+            requirements: Some(&requirements),
+            observed: observations.get(&found.series.id),
+            incoming_title: &item.title,
+        };
+        // A pack also carries unmonitored existing episodes. Their targets
+        // remain protected even when another covered episode is monitored.
+        let evaluated_eps = if requirements.enabled {
+            actionable_eps
+                .iter()
+                .copied()
+                .chain(
+                    found
+                        .resolved_eps
+                        .iter()
+                        .copied()
+                        .filter(|ep| disk_files.iter().any(|file| file.holds(*ep))),
+                )
+                .collect()
+        } else {
+            actionable_eps
         };
         let decision = evaluate_candidate(
             &found.series,
             &item,
             &incoming_classification,
             disk_files,
-            &actionable_eps,
+            &evaluated_eps,
             &gate,
             qtags,
         );
@@ -1269,12 +1315,56 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         .await;
     }
 
+    // The acquisition floor uses the same complete CF context as scoring,
+    // including SeaDex hashes; source/CF upgrade cutoffs remain separate.
+    let mut eligible_pending = Vec::with_capacity(pending.len());
+    for candidate in pending {
+        let hashes = seadex_hashes
+            .get(&candidate.found.series.anilist_id)
+            .unwrap_or(&no_seadex_hashes);
+        let cf_score = crate::services::custom_formats::total_cf_score_for_release(
+            &cfs,
+            &candidate.classification,
+            &candidate.item.title,
+            &candidate.item.group,
+            0,
+            &candidate.item.info_hash,
+            hashes,
+        );
+        if cf_score < cfg.custom_format_minimum_score {
+            skipped += 1;
+            let (source, source_id) = source_dedup_key(&candidate.item.source);
+            let _ = rss::record_decision(
+                &state.db,
+                rss::DecisionRecord {
+                    item_key: &candidate.item_key,
+                    title: &candidate.item.title,
+                    link: &candidate.item.link,
+                    series_id: Some(candidate.found.series.id),
+                    series_title: &candidate.found.series.title,
+                    group_name: &candidate.item.group,
+                    is_batch: candidate.item.is_batch,
+                    decision: "rejected",
+                    reason: "Release is below the Custom Format minimum score",
+                    source,
+                    source_id,
+                },
+            )
+            .await;
+        } else {
+            eligible_pending.push(candidate);
+        }
+    }
+    let pending = eligible_pending;
+
     let mut bucket_best: HashMap<String, usize> = HashMap::new();
     for (idx, cand) in pending.iter().enumerate() {
         let bucket = logical_bucket_key(cand);
         match bucket_best.get(&bucket).copied() {
             Some(prev_idx) => {
-                if compare_candidates(cand, &pending[prev_idx]) == Ordering::Greater {
+                if compare_requirement_candidates(cand, &pending[prev_idx], &cfg)
+                    == Ordering::Greater
+                {
                     bucket_best.insert(bucket, idx);
                 }
             }
@@ -1898,6 +1988,26 @@ fn compare_candidates(a: &PendingCandidate, b: &PendingCandidate) -> Ordering {
         .then_with(|| a.item.title.cmp(&b.item.title))
 }
 
+fn compare_requirement_candidates(
+    a: &PendingCandidate,
+    b: &PendingCandidate,
+    cfg: &config::Config,
+) -> Ordering {
+    if cfg.media_requirements_enabled {
+        let priority = |candidate: &PendingCandidate| {
+            auto_search::requirements_resolution_priority(
+                cfg,
+                candidate.classification.resolution.as_str(),
+            )
+        };
+        priority(b)
+            .cmp(&priority(a))
+            .then_with(|| compare_candidates(a, b))
+    } else {
+        compare_candidates(a, b)
+    }
+}
+
 /// The within-sweep bucket: every release that delivers the same
 /// logical item competes for one grab, a `v1` and its `v2` included
 /// (`compare_candidates` prefers the higher revision at equal score).
@@ -1949,13 +2059,21 @@ async fn score_candidate(
     seadex: SeaDexScoring<'_>,
 ) -> i32 {
     let preferred_source = Source::from_str(&cfg.preferred_source);
-    let preferred_resolution = Resolution::from_str(&cfg.preferred_resolution);
+    let preferred_resolution = Resolution::from_str(if cfg.media_requirements_enabled {
+        &cfg.target_resolution
+    } else {
+        &cfg.preferred_resolution
+    });
     // Scoring uses the coarse Source rank, so collapse any BluRay sub-tier
     // (bluray_remux/bluray_bdmv) back to plain BluRay here. Upgrade-detection
     // and anywhere else that needs the sub-tier already went through
     // `parse_cutoff_source` at their own call sites.
     let (cutoff_source, _, _) = source::parse_cutoff_source(&cfg.cutoff_source);
-    let cutoff_resolution = Resolution::from_str(&cfg.cutoff_resolution);
+    let cutoff_resolution = if cfg.media_requirements_enabled {
+        preferred_resolution
+    } else {
+        Resolution::from_str(&cfg.cutoff_resolution)
+    };
     let finished_mode = quality::FinishedSeriesMode::from_str(&cfg.finished_series_quality);
 
     let classification = source::classify_release(
@@ -2087,6 +2205,9 @@ pub(crate) struct UpgradeGate<'a> {
     pub incoming_revision: media::ReleaseRevision,
     pub incoming_group: &'a str,
     pub incoming_cf_score: i32,
+    pub requirements: Option<&'a crate::services::media_requirements::Policy>,
+    pub observed: Option<&'a HashMap<i32, crate::services::media_requirements::Observed>>,
+    pub incoming_title: &'a str,
 }
 
 fn evaluate_candidate(
@@ -2098,9 +2219,21 @@ fn evaluate_candidate(
     gate: &UpgradeGate<'_>,
     quality_tags: &HashMap<i32, crate::models::episode_tags::EpisodeQualityTag>,
 ) -> CandidateDecision {
+    if let Some(policy) = gate.requirements.filter(|policy| policy.enabled)
+        && incoming.resolution != Resolution::Unknown
+        && incoming.resolution.rank() < policy.minimum_resolution.rank()
+    {
+        return CandidateDecision {
+            reject_reason: Some("Release is below the configured minimum resolution".to_string()),
+            new_episode_count: 0,
+            is_upgrade: false,
+        };
+    }
     let existing_ep_numbers: HashSet<i32> = disk_files.iter().flat_map(|f| f.episodes()).collect();
 
-    if item.is_batch {
+    if item.is_batch
+        || (gate.requirements.is_some_and(|policy| policy.enabled) && parsed_eps.len() > 1)
+    {
         if !parsed_eps.is_empty() {
             // Pack-level decision: accept only when every episode in
             // the pack's *covered* range is either missing from disk
@@ -2296,6 +2429,29 @@ fn episode_is_upgradeable(
     let tag = quality_tags.get(ep);
     if tag.is_some_and(|t| t.manual_override) {
         return Err(source::UpgradeRejection::Pinned);
+    }
+    if let Some(requirements) = gate.requirements.filter(|policy| policy.enabled) {
+        let existing_classification = auto_search::resolve_existing_classification(existing, tag);
+        if incoming.is_bdmv && !existing_classification.is_bdmv {
+            return Err(source::UpgradeRejection::BdmvCrossing);
+        }
+        if tag.is_some_and(|tag| tag.state == "grabbed") {
+            return Err(source::UpgradeRejection::RequirementsNoImprovement);
+        }
+        if tag
+            .map(|tag| tag.release_title.as_str())
+            .filter(|title| !title.is_empty())
+            .unwrap_or(&existing.filename)
+            .trim()
+            .eq_ignore_ascii_case(gate.incoming_title.trim())
+        {
+            return Err(source::UpgradeRejection::RequirementsNoImprovement);
+        }
+        let observed = gate
+            .observed
+            .and_then(|files| files.get(ep))
+            .ok_or(source::UpgradeRejection::RequirementsUnverified)?;
+        return requirements.judge_candidate(observed, incoming, gate.incoming_title);
     }
     let existing_classification = auto_search::resolve_existing_classification(existing, tag);
     // A file with no tag row has no release title: no group (so no

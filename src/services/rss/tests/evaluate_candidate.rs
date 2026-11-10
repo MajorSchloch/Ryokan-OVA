@@ -96,6 +96,9 @@ fn gate<'a>(policy: &'a source::UpgradePolicy, item: &'a RssItem) -> UpgradeGate
         incoming_revision: media::parse_release_revision(&item.title),
         incoming_group: &item.group,
         incoming_cf_score: 0,
+        requirements: None,
+        observed: None,
+        incoming_title: &item.title,
     }
 }
 
@@ -453,4 +456,357 @@ fn v2_for_an_old_file_is_rejected_through_rss() {
     );
     let reason = decision.reject_reason.expect("rejected");
     assert!(reason.contains("older than 7 days"), "{reason}");
+}
+
+// Requirements use observed local files. Release titles remain provisional.
+fn requirements_policy(
+    minimum: &str,
+    target: &str,
+    languages: &str,
+) -> crate::services::media_requirements::Policy {
+    crate::services::media_requirements::Policy::from_config(&crate::models::config::Config {
+        media_requirements_enabled: true,
+        minimum_resolution: minimum.into(),
+        target_resolution: target.into(),
+        required_subtitle_languages: languages.into(),
+        minimum_subtitle_check: false,
+        target_subtitle_check: true,
+        ..Default::default()
+    })
+}
+
+fn observation(
+    resolution: Resolution,
+    subtitles_satisfied: bool,
+) -> crate::services::media_requirements::Observed {
+    crate::services::media_requirements::Observed {
+        resolution,
+        subtitles_satisfied,
+    }
+}
+
+#[test]
+fn requirements_target_stops_source_score_and_revision_upgrades_through_rss() {
+    let policy = source::UpgradePolicy {
+        format_cutoff_score: 1000,
+        ..bluray_policy()
+    };
+    let requirements = requirements_policy("720", "1080", "es");
+    let observed = HashMap::from([(1, observation(Resolution::R1080p, true))]);
+    for kind in ["source", "score", "revision"] {
+        let (found, mut item, mut incoming, disk, parsed_eps, tags) = v2_fixture("Group", "Group");
+        if kind == "source" {
+            item.title = "[Group] Test Series - 01 (BD 1080p).mkv".into();
+            incoming.source = Source::BluRay;
+        } else if kind == "score" {
+            item.title = "[Preferred] Test Series - 01 (1080p).mkv".into();
+        }
+        let mut upgrade_gate = gate(&policy, &item);
+        if kind == "score" {
+            upgrade_gate.incoming_cf_score = 100;
+        }
+        assert!(
+            evaluate_candidate(
+                &found,
+                &item,
+                &incoming,
+                &disk,
+                &parsed_eps,
+                &upgrade_gate,
+                &tags
+            )
+            .reject_reason
+            .is_none(),
+            "the {kind} fixture must be eligible under the legacy upgrade policy"
+        );
+        upgrade_gate.requirements = Some(&requirements);
+        upgrade_gate.observed = Some(&observed);
+        let decision = evaluate_candidate(
+            &found,
+            &item,
+            &incoming,
+            &disk,
+            &parsed_eps,
+            &upgrade_gate,
+            &tags,
+        );
+        assert_eq!(
+            decision.reject_reason.as_deref(),
+            Some("Episode is already on disk: Existing file meets the good enough target"),
+            "{kind} must not bypass the observed target"
+        );
+        assert!(!decision.is_upgrade);
+        assert_eq!(decision.new_episode_count, 0);
+    }
+}
+
+#[test]
+fn requirements_allows_provisional_same_resolution_subtitle_recovery_through_rss() {
+    let policy = bluray_policy();
+    let requirements = requirements_policy("1080", "2160", "de,es");
+    let observed = HashMap::from([(1, observation(Resolution::R1080p, false))]);
+    let found = series("RELEASING");
+    let item = item_with("[Other] Test Series - 01 (1080p) [Multi-Subs].mkv", false);
+    let incoming = classification(Source::Web, Resolution::R1080p, false, false);
+    let disk = vec![disk_file(1, "WEB-1080p")];
+    let parsed_eps = HashSet::from([1]);
+    let tags = HashMap::from([web_tag(1)]);
+    let mut upgrade_gate = gate(&policy, &item);
+    upgrade_gate.requirements = Some(&requirements);
+    upgrade_gate.observed = Some(&observed);
+    let decision = evaluate_candidate(
+        &found,
+        &item,
+        &incoming,
+        &disk,
+        &parsed_eps,
+        &upgrade_gate,
+        &tags,
+    );
+    assert_eq!(decision.reject_reason, None);
+    assert!(decision.is_upgrade);
+    assert_eq!(decision.new_episode_count, 1);
+    assert_eq!(requirements.required_languages, ["de", "es"]);
+    assert_eq!(requirements.target_resolution, Resolution::R2160p);
+    assert!(!requirements.target_met(&observed[&1]));
+    assert!(
+        !observed[&1].subtitles_satisfied,
+        "a title cannot verify local subtitle tracks"
+    );
+}
+
+#[test]
+fn requirements_refuses_rss_replacement_without_an_observed_file() {
+    let policy = bluray_policy();
+    let requirements = requirements_policy("720", "1080", "es");
+    let empty = HashMap::new();
+    let unknown = HashMap::from([(1, observation(Resolution::Unknown, true))]);
+    let (found, item, incoming, disk, parsed_eps, tags) = v2_fixture("Group", "Group");
+    for observed in [None, Some(&empty), Some(&unknown)] {
+        let mut upgrade_gate = gate(&policy, &item);
+        upgrade_gate.requirements = Some(&requirements);
+        upgrade_gate.observed = observed;
+        let decision = evaluate_candidate(
+            &found,
+            &item,
+            &incoming,
+            &disk,
+            &parsed_eps,
+            &upgrade_gate,
+            &tags,
+        );
+        assert_eq!(
+            decision.reject_reason.as_deref(),
+            Some("Episode is already on disk: Existing file requirements could not be verified")
+        );
+        assert!(!decision.is_upgrade);
+    }
+}
+
+#[test]
+fn requirements_preserves_pins_active_downloads_and_the_series_upgrade_switch() {
+    let policy = bluray_policy();
+    let requirements = requirements_policy("720", "1080", "es");
+    let observed = HashMap::from([(1, observation(Resolution::R720p, false))]);
+    let (found, item, incoming, disk, parsed_eps, base_tags) = v2_fixture("Group", "Group");
+    for (pinned, grabbed, allowed, expected) in [
+        (
+            true,
+            false,
+            true,
+            "Episode is already on disk: Existing file is pinned",
+        ),
+        (
+            false,
+            true,
+            true,
+            "Episode is already on disk: Release does not improve an unmet requirement",
+        ),
+        (
+            false,
+            false,
+            false,
+            "Episode is already on disk: Upgrades are turned off for this series",
+        ),
+    ] {
+        let mut tags = base_tags.clone();
+        let tag = tags.get_mut(&1).unwrap();
+        tag.manual_override = pinned;
+        if grabbed {
+            tag.state = "grabbed".into();
+        }
+        let mut upgrade_gate = gate(&policy, &item);
+        upgrade_gate.requirements = Some(&requirements);
+        upgrade_gate.observed = Some(&observed);
+        upgrade_gate.series_allows_upgrades = allowed;
+        let decision = evaluate_candidate(
+            &found,
+            &item,
+            &incoming,
+            &disk,
+            &parsed_eps,
+            &upgrade_gate,
+            &tags,
+        );
+        assert_eq!(decision.reject_reason.as_deref(), Some(expected));
+        assert_eq!(decision.new_episode_count, 0);
+        assert!(!decision.is_upgrade);
+    }
+}
+
+#[test]
+fn requirements_batch_keeps_an_episode_which_already_meets_the_target() {
+    let policy = bluray_policy();
+    let requirements = requirements_policy("720", "1080", "es");
+    let observed = HashMap::from([
+        (1, observation(Resolution::R1080p, true)),
+        (2, observation(Resolution::R720p, false)),
+    ]);
+    let found = series("FINISHED");
+    let item = item_with("[Group] Test Series 01-03 (BD 1080p)", true);
+    let incoming = classification(Source::BluRay, Resolution::R1080p, false, false);
+    let disk = vec![disk_file(1, "WEB-1080p"), disk_file(2, "WEB-720p")];
+    let parsed_eps = HashSet::from([1, 2, 3]);
+    let tags = HashMap::from([web_tag(1), web_tag(2)]);
+    let mut upgrade_gate = gate(&policy, &item);
+    upgrade_gate.requirements = Some(&requirements);
+    upgrade_gate.observed = Some(&observed);
+    let decision = evaluate_candidate(
+        &found,
+        &item,
+        &incoming,
+        &disk,
+        &parsed_eps,
+        &upgrade_gate,
+        &tags,
+    );
+    assert!(
+        decision
+            .reject_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("overwrite 1 non-upgradeable")),
+        "one completed-target episode must refuse the whole pack: {:?}",
+        decision.reject_reason
+    );
+    assert_eq!(decision.new_episode_count, 0);
+    assert!(!decision.is_upgrade);
+}
+
+#[test]
+fn requirements_minimum_resolution_applies_to_missing_rss_episodes_too() {
+    let policy = bluray_policy();
+    let requirements = requirements_policy("1080", "2160", "de");
+    let found = series("RELEASING");
+    let item = item_with("[Group] Test Series - 02 (720p)", false);
+    let incoming = classification(Source::Web, Resolution::R720p, false, false);
+    let parsed_eps = HashSet::from([2]);
+    let mut upgrade_gate = gate(&policy, &item);
+    upgrade_gate.requirements = Some(&requirements);
+    let decision = evaluate_candidate(
+        &found,
+        &item,
+        &incoming,
+        &[],
+        &parsed_eps,
+        &upgrade_gate,
+        &HashMap::new(),
+    );
+    assert_eq!(
+        decision.reject_reason.as_deref(),
+        Some("Release is below the configured minimum resolution")
+    );
+    assert_eq!(decision.new_episode_count, 0);
+    assert!(!decision.is_upgrade);
+}
+
+#[test]
+fn requirements_numeric_multi_episode_release_keeps_target_met_or_pinned_episode() {
+    let policy = bluray_policy();
+    let requirements = requirements_policy("720", "1080", "es");
+    let found = series("RELEASING");
+    let item = item_with("[Group] Test Series S01E01-E02 (1080p)", false);
+    let incoming = classification(Source::Web, Resolution::R1080p, false, false);
+    let disk = vec![disk_file(1, "WEB-1080p")];
+    let parsed_eps = HashSet::from([1, 2]);
+    assert!(
+        !item.is_batch,
+        "numeric multi-episode titles need the same overwrite safety as packs"
+    );
+    for pinned in [false, true] {
+        let observed = HashMap::from([(1, observation(Resolution::R1080p, !pinned))]);
+        let (episode, mut tag) = web_tag(1);
+        tag.manual_override = pinned;
+        let tags = HashMap::from([(episode, tag)]);
+        let mut upgrade_gate = gate(&policy, &item);
+        upgrade_gate.requirements = Some(&requirements);
+        upgrade_gate.observed = Some(&observed);
+        let decision = evaluate_candidate(
+            &found,
+            &item,
+            &incoming,
+            &disk,
+            &parsed_eps,
+            &upgrade_gate,
+            &tags,
+        );
+        assert!(
+            decision
+                .reject_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("overwrite 1 non-upgradeable")),
+            "missing E2 must not authorize replacement of protected E1 (pinned={pinned}): {:?}",
+            decision.reject_reason
+        );
+        assert_eq!(decision.new_episode_count, 0);
+        assert!(!decision.is_upgrade);
+    }
+}
+
+#[test]
+fn requirements_subtitle_recovery_does_not_cross_into_bdmv_through_rss() {
+    let policy = bluray_policy();
+    let requirements = requirements_policy("720", "1080", "de");
+    let observed = HashMap::from([(1, observation(Resolution::R1080p, false))]);
+    let found = series("RELEASING");
+    let item = item_with("[Other] Test Series - 01 (BD 1080p Multi-Subs)", false);
+    let disk = vec![disk_file(1, "WEB-1080p")];
+    let parsed_eps = HashSet::from([1]);
+    let tags = HashMap::from([web_tag(1)]);
+    let mut upgrade_gate = gate(&policy, &item);
+    upgrade_gate.requirements = Some(&requirements);
+    upgrade_gate.observed = Some(&observed);
+    let incoming = classification(Source::BluRay, Resolution::R1080p, false, false);
+    let eligible = evaluate_candidate(
+        &found,
+        &item,
+        &incoming,
+        &disk,
+        &parsed_eps,
+        &upgrade_gate,
+        &tags,
+    );
+    assert_eq!(
+        eligible.reject_reason, None,
+        "the ordinary encode is a provisional subtitle recovery"
+    );
+    let incoming = classification(Source::BluRay, Resolution::R1080p, false, true);
+    let decision = evaluate_candidate(
+        &found,
+        &item,
+        &incoming,
+        &disk,
+        &parsed_eps,
+        &upgrade_gate,
+        &tags,
+    );
+    assert!(
+        decision
+            .reject_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("BDMV")),
+        "the same subtitle deficit must not allow a BDMV crossing: {:?}",
+        decision.reject_reason
+    );
+    assert_eq!(decision.new_episode_count, 0);
+    assert!(!decision.is_upgrade);
 }
