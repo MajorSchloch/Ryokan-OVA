@@ -520,8 +520,8 @@ function renderEpisodeMediaInfo(section, data) {
         track.forced ? 'Forced' : '', track.signs_only ? 'Signs / songs only' : '',
         track.valid === false ? 'Invalid or unreadable' : ''].filter(Boolean).join(' · ');
     let html = '<h4>File information</h4>';
-    if (!info.subtitles.length) html += '<p class="ep-media-verdict ep-media-verdict-missing">No subtitles found</p>';
-    else if (policy.enabled) html += '<p class="ep-media-verdict ' + (policy.satisfied ? 'ep-media-verdict-present' : 'ep-media-verdict-missing') + '">' + (policy.satisfied ? 'Required subtitles present' : 'Required subtitles missing') + '</p>';
+    if (!info.subtitles.length) html += '<p class="ep-media-verdict ep-media-verdict-missing">No selectable subtitles found</p>';
+    else if (policy.enabled) html += '<p class="ep-media-verdict ' + (policy.satisfied ? 'ep-media-verdict-present' : 'ep-media-verdict-missing') + '">' + (policy.satisfied ? 'Required selectable subtitles present' : 'Required selectable subtitles missing') + '</p>';
     html += row('Container', info.container || 'Unknown');
     if (info.duration_seconds != null) html += row('Duration', Math.round(info.duration_seconds / 60) + ' min');
     info.video.forEach(track => {
@@ -529,13 +529,13 @@ function renderEpisodeMediaInfo(section, data) {
             track.bit_depth ? track.bit_depth + '-bit' : ''].filter(Boolean).join(' · '));
     });
     html += row('Audio', info.audio.length ? info.audio.map(trackLabel).join(' / ') : 'No audio tracks found');
-    html += row('Subtitles', info.subtitles.length ? info.subtitles.map(trackLabel).join(' / ') : 'No subtitle tracks or matching files found');
+    html += row('Subtitles', info.subtitles.length ? info.subtitles.map(trackLabel).join(' / ') : 'No selectable subtitle tracks or matching files found');
     if (policy.enabled) {
-        html += row('Subtitle check', policy.satisfied ? 'Required languages present' : 'Does not meet subtitle requirements');
+        html += row('Subtitle check', policy.satisfied ? 'Required selectable subtitle languages present' : 'Does not meet selectable subtitle requirements');
         html += row(policy.match_mode === 'any' ? 'Requires any' : 'Requires all', policy.required_languages.map(mediaLanguageLabel).join(', '));
         if (policy.reasons.length) html += row('Details', policy.reasons.join(' '));
     } else html += row('Subtitle check', 'No required languages configured');
-    html += '<p class="form-hint">Track languages come from file labels. These labels cannot prove translation quality or detect burned-in subtitles.</p>';
+    html += '<p class="form-hint">Subtitle requirements apply to selectable embedded tracks or matching external subtitle files. Track languages come from file labels. These labels cannot prove translation quality or detect burned-in subtitles.</p>';
     if (info.warnings.length) html += row('Notes', info.warnings.join(' '));
     section.innerHTML = html;
 }
