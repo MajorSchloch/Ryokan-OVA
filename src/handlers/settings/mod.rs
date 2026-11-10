@@ -576,6 +576,16 @@ pub struct QualityForm {
     required_subtitle_languages: Option<String>,
     #[serde(default)]
     subtitle_language_match: Option<String>,
+    #[serde(default)]
+    media_requirements_enabled: Option<String>,
+    #[serde(default)]
+    minimum_resolution: Option<String>,
+    #[serde(default)]
+    target_resolution: Option<String>,
+    #[serde(default)]
+    minimum_subtitle_check: Option<String>,
+    #[serde(default)]
+    target_subtitle_check: Option<String>,
 }
 
 #[derive(Template)]
@@ -1453,6 +1463,26 @@ pub async fn settings_submit(
         } else {
             existing_cfg.as_ref().map(|c| c.prefer_subs).unwrap_or(true)
         },
+        media_requirements_enabled: existing_cfg
+            .as_ref()
+            .map(|c| c.media_requirements_enabled)
+            .unwrap_or(false),
+        minimum_resolution: existing_cfg
+            .as_ref()
+            .map(|c| c.minimum_resolution.clone())
+            .unwrap_or_else(|| "720".into()),
+        target_resolution: existing_cfg
+            .as_ref()
+            .map(|c| c.target_resolution.clone())
+            .unwrap_or_else(|| "1080".into()),
+        minimum_subtitle_check: existing_cfg
+            .as_ref()
+            .map(|c| c.minimum_subtitle_check)
+            .unwrap_or(true),
+        target_subtitle_check: existing_cfg
+            .as_ref()
+            .map(|c| c.target_subtitle_check)
+            .unwrap_or(true),
         required_subtitle_languages: existing_cfg
             .as_ref()
             .map(|c| c.required_subtitle_languages.clone())
@@ -2310,7 +2340,23 @@ pub async fn settings_quality_submit(
             .await;
         }
     };
+    let requirements = match crate::services::media_requirements::settings_values(
+        &existing_cfg,
+        form.media_requirements_enabled.as_deref(),
+        form.minimum_resolution.as_deref(),
+        form.target_resolution.as_deref(),
+        form.minimum_subtitle_check.as_deref(),
+        form.target_subtitle_check.as_deref(),
+    ) {
+        Ok(value) => value,
+        Err(error) => return quality_response(&state, None, None, Some(error), is_htmx).await,
+    };
     let cfg = config::Config {
+        media_requirements_enabled: requirements.enabled,
+        minimum_resolution: requirements.minimum_resolution,
+        target_resolution: requirements.target_resolution,
+        minimum_subtitle_check: requirements.minimum_subtitle_check,
+        target_subtitle_check: requirements.target_subtitle_check,
         preferred_groups: form.preferred_groups.trim().to_string(),
         blocked_groups: form.blocked_groups.trim().to_string(),
         preferred_source: validate_source(&form.preferred_source, "web"),
