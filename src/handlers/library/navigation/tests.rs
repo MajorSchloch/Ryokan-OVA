@@ -385,11 +385,82 @@ async fn navigation_browser_preview() {
             0,
         ),
         (600, "BOCCHI THE ROCK!", "BOCCHI THE ROCK!", "TV", 12, 12),
+        (
+            800,
+            "Delicious in Dungeon",
+            "Delicious in Dungeon",
+            "TV",
+            24,
+            0,
+        ),
+        (
+            900,
+            "Delicious in Dungeon Season 2",
+            "Delicious in Dungeon",
+            "TV",
+            12,
+            0,
+        ),
+        (
+            1000,
+            "A partially monitored season",
+            "Partial monitoring",
+            "TV",
+            6,
+            2,
+        ),
+        (
+            1100,
+            "A monitored movie",
+            "Partial monitoring",
+            "MOVIE",
+            1,
+            0,
+        ),
     ] {
         let row = release(&db, id, title, root).await;
         let folder = format!("{root}/{title}");
-        sqlx::query("UPDATE series SET title_english=?,folder_name=?,format=?,episodes=?,status='FINISHED',cover_url=? WHERE id=?")
+        sqlx::query("UPDATE series SET title_english=?,folder_name=?,format=?,episodes=?,status='FINISHED',monitor_mode='all',added_at='2026-11-08 12:00:00',cover_url=? WHERE id=?")
             .bind(title).bind(&folder).bind(kind).bind(episodes).bind(format!("/preview/poster/{id}")).bind(row.id).execute(&db).await.unwrap();
+        let wanted = if id == 800 {
+            0
+        } else if id == 1000 {
+            4
+        } else {
+            episodes
+        };
+        let states = (1..=episodes)
+            .map(
+                |episode_number| crate::models::monitoring::EpisodeMonitorState {
+                    episode_number,
+                    monitored: episode_number <= wanted,
+                },
+            )
+            .collect::<Vec<_>>();
+        crate::models::monitoring::replace_series_states(&db, row.id, &states)
+            .await
+            .unwrap();
+        if id == 800 {
+            sqlx::query("UPDATE series SET monitor_mode='none' WHERE id=?")
+                .bind(row.id)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        if id == 900 {
+            sqlx::query("UPDATE series SET status='NOT_YET_RELEASED',season_year=2099 WHERE id=?")
+                .bind(row.id)
+                .execute(&db)
+                .await
+                .unwrap();
+            let detail = anilist::parse_media_node(&json!({"id":id,"type":"ANIME","title":{"english":title},"format":kind,"episodes":episodes,"status":"NOT_YET_RELEASED","seasonYear":2099,"startDate":{"year":2099,"month":6},"coverImage":{"large":format!("/preview/poster/{id}")}})).unwrap();
+            metadata_cache::upsert_provider(&db, id, None, &detail)
+                .await
+                .unwrap();
+        }
+        if id == 1000 {
+            sqlx::query("INSERT INTO episode_quality_tags(series_id,episode_number,state) VALUES(?,3,'grabbed')").bind(row.id).execute(&db).await.unwrap();
+        }
         std::fs::create_dir_all(temp.path().join(&folder)).unwrap();
         for ep in 1..=have {
             std::fs::write(
@@ -438,9 +509,9 @@ async fn navigation_browser_preview() {
         .merge(super::super::detail::routes())
         .nest_service("/static", tower_http::services::ServeDir::new("static"))
         .with_state(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:18979")
-        .await
-        .unwrap();
-    println!("Franchise fixture ready at http://127.0.0.1:18979");
+    let port = std::env::var("RYOKAN_NAVIGATION_PREVIEW_PORT").unwrap_or_else(|_| "18979".into());
+    let address = format!("127.0.0.1:{port}");
+    let listener = tokio::net::TcpListener::bind(&address).await.unwrap();
+    println!("Franchise fixture ready at http://{address}");
     axum::serve(listener, router).await.unwrap();
 }

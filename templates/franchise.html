@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %} - {{ title }}{% endblock %}
 {% block content %}
+<a class="btn btn-secondary btn-sm franchise-back" href="/?individual=0">&larr; Back to library</a>
 <nav class="franchise-breadcrumb" aria-label="Breadcrumb"><a href="/?individual=0">Anime Library</a><span aria-hidden="true">/</span><span>{{ title }}</span></nav>
 <section class="franchise-heading" aria-labelledby="franchise-title">
     <div class="franchise-heading-cover">{% if !cover_url.is_empty() %}<img src="{{ cover_url }}" alt="">{% else %}<div class="series-cover-placeholder">No Image</div>{% endif %}</div>
@@ -9,7 +10,11 @@
         <h2 id="franchise-title">{{ title }}</h2>
         <p>{{ tracked }} release{% if tracked != 1 %}s{% endif %} in your library &middot; {% if following %}Following future releases{% else %}Not following future releases{% endif %}</p>
         <p class="franchise-completion">{{ progress.label }}</p>
-        <div class="card-progress card-progress-{{ progress.state }}" title="{{ progress.label }}"><div class="card-progress-fill" style="width: {{ progress.pct }}%"></div></div>
+        {% let availability = &progress %}
+        {% include "partials/library/availability_bar.html" %}
+        {% include "partials/library/availability_legend.html" %}
+        <p class="form-hint">Availability follows episode monitoring. Future and unmonitored episodes do not count as missing.</p>
+        {% if !next_airing.is_empty() %}<p class="franchise-next-airing"><strong>Next known airing:</strong> {{ next_airing }}</p>{% endif %}
         <div class="detail-actions">
             {% if seed > 0 %}<a class="btn btn-primary" href="/library/groups/{{ seed }}/preview">{% if following %}Manage releases &amp; follow{% else %}Choose releases &amp; follow{% endif %}</a>{% endif %}
         </div>
@@ -27,7 +32,16 @@
                 <div class="series-meta">{% if !release.format.is_empty() %}<span class="tag tag-res">{{ release.format }}</span>{% endif %}<span class="tag">{{ release.date }}</span></div>
                 {% if !release.status.is_empty() %}<p>{{ release.status }}</p>{% endif %}
                 <p class="franchise-release-membership">{% if release.in_library %}In library{% if !release.included %} &middot; Outside follow selection{% endif %}{% else %}Available to add{% endif %}</p>
+                <div class="release-monitoring-badges"><span class="chip">{{ release.monitoring_label }}</span><span class="chip chip-dim">{{ release.follow_label }}</span></div>
                 <p class="form-hint">{{ release.files }}</p>
+                {% if release.in_library %}
+                {% let availability = &release.progress %}
+                <p class="release-availability-summary">{{ release.progress.label }}</p>
+                {% include "partials/library/availability_bar.html" %}
+                {% include "partials/library/availability_legend.html" %}
+                {% endif %}
+                {% if !release.next_airing.is_empty() && release.next_airing.as_str() != "Finished" %}<p class="card-date"><span>Next airing</span> {{ release.next_airing }}</p>{% endif %}
+                {% if !release.added_date.is_empty() %}<p class="card-date"><span>Added</span> {{ release.added_date }}</p>{% endif %}
             </div>
         </a>
         {% endfor %}

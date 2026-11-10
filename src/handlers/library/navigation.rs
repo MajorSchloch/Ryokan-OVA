@@ -1,6 +1,6 @@
 //! Franchise navigation is a cached projection. Browsing never adds releases,
 //! follows, or paths; storage membership is the saved grouping boundary.
-use super::{CardProgress, groups, inventory, reconcile::populate_series_cover_urls};
+use super::{CardProgress, availability, groups, reconcile::populate_series_cover_urls};
 use crate::{
     AppState,
     models::{config, release_follows, series},
@@ -25,6 +25,8 @@ pub(super) struct FranchiseCard {
     pub progress: CardProgress,
     pub following: bool,
     pub formats: String,
+    pub next_airing: String,
+    pub added_date: String,
     added_at: String,
     score: Option<f64>,
 }
@@ -117,43 +119,18 @@ fn representative<'a>(
         })
 }
 
-fn aggregate<'a>(
-    progress: impl Iterator<Item = &'a CardProgress>,
-    files_available: bool,
-) -> CardProgress {
-    let rows: Vec<_> = progress.collect();
-    let aired = rows.iter().map(|p| p.aired).sum();
-    let downloaded = rows.iter().map(|p| p.downloaded.min(p.aired)).sum();
-    let downloading = rows.iter().any(|p| p.state == "downloading");
-    let (state, label) = if !files_available {
-        ("idle", "Files unavailable".to_owned())
-    } else if downloading {
-        (
-            "downloading",
-            format!("Downloading; {downloaded} of {aired} aired episodes available"),
-        )
-    } else if aired == 0 {
-        ("idle", "No confirmed aired episodes".to_owned())
-    } else if downloaded >= aired {
-        ("complete", format!("All {aired} aired episodes available"))
-    } else {
-        (
-            "missing",
-            format!("{downloaded} of {aired} aired episodes available"),
-        )
-    };
-    CardProgress {
-        state: state.into(),
-        downloaded,
-        aired,
-        pct: if !files_available || aired == 0 {
-            0
-        } else {
-            (downloaded * 100 / aired).clamp(0, 100)
-        },
-        monitored: rows.iter().any(|p| p.monitored),
-        label,
-    }
+fn next_airing<'a>(rows: impl Iterator<Item = &'a CardProgress>) -> String {
+    let rows: Vec<_> = rows.collect();
+    rows.iter()
+        .filter(|p| p.next_airing_at.is_some())
+        .min_by_key(|p| p.next_airing_at)
+        .or_else(|| {
+            rows.iter().find(|p| {
+                !p.next_airing.is_empty() && p.next_airing != "Finished" && p.next_airing != "TBA"
+            })
+        })
+        .map(|p| p.next_airing.clone())
+        .unwrap_or_default()
 }
 
 pub(super) async fn cards(
@@ -162,16 +139,12 @@ pub(super) async fn cards(
     matching_ids: Option<&HashSet<i64>>,
     search: &str,
     sort: &str,
-    media_root: &str,
+    _media_root: &str,
 ) -> Result<(usize, Vec<FranchiseCard>), sqlx::Error> {
     let groups = groups::load_groups(db, false, None).await?.groups;
     let library: HashMap<_, _> = releases.iter().map(|(s, _)| (s.id, s)).collect();
     let progress: HashMap<_, _> = releases.iter().map(|(s, p)| (s.id, p)).collect();
     let follows = release_follows::list(db).await?;
-    let files_available = !media_root.is_empty()
-        && tokio::fs::metadata(media_root)
-            .await
-            .is_ok_and(|m| m.is_dir());
     let total = groups.len();
     let needle = search.trim().to_lowercase();
     let mut cards = Vec::new();
@@ -196,16 +169,26 @@ pub(super) async fn cards(
             .collect();
         formats.sort();
         formats.dedup();
-        let included =
-            |e: &&groups::Entry| e.series_id.is_some() && e.choice != Some(false) && !e.excluded;
-        let p = aggregate(
+        let p = availability::aggregate(
             group
                 .entries
                 .iter()
-                .filter(included)
                 .filter_map(|e| e.series_id.and_then(|id| progress.get(&id).copied())),
-            files_available,
         );
+        let upcoming = next_airing(
+            group
+                .entries
+                .iter()
+                .filter_map(|e| e.series_id.and_then(|id| progress.get(&id).copied())),
+        );
+        let added_at = group
+            .entries
+            .iter()
+            .filter_map(|e| e.series_id.and_then(|id| library.get(&id)))
+            .map(|s| s.added_at.as_str())
+            .max()
+            .unwrap_or_default()
+            .to_owned();
         cards.push(FranchiseCard {
             path: path(&group),
             title: group.title.clone(),
@@ -221,14 +204,9 @@ pub(super) async fn cards(
                 .iter()
                 .any(|f| group.entries.iter().any(|e| e.provider_id == f.anilist_id)),
             formats: formats.join(" · "),
-            added_at: group
-                .entries
-                .iter()
-                .filter_map(|e| e.series_id.and_then(|id| library.get(&id)))
-                .map(|s| s.added_at.as_str())
-                .max()
-                .unwrap_or_default()
-                .into(),
+            next_airing: upcoming,
+            added_date: availability::added_label(&added_at),
+            added_at,
             score: representative
                 .and_then(|s| s.user_score)
                 .filter(|s| *s > 0.0),
@@ -266,6 +244,11 @@ struct Release {
     files: String,
     in_library: bool,
     included: bool,
+    progress: CardProgress,
+    monitoring_label: String,
+    follow_label: String,
+    next_airing: String,
+    added_date: String,
 }
 #[derive(Template)]
 #[template(path = "franchise.html")]
@@ -279,6 +262,7 @@ struct FranchisePage {
     following: bool,
     seed: i64,
     progress: CardProgress,
+    next_airing: String,
 }
 
 pub async fn page(
@@ -314,7 +298,7 @@ pub async fn page(
         .await
         .map_err(read_error)?
         .unwrap_or_default();
-    let facts = inventory::load(&state.db, &cfg.media_root, &library)
+    let progress_by_id = availability::load(&state.db, &cfg.media_root, &library)
         .await
         .map_err(read_error)?;
     let follows = release_follows::list(&state.db).await.map_err(read_error)?;
@@ -335,29 +319,34 @@ pub async fn page(
                 .map(|e| e.provider_id)
         })
         .unwrap_or_default();
-    let mut progress = Vec::new();
-    let mut files_available = true;
+    let combined =
+        availability::aggregate(library.iter().filter_map(|s| progress_by_id.get(&s.id)));
+    let next_airing = next_airing(library.iter().filter_map(|s| progress_by_id.get(&s.id)));
     let releases = group
         .entries
         .iter()
         .map(|e| {
             let tracked = e.series_id.and_then(|id| by_id.get(&id));
             let included = tracked.is_some() && e.choice != Some(false) && !e.excluded;
-            let facts = e.series_id.and_then(|id| facts.get(&id));
-            if included {
-                files_available &= facts.is_some_and(|f| f.on_disk.is_some());
-                let downloaded = facts.and_then(|f| f.on_disk).unwrap_or_default() as i64;
-                let missing = facts.and_then(|f| f.missing.as_ref());
-                // Unknown aired sets do not imply completeness.
-                files_available &= missing.is_some();
-                let aired = downloaded + missing.map(|m| m.len() as i64).unwrap_or_default();
-                progress.push(CardProgress {
-                    downloaded,
-                    aired,
-                    monitored: tracked.is_some_and(|s| s.monitor_mode != "none"),
-                    ..CardProgress::default()
+            let summary = e
+                .series_id
+                .and_then(|id| progress_by_id.get(&id))
+                .cloned()
+                .unwrap_or_else(|| CardProgress {
+                    label: "Outside your library".into(),
+                    monitoring_label: "Not monitored".into(),
+                    ..Default::default()
                 });
-            }
+            let next =
+                if tracked.is_some() {
+                    summary.next_airing.clone()
+                } else if e.related.as_ref().is_some_and(|r| {
+                    matches!(r.status.as_str(), "NOT_YET_RELEASED" | "NOT_YET_AIRED")
+                }) {
+                    format!("Premiere · {}", availability::premiere_label(&e.date))
+                } else {
+                    String::new()
+                };
             Release {
                 title: e.title.clone(),
                 cover_url: tracked
@@ -366,22 +355,30 @@ pub async fn page(
                     .unwrap_or_default(),
                 path: super::detail::path(e.library_provider_id.unwrap_or(e.provider_id)),
                 format: e.format.replace('_', " "),
-                date: if e.date.is_empty() {
-                    "Date unknown".into()
-                } else {
-                    e.date.clone()
-                },
+                date: availability::premiere_label(&e.date),
                 status: tracked
                     .map(|s| s.status.replace('_', " "))
                     .or_else(|| e.related.as_ref().map(|r| r.status_display.clone()))
                     .unwrap_or_default(),
-                files: facts.map(groups::file_status).unwrap_or_else(|| {
-                    if e.excluded {
-                        "Excluded from sync".into()
-                    } else {
-                        "Outside library".into()
-                    }
-                }),
+                files: if tracked.is_some() {
+                    summary.files_label.clone()
+                } else if e.excluded {
+                    "Excluded from sync".into()
+                } else {
+                    "Outside library".into()
+                },
+                monitoring_label: summary.monitoring_label.clone(),
+                follow_label: if summary.following {
+                    "In franchise follow"
+                } else if following && e.choice.is_none() {
+                    "Future follow on parent"
+                } else {
+                    "Not selected for follow"
+                }
+                .into(),
+                next_airing: next,
+                added_date: summary.added_date.clone(),
+                progress: summary,
                 in_library: tracked.is_some(),
                 included,
             }
@@ -396,7 +393,8 @@ pub async fn page(
         tracked: group.tracked,
         following,
         seed,
-        progress: aggregate(progress.iter(), files_available),
+        progress: combined,
+        next_airing,
     };
     page.render().map(Html).map_err(|_| {
         (
