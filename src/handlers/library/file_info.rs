@@ -2,7 +2,7 @@
 use crate::{
     AppState,
     models::{config, series},
-    services::{media, media_info},
+    services::{media, media_info, media_requirements},
 };
 use axum::{
     Json,
@@ -113,7 +113,16 @@ pub async fn episode_file_info(
                 &required,
                 &cfg.subtitle_language_match,
             );
-            Json(serde_json::json!({"ok": true, "filename": file.filename, "media": info, "subtitle_requirements": subtitles})).into_response()
+            let requirements = media_requirements::Policy::from_config(&cfg).status(&info);
+            Json(serde_json::json!({
+                "ok": true,
+                "filename": file.filename,
+                "media": info,
+                "subtitle_requirements": subtitles,
+                "media_requirements": requirements,
+                "upgrades_allowed": tracked.allow_upgrades,
+            }))
+            .into_response()
         }
         Err(failure) => error(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -128,6 +137,134 @@ mod tests {
     use super::*;
     use crate::test_support::{build_test_app_state, in_memory_pool, seed_series};
     use axum::body::to_bytes;
+
+    async fn observed_file(
+        db: &sqlx::SqlitePool,
+        root: &std::path::Path,
+        streams: serde_json::Value,
+    ) -> i64 {
+        let id = seed_series(db, 1234, "Test").await;
+        std::fs::create_dir(root.join("Test")).unwrap();
+        let file = root.join("Test/Test - S01E01.mkv");
+        std::fs::write(&file, b"cached media fixture").unwrap();
+        let path = std::fs::canonicalize(&file).unwrap();
+        let identity =
+            media_info::FileIdentity::from_metadata(&std::fs::metadata(&path).unwrap()).unwrap();
+        crate::models::media_probe_cache::upsert_identified(
+            db,
+            path.to_str().unwrap(),
+            &identity.cache_key(),
+            identity.size as i64,
+            &serde_json::json!({"streams": streams}).to_string(),
+        )
+        .await;
+        id
+    }
+
+    #[tokio::test]
+    async fn configured_status_uses_actual_file_and_preserves_track_facts() {
+        let db = in_memory_pool().await;
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = config::Config {
+            media_root: temp.path().to_string_lossy().into_owned(),
+            media_requirements_enabled: true,
+            minimum_resolution: "720".into(),
+            target_resolution: "2160".into(),
+            required_subtitle_languages: "de".into(),
+            minimum_subtitle_check: false,
+            target_subtitle_check: true,
+            ..Default::default()
+        };
+        config::save_config(&db, &cfg).await.unwrap();
+        let id = observed_file(
+            &db,
+            temp.path(),
+            serde_json::json!([
+                {"index":0,"codec_type":"video","codec_name":"hevc","width":1920,"height":1080},
+                {"index":1,"codec_type":"audio","codec_name":"aac","tags":{"language":"jpn"}},
+                {"index":2,"codec_type":"subtitle","codec_name":"ass","tags":{"language":"eng"}}
+            ]),
+        )
+        .await;
+        // Even an eligible quality result does not switch on a release's upgrades.
+        sqlx::query("UPDATE series SET allow_upgrades=0 WHERE id=?")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA query_only=ON")
+            .execute(&db)
+            .await
+            .unwrap();
+        let response =
+            episode_file_info(State(build_test_app_state(db.clone(), None)), Path((id, 1))).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["media_requirements"]["enabled"], true);
+        assert_eq!(json["media_requirements"]["minimum_met"], true);
+        assert_eq!(json["media_requirements"]["target_met"], false);
+        assert_eq!(json["media_requirements"]["resolution"], "1080p");
+        assert_eq!(json["media_requirements"]["minimum_resolution"], "720p");
+        assert_eq!(json["media_requirements"]["target_resolution"], "2160p");
+        assert_eq!(
+            json["media_requirements"]["selectable_subtitles_satisfied"],
+            false
+        );
+        assert_eq!(json["media_requirements"]["minimum_subtitle_check"], false);
+        assert_eq!(
+            json["subtitle_requirements"]["required_languages"],
+            serde_json::json!(["de"])
+        );
+        assert_eq!(json["media"]["subtitles"][0]["language"], "en");
+        assert_eq!(json["media"]["audio"][0]["language"], "ja");
+        assert_eq!(json["upgrades_allowed"], false);
+        assert_eq!(crate::test_support::count_series(&db).await, 1);
+        assert_eq!(
+            std::fs::read(temp.path().join("Test/Test - S01E01.mkv")).unwrap(),
+            b"cached media fixture"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_resolution_cannot_report_a_met_minimum_or_target() {
+        let db = in_memory_pool().await;
+        let temp = tempfile::tempdir().unwrap();
+        config::save_config(
+            &db,
+            &config::Config {
+                media_root: temp.path().to_string_lossy().into_owned(),
+                media_requirements_enabled: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let id = observed_file(
+            &db,
+            temp.path(),
+            serde_json::json!([
+                {"index":0,"codec_type":"video","codec_name":"h264"}
+            ]),
+        )
+        .await;
+        let response =
+            episode_file_info(State(build_test_app_state(db, None)), Path((id, 1))).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["media_requirements"]["resolution"], "Unknown");
+        assert_eq!(json["media_requirements"]["minimum_met"], false);
+        assert_eq!(json["media_requirements"]["target_met"], false);
+        assert!(
+            json["media_requirements"]["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason.as_str().unwrap().contains("could not be verified"))
+        );
+        assert!(json["media"]["subtitles"].as_array().unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn missing_tracked_id_does_not_fetch_provider_metadata() {
