@@ -958,8 +958,14 @@ use std::sync::Mutex as StdMutex;
 /// and reports them via `add_calls()`. Other trait methods no-op.
 struct AutoSearchRecordingClient {
     add_calls: StdMutex<Vec<(String, String)>>, // (url, info_hash)
+    add_gate: StdMutex<Option<std::sync::Arc<AddTorrentGate>>>,
     completed_for_import: StdMutex<Vec<(DownloadItem, Vec<DownloadFile>)>>,
     import_file_gate: StdMutex<Option<std::sync::Arc<ImportFileGate>>>,
+}
+
+struct AddTorrentGate {
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
 }
 
 struct ImportFileGate {
@@ -971,6 +977,7 @@ impl AutoSearchRecordingClient {
     fn new() -> Self {
         Self {
             add_calls: StdMutex::new(Vec::new()),
+            add_gate: StdMutex::new(None),
             completed_for_import: StdMutex::new(Vec::new()),
             import_file_gate: StdMutex::new(None),
         }
@@ -990,6 +997,11 @@ impl DownloadClient for AutoSearchRecordingClient {
             .lock()
             .unwrap()
             .push((url.to_string(), info_hash.to_string()));
+        let gate = self.add_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.started.notify_one();
+            gate.release.notified().await;
+        }
         Ok(AddOutcome::Added)
     }
     async fn add_torrent_with_file_filter(

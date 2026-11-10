@@ -14,7 +14,7 @@ rust-version = "1.95"
 # module is visible to dependents (i.e. integration test targets).
 # Not enabled by default — release binaries and Docker images compile
 # without the helpers. CI flips it on for the test step.
-test-support = []
+test-support = ["tokio/test-util"]
 
 # Browser-driving e2e tests for HTMX UI flows. Opt-in because they
 # require a running geckodriver (or chromedriver) on localhost:4444

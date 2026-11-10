@@ -284,3 +284,149 @@ async fn daily_sweep_single_entry_search_keeps_target_pin_pending_and_span_prote
     assert!(server.received_requests().await.unwrap().is_empty());
     unset_nyaa_base();
 }
+
+#[tokio::test]
+async fn scheduled_sweep_finishes_later_targets_after_thirty_minutes() {
+    let _gate = ENV_LOCK.lock().await;
+    let server = MockServer::start().await;
+    let tail_hash = "4567845678456784567845678456784567845678";
+    let html = nyaa_results_page(&format!(
+        "{}{}",
+        nyaa_row(
+            GOOD_HASH,
+            998841,
+            "[Candidate] Feature Story S01E01 [1080p WEB-DL AAC]",
+            "500 MiB",
+            5,
+        ),
+        nyaa_row(
+            tail_hash,
+            998842,
+            "[Candidate] Feature Story S01E02 [1080p WEB-DL AAC]",
+            "500 MiB",
+            5,
+        ),
+    ));
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(html))
+        .mount(&server)
+        .await;
+    set_nyaa_base(&server.uri());
+    let (_temp, state, client, sid, old) = fixture("TV", 2, 1280, 720, true, false).await;
+    let second = old.with_file_name(
+        old.file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .replace("S01E01", "S01E02"),
+    );
+    std::fs::copy(&old, &second).unwrap();
+    let identity = ryokan::services::media_info::FileIdentity::from_metadata(
+        &std::fs::metadata(&second).unwrap(),
+    )
+    .unwrap();
+    let probe_json: String = sqlx::query_scalar("SELECT probe_json FROM media_probe_cache")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    ryokan::models::media_probe_cache::upsert_identified(
+        &state.db,
+        std::fs::canonicalize(&second).unwrap().to_str().unwrap(),
+        &identity.cache_key(),
+        identity.size as i64,
+        &probe_json,
+    )
+    .await;
+    ryokan::models::scheduled_tasks::touch_definition(
+        &state.db,
+        "upgrade_search",
+        "Quality upgrade search",
+        "Every 24 hours (when enabled)",
+        true,
+    )
+    .await
+    .unwrap();
+    let gate = std::sync::Arc::new(AddTorrentGate {
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    *client.add_gate.lock().unwrap() = Some(gate.clone());
+    let run_state = state.clone();
+    let run =
+        tokio::spawn(
+            async move { ryokan::services::upgrade::run_scheduled_once(&run_state).await },
+        );
+    tokio::time::timeout(std::time::Duration::from_secs(15), gate.started.notified())
+        .await
+        .expect("the first client add must start before advancing virtual time");
+    assert_eq!(client.add_calls().len(), 1);
+
+    // Keep the shared in-memory database alive while virtual time expires
+    // the pool's idle connections.
+    let _database_keepalive = state.db.acquire().await.unwrap();
+    // The fake client has accepted the first download. Hold its reply while
+    // the pass crosses the old deadline, then let the real persistence and
+    // remaining-target paths finish. No real provider timeout is changed.
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(30 * 60 + 1)).await;
+    tokio::time::resume();
+    gate.release.notify_one();
+    let summary = run
+        .await
+        .unwrap()
+        .expect("a scheduled library pass must not stop at an aggregate deadline");
+    assert_eq!(summary.series_checked, 1);
+    assert_eq!(summary.episodes_checked, 2);
+    assert_eq!(summary.upgrades_grabbed, 2);
+    let calls = client.add_calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].1, GOOD_HASH);
+    assert_eq!(calls[1].1, tail_hash);
+    let grabs = ryokan::models::grabbed_torrents::get_all_pending(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(grabs.len(), 2);
+    assert!(
+        grabs
+            .iter()
+            .all(|grab| grab.series_id == sid && !grab.is_batch)
+    );
+    assert!(grabs.iter().any(|grab| grab.episode_numbers == [1]));
+    assert!(grabs.iter().any(|grab| grab.episode_numbers == [2]));
+    let saved_history: Vec<(i32, String)> = sqlx::query_as(
+        "SELECT episode_number,match_kind FROM episode_grab_history WHERE series_id=? ORDER BY episode_number",
+    )
+    .bind(sid)
+    .fetch_all(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        saved_history,
+        vec![(1, "verbatim".into()), (2, "verbatim".into())]
+    );
+    let tags = ryokan::models::episode_tags::get_for_series(&state.db, sid)
+        .await
+        .unwrap();
+    assert_eq!(tags.len(), 2);
+    for episode in [1, 2] {
+        assert_eq!(tags[&episode].state, "grabbed");
+        assert!(!tags[&episode].manual_override);
+    }
+    let task = ryokan::models::scheduled_tasks::list(&state.db)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|task| task.task_key == "upgrade_search")
+        .unwrap();
+    assert_eq!(task.last_status, "ok");
+    assert_eq!(task.last_detail, summary.detail);
+    assert!(task.last_started_at.is_some() && task.last_finished_at.is_some());
+    for original in [&old, &second] {
+        assert_eq!(
+            std::fs::read(original).unwrap(),
+            b"existing full-length video"
+        );
+    }
+    unset_nyaa_base();
+}

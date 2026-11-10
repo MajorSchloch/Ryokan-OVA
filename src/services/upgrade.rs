@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::AppState;
 use crate::models::log::LogCategory;
-use crate::models::{config, episode_tags, metadata_cache, series};
+use crate::models::{config, episode_tags, metadata_cache, scheduled_tasks, series};
 use crate::services::media_requirements::{self, Observed, Policy as RequirementsPolicy};
 use crate::services::source::{self, ClassificationResult, Resolution};
 use crate::services::{auto_search, logger, media};
@@ -135,6 +135,34 @@ pub(crate) fn release_covers_multiple(result: &crate::services::nyaa::SearchResu
             .is_some_and(|mapping| mapping.episodes().len() > 1)
         || media::parse_episode_span(&result.title.to_ascii_lowercase())
             .is_some_and(|span| span.first != span.last)
+}
+
+/// Run one scheduled pass and record its terminal status. The scheduler calls
+/// this entry point after its enabled and next-run checks.
+pub async fn run_scheduled_once(state: &AppState) -> Result<UpgradeSummary, String> {
+    let _ = scheduled_tasks::mark_started(
+        &state.db,
+        "upgrade_search",
+        "Searching for quality upgrades",
+    )
+    .await;
+    // A pass visits finite series and target snapshots. Provider requests and
+    // media probes retain their own time limits. A deadline for the entire
+    // pass repeatedly skips older entries in a large library and can cancel
+    // an accepted download before its grab and episode records are saved.
+    let outcome = run_once(state).await;
+    match &outcome {
+        Ok(summary) => {
+            let _ =
+                scheduled_tasks::mark_finished(&state.db, "upgrade_search", "ok", &summary.detail)
+                    .await;
+        }
+        Err(err) => {
+            let _ = scheduled_tasks::mark_finished(&state.db, "upgrade_search", "error", err).await;
+            logger::error(&state.db, LogCategory::System, "Upgrade search failed", err).await;
+        }
+    }
+    outcome
 }
 
 pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {

@@ -2545,7 +2545,7 @@ async fn main() {
 
     // Background task: quality upgrade search every 24 hours (when enabled).
     // Honors the persisted last-run time so a restart doesn't re-kick a
-    // potentially-30-minute sweep that just finished an hour ago.
+    // potentially long library pass that just finished an hour ago.
     {
         let upgrade_state = state.clone();
         tokio::spawn(async move {
@@ -2577,60 +2577,7 @@ async fn main() {
                         )
                         .await;
                         if enabled {
-                            let _ = models::scheduled_tasks::mark_started(
-                                &upgrade_state.db,
-                                "upgrade_search",
-                                "Searching for quality upgrades",
-                            )
-                            .await;
-                            match tokio::time::timeout(
-                                std::time::Duration::from_secs(30 * 60),
-                                services::upgrade::run_once(&upgrade_state),
-                            )
-                            .await
-                            {
-                                Ok(Ok(summary)) => {
-                                    let _ = models::scheduled_tasks::mark_finished(
-                                        &upgrade_state.db,
-                                        "upgrade_search",
-                                        "ok",
-                                        &summary.detail,
-                                    )
-                                    .await;
-                                }
-                                Ok(Err(err)) => {
-                                    let _ = models::scheduled_tasks::mark_finished(
-                                        &upgrade_state.db,
-                                        "upgrade_search",
-                                        "error",
-                                        &err,
-                                    )
-                                    .await;
-                                    services::logger::error(
-                                        &upgrade_state.db,
-                                        models::log::LogCategory::System,
-                                        "Upgrade search failed",
-                                        &err,
-                                    )
-                                    .await;
-                                }
-                                Err(_) => {
-                                    let _ = models::scheduled_tasks::mark_finished(
-                                        &upgrade_state.db,
-                                        "upgrade_search",
-                                        "error",
-                                        "Timed out after 30 minutes",
-                                    )
-                                    .await;
-                                    services::logger::error(
-                                        &upgrade_state.db,
-                                        models::log::LogCategory::System,
-                                        "Upgrade search timed out",
-                                        "Exceeded 30-minute limit",
-                                    )
-                                    .await;
-                                }
-                            }
+                            let _ = services::upgrade::run_scheduled_once(&upgrade_state).await;
                         }
                         // Always sleep the full period before re-checking,
                         // whether or not the task ran this iteration. When
