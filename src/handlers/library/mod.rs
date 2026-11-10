@@ -13,6 +13,7 @@ pub mod file_info;
 pub mod groups;
 mod inventory;
 pub mod misgrabs;
+pub mod navigation;
 pub mod pages;
 pub mod reconcile;
 pub mod recycle;
@@ -62,6 +63,12 @@ struct IndexTemplate {
     /// summary. Tupled (rather than a wrapper struct) so the card
     /// template's dense `s.*` field references stay untouched.
     cards: Vec<(series::Series, CardProgress)>,
+    franchise_cards: Vec<navigation::FranchiseCard>,
+    individual: bool,
+    franchise_count: usize,
+    visible_franchise_count: usize,
+    hidden_release_ids: std::collections::HashSet<i64>,
+    visible_release_count: usize,
     title_language: String,
     /// #62 — the linked external account's `score_format`,
     /// used by `Series::user_score_display(...)` to render per-row
@@ -137,6 +144,7 @@ struct SeriesTemplate {
     page: String,
     route_id: i64,
     follow_anilist_id: i64,
+    parent_franchise: Option<(String, String)>,
     detail: anilist::AnimeDetail,
     is_tracked: bool,
     db_id: Option<i64>,

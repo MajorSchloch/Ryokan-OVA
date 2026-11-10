@@ -167,6 +167,7 @@ fn project(
     let managed = follows.iter().find(|f| f.revision > 0);
     let mut owner = managed
         .map(|f| f.anilist_id)
+        .or(group.owner)
         .or_else(|| proposed_owner(&group.entries));
     let mut name_override = managed
         .filter(|f| entries[&f.anilist_id].title != f.title)
