@@ -127,6 +127,23 @@
         </div>
 
         <div class="cf-section">
+            <h3>Subtitle requirements</h3>
+            <div class="form-group">
+                <label for="required_subtitle_languages">Required subtitle languages</label>
+                <input type="text" name="required_subtitle_languages" id="required_subtitle_languages" value="{{ config.required_subtitle_languages }}" placeholder="en" aria-describedby="subtitle-requirements-hint">
+                <span class="form-hint" id="subtitle-requirements-hint">Use comma-separated names or codes, such as English or en,de. Leave empty to disable. Ryokan checks actual tracks before import and imports matching required subtitle files even when optional extra files are off. Forced or signs-only tracks do not count.</span>
+            </div>
+            <div class="form-group">
+                <label for="subtitle_language_match">Language match</label>
+                <select name="subtitle_language_match" id="subtitle_language_match">
+                    <option value="all" {% if config.subtitle_language_match != "any" %}selected{% endif %}>All listed languages</option>
+                    <option value="any" {% if config.subtitle_language_match == "any" %}selected{% endif %}>Any listed language</option>
+                </select>
+                <span class="form-hint">An unreadable file or unknown language cannot pass this check. Language labels cannot prove translation quality or detect subtitles burned into the picture.</span>
+            </div>
+        </div>
+
+        <div class="cf-section">
             <h3>Search defaults</h3>
             {# #23 — Global search defaults. Per-series overrides on the
                series detail page take precedence when set. The token field

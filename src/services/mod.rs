@@ -17,6 +17,7 @@ pub mod library_guard;
 pub mod library_move;
 pub mod mal;
 pub mod media;
+pub mod media_info;
 pub mod migration_preview;
 pub mod nyaa;
 pub mod oauth_state;
