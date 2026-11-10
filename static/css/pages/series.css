@@ -1142,3 +1142,13 @@
 
 .btn-delete-file:disabled { opacity: 0.5; cursor: default; }
 
+
+.ep-media-info { margin-top: var(--space-4, 16px); padding-top: var(--space-4, 16px); border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+.ep-media-info h4 { margin: 0 0 12px; font-size: 14px; }
+.ep-media-info .ep-detail-row { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 10px; margin-bottom: 10px; }
+.ep-media-info .ep-detail-value { min-width: 0; }
+.ep-media-verdict { margin: 0 0 14px; font-size: 13px; font-weight: 600; }
+.ep-media-verdict-missing { color: var(--red); }
+.ep-media-verdict-present { color: var(--green); }
+
+#ep-detail-modal .modal-ep { max-width: min(96vw, 840px); }

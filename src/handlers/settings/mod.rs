@@ -572,6 +572,10 @@ pub struct QualityForm {
     seadex_enabled: Option<String>,
     #[serde(default)]
     default_custom_query_tokens: Option<String>,
+    #[serde(default)]
+    required_subtitle_languages: Option<String>,
+    #[serde(default)]
+    subtitle_language_match: Option<String>,
 }
 
 #[derive(Template)]
@@ -1449,6 +1453,14 @@ pub async fn settings_submit(
         } else {
             existing_cfg.as_ref().map(|c| c.prefer_subs).unwrap_or(true)
         },
+        required_subtitle_languages: existing_cfg
+            .as_ref()
+            .map(|c| c.required_subtitle_languages.clone())
+            .unwrap_or_default(),
+        subtitle_language_match: existing_cfg
+            .as_ref()
+            .map(|c| c.subtitle_language_match.clone())
+            .unwrap_or_else(|| "all".to_string()),
         allow_non_english: existing_cfg
             .as_ref()
             .map(|c| c.allow_non_english)
@@ -2277,6 +2289,27 @@ pub async fn settings_quality_submit(
             return quality_response(&state, None, None, Some(err), is_htmx).await;
         }
     };
+    let required_subtitle_languages = match form.required_subtitle_languages.as_deref() {
+        Some(value) => match normalize_required_subtitle_languages(value) {
+            Ok(value) => value,
+            Err(error) => return quality_response(&state, None, None, Some(error), is_htmx).await,
+        },
+        None => existing_cfg.required_subtitle_languages.clone(),
+    };
+    let subtitle_language_match = match form.subtitle_language_match.as_deref() {
+        Some("all" | "any") => form.subtitle_language_match.clone().unwrap(),
+        None => existing_cfg.subtitle_language_match.clone(),
+        _ => {
+            return quality_response(
+                &state,
+                None,
+                None,
+                Some("Choose all or any required subtitle languages.".to_string()),
+                is_htmx,
+            )
+            .await;
+        }
+    };
     let cfg = config::Config {
         preferred_groups: form.preferred_groups.trim().to_string(),
         blocked_groups: form.blocked_groups.trim().to_string(),
@@ -2298,6 +2331,8 @@ pub async fn settings_quality_submit(
             _ => "prefer_bd".to_string(),
         },
         prefer_subs: form.prefer_subs == "1",
+        required_subtitle_languages,
+        subtitle_language_match,
         upgrade_search_enabled: form.upgrade_search_enabled.is_some(),
         default_allow_upgrades: form.default_allow_upgrades.is_some(),
         seadex_enabled: form.seadex_enabled.is_some(),
@@ -2944,4 +2979,23 @@ pub async fn sync_exclusion_delete(
         Err(e) => (None, Some(format!("Could not remove the exclusion: {e}"))),
     };
     integrations_response(&state, None, message, error, is_htmx).await
+}
+
+fn normalize_required_subtitle_languages(value: &str) -> Result<String, String> {
+    let mut languages = Vec::new();
+    for part in value
+        .split([',', ';'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        let language = crate::services::media_info::normalize_language(part)
+            .ok_or_else(|| format!("Unknown subtitle language: {part}. Use language names or codes, such as English or en."))?;
+        if !languages.contains(&language) {
+            languages.push(language);
+        }
+    }
+    if languages.len() > 16 {
+        return Err("Choose at most 16 subtitle languages.".to_string());
+    }
+    Ok(languages.join(","))
 }

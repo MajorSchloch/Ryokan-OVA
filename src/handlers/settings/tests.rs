@@ -804,6 +804,8 @@ mod non_htmx_path {
                 default_allow_upgrades: None,
                 seadex_enabled: None, // seed=true → submit→false
                 default_custom_query_tokens: Some("submit-tokens".to_string()), // seed=seed-tokens
+                required_subtitle_languages: None,
+                subtitle_language_match: None,
             }),
         )
         .await
@@ -1358,6 +1360,8 @@ mod non_htmx_path {
                 default_allow_upgrades: None,
                 seadex_enabled: None,
                 default_custom_query_tokens: None,
+                required_subtitle_languages: None,
+                subtitle_language_match: None,
             }),
         )
         .await
@@ -1756,6 +1760,8 @@ mod non_htmx_path {
                 default_allow_upgrades: None,
                 seadex_enabled: None,
                 default_custom_query_tokens: None,
+                required_subtitle_languages: None,
+                subtitle_language_match: None,
             }),
         );
         let (_a, _b) = tokio::join!(general, quality);
@@ -2293,4 +2299,85 @@ async fn the_integrations_tab_never_carries_a_saved_credential() {
         assert!(!page.contains(secret), "{secret} reached the page");
     }
     assert!(page.contains(crate::handlers::secret_field::KEEP_PLACEHOLDER));
+}
+
+#[tokio::test]
+async fn subtitle_policy_save_normalizes_aliases_and_preserves_other_quality() {
+    let db = crate::test_support::in_memory_pool().await;
+    config::save_config(
+        &db,
+        &config::Config {
+            preferred_groups: "KeepMe".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let form: QualityForm = serde_json::from_value(serde_json::json!({"preferred_groups": "KeepMe", "blocked_groups": "", "preferred_source": "web", "preferred_resolution": "1080", "cutoff_source": "bluray", "cutoff_resolution": "1080", "finished_series_quality": "same", "prefer_subs": "1", "required_subtitle_languages": "English,deu,en", "subtitle_language_match": "any"})).unwrap();
+    let response = settings_quality_submit(
+        State(crate::test_support::build_test_app_state(db.clone(), None)),
+        HxRequest(true),
+        axum::Form(form),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let saved = config::get_config(&db).await.unwrap().unwrap();
+    assert_eq!(saved.required_subtitle_languages, "en,de");
+    assert_eq!(saved.subtitle_language_match, "any");
+    assert_eq!(saved.preferred_groups, "KeepMe");
+}
+
+#[tokio::test]
+async fn invalid_subtitle_language_does_not_replace_saved_policy() {
+    let db = crate::test_support::in_memory_pool().await;
+    config::save_config(
+        &db,
+        &config::Config {
+            required_subtitle_languages: "en".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let form: QualityForm = serde_json::from_value(serde_json::json!({"preferred_groups": "", "blocked_groups": "", "preferred_source": "web", "preferred_resolution": "1080", "cutoff_source": "bluray", "cutoff_resolution": "1080", "finished_series_quality": "same", "prefer_subs": "1", "required_subtitle_languages": "und", "subtitle_language_match": "all"})).unwrap();
+    let _ = settings_quality_submit(
+        State(crate::test_support::build_test_app_state(db.clone(), None)),
+        HxRequest(true),
+        axum::Form(form),
+    )
+    .await;
+    assert_eq!(
+        config::get_config(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .required_subtitle_languages,
+        "en"
+    );
+}
+
+#[tokio::test]
+async fn older_quality_form_preserves_subtitle_requirements() {
+    let db = crate::test_support::in_memory_pool().await;
+    config::save_config(
+        &db,
+        &config::Config {
+            required_subtitle_languages: "en,de".into(),
+            subtitle_language_match: "any".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let form: QualityForm = serde_json::from_value(serde_json::json!({"preferred_groups":"", "blocked_groups":"", "preferred_source":"web", "preferred_resolution":"1080", "cutoff_source":"bluray", "cutoff_resolution":"1080", "finished_series_quality":"same", "prefer_subs":"1"})).unwrap();
+    let _ = settings_quality_submit(
+        State(crate::test_support::build_test_app_state(db.clone(), None)),
+        HxRequest(true),
+        axum::Form(form),
+    )
+    .await;
+    let saved = config::get_config(&db).await.unwrap().unwrap();
+    assert_eq!(saved.required_subtitle_languages, "en,de");
+    assert_eq!(saved.subtitle_language_match, "any");
 }
