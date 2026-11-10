@@ -7,7 +7,7 @@
                     <option value="1" {% if config.media_requirements_enabled %}selected{% endif %}>Minimum + good enough</option>
                     <option value="0" {% if !config.media_requirements_enabled %}selected{% endif %}>Advanced source and score cutoffs</option>
                 </select>
-                <span class="form-hint" id="media-rules-hint">Minimum + good enough uses these requirements for imports, search, RSS and upgrades. A file at the target keeps its place, even when a remux, revision or higher score appears. Each release keeps its own Upgrades switch.</span>
+                <span class="form-hint" id="media-rules-hint">Use these gates for imports and automatic upgrades. At the target, keep the file. Each release keeps its own Upgrades switch.</span>
             </div>
             <div class="form-row">
                 <div class="form-group">
@@ -52,20 +52,20 @@
                     <label for="minimum_subtitle_check">Minimum subtitle requirement</label>
                     <select name="minimum_subtitle_check" id="minimum_subtitle_check">
                         <option value="1" {% if config.minimum_subtitle_check %}selected{% endif %}>Require selectable subtitles</option>
-                        <option value="0" {% if !config.minimum_subtitle_check %}selected{% endif %}>Allow unverified subtitles temporarily</option>
+                        <option value="0" {% if !config.minimum_subtitle_check %}selected{% endif %}>Allow unverified temporarily</option>
                     </select>
-                    <span class="form-hint">Selectable embedded tracks or valid matching subtitle files must declare the listed languages. Unverified accepts files even when captions are absent or their language is unknown; review them yourself.</span>
+                    <span class="form-hint">Tracks must declare your languages. Unverified also accepts files without subtitles; check these yourself.</span>
                 </div>
                 <div class="form-group">
                     <label for="target_subtitle_check">Good enough subtitles</label>
                     <select name="target_subtitle_check" id="target_subtitle_check">
-                        <option value="1" {% if config.target_subtitle_check %}selected{% endif %}>Prefer selectable subtitles in these languages</option>
+                        <option value="1" {% if config.target_subtitle_check %}selected{% endif %}>Prefer selectable subtitles</option>
                         <option value="0" {% if !config.target_subtitle_check %}selected{% endif %}>Use the minimum subtitle rule</option>
                     </select>
-                    <span class="form-hint">With selectable subtitles preferred, burned-in or unknown captions stay below target. A replacement must improve an unmet target without losing known resolution or required subtitles.</span>
+                    <span class="form-hint">Burned-in or unknown captions stay below a selectable-subtitle target. Replacements preserve known resolution and required subtitles.</span>
                 </div>
             </div>
-            <p class="form-hint">Ryokan checks actual files before replacement and preserves the old file if checks fail. Matching subtitle files travel with the video. Language labels cannot prove translation quality or detect captions burned into the picture. Advanced mode retains the existing selectable subtitle import check.</p>
+            <p class="form-hint">Ryokan checks actual files before replacement and keeps the old file if checks fail. Matching subtitle files travel with the video. Burned-in captions and translation quality cannot be verified. Advanced mode retains the existing selectable subtitle import check.</p>
         </div>
 
         <div class="cf-section">
