@@ -3,9 +3,10 @@
 //!
 //! Sonarr fires it from the download-failed event, which only the
 //! client's own failure report (or the user's mark-as-failed) raises;
-//! an import failure is not a failed download there and is not one
-//! here either (`import_stalled`, an all-files-failed import). The
-//! misgrab sweep has its own gate and shares only the search itself.
+//! ordinary import failures remain for review (`import_stalled`, an
+//! all-files-failed import). A probed source that conclusively fails the
+//! configured media minimum can try another release, under the same
+//! setting and failure budget. The misgrab sweep has its own gate.
 //!
 //! The failed row is already the blocklist entry, so the search cannot
 //! pick the same release again; [`LOOP_BREAKER`] keeps a series whose
@@ -14,9 +15,10 @@
 use crate::AppState;
 use crate::models::log::LogCategory;
 use crate::models::{
-    config, grabbed_torrents, grabbed_torrents::GrabbedTorrent, metadata_cache, series,
+    config, episode_tags, grabbed_torrents, grabbed_torrents::GrabbedTorrent, metadata_cache,
+    monitoring, series,
 };
-use crate::services::{auto_search, logger};
+use crate::services::{auto_search, logger, media};
 
 /// Failed grabs per series within [`WINDOW_HOURS`] after which the
 /// automatic re-search stops. The misgrab sweep has its own counter.
@@ -52,6 +54,103 @@ pub fn decide(enabled: bool, recent_failures: i64) -> Result<(), Skip> {
 /// breaker; the caller has already failed the grab, so the blocklist
 /// holds the release.
 pub async fn after_failed_download(state: &AppState, grab: &GrabbedTorrent, why: &str) {
+    let _ = after_failure(state, grab, why).await;
+}
+
+/// Retry one automatically acquired episode whose actual source failed its
+/// configured minimum. An explicit replacement request, a batch or changed
+/// user intent must never turn into a new automatic acquisition here.
+pub async fn after_requirements_rejected(state: &AppState, grab: &GrabbedTorrent) -> bool {
+    if grab.is_batch || grab.episode_numbers.len() != 1 || grab.episode_numbers[0] <= 0 {
+        return false;
+    }
+    if !matches!(
+        grabbed_torrents::get_replacement_episode(&state.db, grab.id).await,
+        Ok(None)
+    ) {
+        return false;
+    }
+    // This row may have been cancelled, reactivated or superseded since the
+    // import began. Only the exact, durably blocklisted failure may re-search.
+    let current_failure: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM grabbed_torrents WHERE id=? AND series_id=? \
+         AND hash=? AND torrent_name=? AND state='failed' AND failure_reason=?)",
+    )
+    .bind(grab.id)
+    .bind(grab.series_id)
+    .bind(&grab.hash)
+    .bind(&grab.torrent_name)
+    .bind(crate::services::post_processing::REQUIREMENTS_REJECTED_REASON)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(false);
+    if !current_failure {
+        return false;
+    }
+    let Some(series) = series::get_by_id(&state.db, grab.series_id)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return false;
+    };
+    let Ok(Some(cfg)) = config::get_config(&state.db).await else {
+        return false;
+    };
+    if !cfg.media_requirements_enabled {
+        return false;
+    }
+    let ep = grab.episode_numbers[0];
+    let Ok(tags) = episode_tags::get_for_series(&state.db, grab.series_id).await else {
+        return false;
+    };
+    if tags
+        .get(&ep)
+        .is_some_and(|tag| tag.manual_override || tag.state == "grabbed")
+    {
+        return false;
+    }
+    let Ok(pending) = grabbed_torrents::get_all_pending(&state.db).await else {
+        return false;
+    };
+    if pending
+        .iter()
+        .any(|other| other.series_id == grab.series_id && other.episode_numbers.contains(&ep))
+    {
+        return false;
+    }
+    let selecting_replacement: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_grabs WHERE series_id=?)")
+            .bind(grab.series_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(true);
+    if selecting_replacement {
+        return false;
+    }
+    let Ok(files) = media::scan_series_folder_checked(&cfg.media_root, &series.folder_name).await
+    else {
+        return false;
+    };
+    let on_disk = files
+        .iter()
+        .any(|file| file.is_own_season() && file.holds(ep));
+    if on_disk {
+        // Quality upgrades intentionally include existing episodes under the
+        // default future monitoring mode. The title's fresh opt-in controls it.
+        if !series.allow_upgrades {
+            return false;
+        }
+    } else if !monitoring::get_monitored_episode_numbers(&state.db, grab.series_id)
+        .await
+        .is_ok_and(|episodes| episodes.contains(&ep))
+    {
+        return false;
+    }
+    after_failure(state, grab, "a verified media-requirement rejection").await
+}
+
+async fn after_failure(state: &AppState, grab: &GrabbedTorrent, why: &str) -> bool {
     // Both reads fail closed: a database hiccup must not turn into an
     // unbounded run of searches.
     let enabled = config::get_config(&state.db)
@@ -64,7 +163,10 @@ pub async fn after_failed_download(state: &AppState, grab: &GrabbedTorrent, why:
         .await
         .unwrap_or(LOOP_BREAKER);
     match decide(enabled, recent) {
-        Ok(()) => search_replacement(state, grab, why).await,
+        Ok(()) => {
+            search_replacement(state, grab, why).await;
+            true
+        }
         Err(Skip::Disabled) => {
             logger::debug(
                 &state.db,
@@ -76,6 +178,7 @@ pub async fn after_failed_download(state: &AppState, grab: &GrabbedTorrent, why:
                 "",
             )
             .await;
+            false
         }
         Err(Skip::LoopBreaker(n)) => {
             logger::warn(
@@ -88,6 +191,7 @@ pub async fn after_failed_download(state: &AppState, grab: &GrabbedTorrent, why:
                 "the series needs a look; check the download client and the configured indexers",
             )
             .await;
+            false
         }
     }
 }

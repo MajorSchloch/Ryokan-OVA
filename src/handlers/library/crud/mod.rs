@@ -1410,7 +1410,6 @@ pub(crate) async fn reclassify_on_disk_episode(
         .iter()
         .find(|(_, eps)| eps.contains(&episode_number))
         .map(|(name, _)| name.clone())
-        .or_else(|| imported_grabs.first().map(|(n, _)| n.clone()))
         .unwrap_or_else(|| file.filename.clone());
 
     let is_batch = grabbed_torrents::get_is_batch_by_name(&state.db, series_id, &classify_title)

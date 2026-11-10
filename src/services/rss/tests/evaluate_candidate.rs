@@ -482,6 +482,7 @@ fn observation(
     crate::services::media_requirements::Observed {
         resolution,
         subtitles_satisfied,
+        duration_seconds: None,
     }
 }
 

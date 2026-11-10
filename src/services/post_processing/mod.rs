@@ -31,6 +31,10 @@ pub use state::{grab_is_stale, scan_library_for_unclassified, scan_series_for_un
 /// client error or a misgrab.
 pub const IMPORT_STALLED_REASON: &str = "import_stalled";
 
+/// A probed file did not meet the configured acceptance minimum. Unlike
+/// filesystem/probe failures this can be remedied by another release.
+pub const REQUIREMENTS_REJECTED_REASON: &str = "requirements_rejected";
+
 /// How long after boot the #205 stall timer stays quiet, in seconds.
 /// `completed_seen_at` is wall-clock, so a grab stamped before a long
 /// shutdown reads as stalled on the very first tick after boot, before
@@ -1276,6 +1280,9 @@ async fn load_series_import_ctx(
 ///   pending forever — the previous Ok(false) collapse meant a disk-
 ///   full pack would re-attempt every tick, generating duplicate
 ///   error logs without ever escalating to a user-visible failure.
+/// - `RequirementsRejected` — every attempted video conclusively failed the
+///   configured media minimum. Blocklist it; a single automatic episode may
+///   try another release under the user's retry setting and failure budget.
 /// - `Protected` — existing episodes were kept. Normal cleanup applies when
 ///   all files were handled; missing slots in a skipped video or other failures
 ///   require review and retain the download.
@@ -1286,6 +1293,9 @@ pub(crate) enum ImportOutcome {
         failed_episodes: Vec<i32>,
     },
     AllFailed {
+        failed_episodes: Vec<i32>,
+    },
+    RequirementsRejected {
         failed_episodes: Vec<i32>,
     },
     Protected {
@@ -1313,6 +1323,7 @@ async fn import_torrent(
     // re-fetched here as `default_download_client()`, which silently
     // routed `get_files` to the wrong client for any pinned grab.
     client: &std::sync::Arc<dyn DownloadClient>,
+    completed_attempt: Option<&str>,
 ) -> Result<ImportOutcome, String> {
     let migration_replay = grabbed_torrents::get_migration_replay(&state.db, grab.id).await?;
     let prior_coverage: std::collections::BTreeMap<i64, Vec<i32>> = if migration_replay.is_some() {
@@ -1893,6 +1904,7 @@ async fn import_torrent(
     // those paths already log their own warning and aren't retryable
     // by re-running the file op.
     let mut failed_episodes: Vec<i32> = Vec::new();
+    let mut requirements_rejected_episode_count = 0_usize;
 
     // Old grab ids we've marked as replaced during this import pass,
     // paired with the new `grab.id` that superseded them. Deduped via
@@ -2551,11 +2563,28 @@ async fn import_torrent(
             {
                 Ok(()) => Ok(None),
                 Err(reason) => {
+                    let content_rejection = subtitle_guard::is_content_rejection(&reason);
+                    if content_rejection
+                        && match completed_attempt {
+                            Some(completed_at) => {
+                                !grabbed_torrents::pending_requirements_attempt_is_current(
+                                    &state.db,
+                                    grab,
+                                    completed_at,
+                                )
+                                .await
+                                .unwrap_or(false)
+                            }
+                            None => true,
+                        }
+                    {
+                        return Err("Import protection: the download attempt changed while its media was inspected; current state was kept".into());
+                    }
                     logger::warn(
                         &state.db,
                         LogCategory::PostProcess,
                         &format!(
-                            "Import of {} for '{}' refused: required subtitles were not verified",
+                            "Import of {} for '{}' refused: media requirements were not met",
                             slot, ctx.series.title
                         ),
                         &reason,
@@ -2570,6 +2599,9 @@ async fn import_torrent(
                     )
                     .await;
                     let refused: Vec<i32> = resolved.episodes().collect();
+                    if content_rejection {
+                        requirements_rejected_episode_count += refused.len();
+                    }
                     let _ = episode_tags::mark_grab_failed_for_episodes(
                         &state.db,
                         target_series_id,
@@ -3284,6 +3316,10 @@ async fn import_torrent(
         // NotReady) from "video files were attempted but every one
         // failed." The latter shouldn't sit pending forever.
         if !failed_episodes.is_empty() {
+            if specials_refused == 0 && failed_episodes.len() == requirements_rejected_episode_count
+            {
+                return Ok(ImportOutcome::RequirementsRejected { failed_episodes });
+            }
             return Ok(ImportOutcome::AllFailed { failed_episodes });
         }
         if specials_imported > 0 {
@@ -3792,6 +3828,7 @@ pub async fn run_once(state: &AppState) {
     // grabs of one series failing in the same tick (a dropped mount)
     // get one search, not one per grab.
     let mut researched: HashSet<i64> = HashSet::new();
+    let mut requirements_researched: HashSet<(i64, i32)> = HashSet::new();
     for stored_grab in &pending {
         let mut effective_grab;
         let grab = match grabbed_torrents::get_migration_replay(&state.db, stored_grab.id).await {
@@ -4002,6 +4039,7 @@ pub async fn run_once(state: &AppState) {
         // so later ticks keep the original stamp and the timer measures
         // the whole "complete but not imported" window.
         let _ = grabbed_torrents::stamp_completed_seen(&state.db, grab.id).await;
+        let completed_attempt = grabbed_torrents::completed_seen_at(&state.db, grab.id).await;
 
         // Stamp qBit's output path on the grab row before we move/
         // hardlink the file into the library. Done BEFORE import so
@@ -4054,7 +4092,17 @@ pub async fn run_once(state: &AppState) {
         };
         let _ = grabbed_torrents::stamp_client_content_path(&state.db, grab.id, &client_path).await;
 
-        match import_torrent(state, &cfg, grab, &torrent.hash, import_root, &client).await {
+        match import_torrent(
+            state,
+            &cfg,
+            grab,
+            &torrent.hash,
+            import_root,
+            &client,
+            completed_attempt.as_deref(),
+        )
+        .await
+        {
             Ok(ImportOutcome::Protected {
                 imported_files,
                 skipped_files,
@@ -4164,6 +4212,35 @@ pub async fn run_once(state: &AppState) {
                     ),
                 )
                 .await;
+            }
+            Ok(ImportOutcome::RequirementsRejected { failed_episodes }) => {
+                logger::warn(
+                    &state.db,
+                    LogCategory::PostProcess,
+                    &format!(
+                        "Download rejected for '{}': verified media requirements were not met",
+                        grab.torrent_name
+                    ),
+                    &format!(
+                        "series_id={} failed_episodes={:?}; existing media was kept",
+                        grab.series_id, failed_episodes
+                    ),
+                )
+                .await;
+                if let Some(completed_at) = &completed_attempt
+                    && grabbed_torrents::fail_pending_requirements_attempt(
+                        &state.db,
+                        grab,
+                        completed_at,
+                    )
+                    .await
+                    .is_ok_and(|changed| changed)
+                    && let Some(ep) = grab.episode_numbers.first()
+                    && !requirements_researched.contains(&(grab.series_id, *ep))
+                    && crate::services::redownload::after_requirements_rejected(state, grab).await
+                {
+                    requirements_researched.insert((grab.series_id, *ep));
+                }
             }
             Ok(ImportOutcome::AllFailed { failed_episodes }) => {
                 // Every video file we attempted failed. Mark the grab

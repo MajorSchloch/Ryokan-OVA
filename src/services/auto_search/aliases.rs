@@ -27,6 +27,10 @@ pub fn normalize_title(input: &str) -> String {
             '[' | '(' | '{' => in_brackets += 1,
             ']' | ')' | '}' => in_brackets = (in_brackets - 1).max(0),
             _ if in_brackets > 0 => continue,
+            // Uploaders often omit apostrophes. Preserve the surrounding
+            // word so punctuation alone cannot turn a strict alias into
+            // a fuzzy match ("Girlfriend's" and "Girlfriends").
+            '\'' | '\u{2018}' | '\u{2019}' | '\u{02bc}' | '\u{ff07}' => continue,
             _ if ch.is_alphanumeric() || ch.is_whitespace() => cleaned.push(ch),
             _ => cleaned.push(' '),
         }
@@ -886,6 +890,7 @@ pub(super) fn best_alias_match(
     policy: AliasPolicy,
 ) -> Option<AliasMatch> {
     let mut best: Option<AliasMatch> = None;
+    let parsed_title = std::cell::OnceCell::new();
     for alias in aliases {
         let normalized_alias = normalize_title(alias);
         let alias_tokens = token_set(&normalized_alias);
@@ -896,6 +901,17 @@ pub(super) fn best_alias_match(
                     &alias_tokens,
                     SurplusBudget::FullAlias,
                 )
+                // Bare source/audio tags can exhaust a short alias's
+                // budget. Rescue only an exact parsed title, never a
+                // longer title that merely contains the alias. Parse at
+                // most once, only after the normal budget failed.
+                || parsed_title
+                    .get_or_init(|| {
+                        crate::services::library_link::extract_anime_title(normalized_title)
+                            .map(|title| normalize_title(&title))
+                    })
+                    .as_ref()
+                    .is_some_and(|title| title == &normalized_alias)
             {
                 return Some(AliasMatch {
                     kind: MatchKind::Verbatim,
@@ -1103,6 +1119,142 @@ pub fn matches_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_title_folds_omitted_and_typographic_apostrophes() {
+        for title in [
+            "Witch's Family",
+            "Witch’s Family",
+            "Witch‘s Family",
+            "Witchʼs Family",
+            "Witch＇s Family",
+            "Witchs Family",
+        ] {
+            assert_eq!(normalize_title(title), "witchs family", "{title}");
+        }
+    }
+
+    #[test]
+    fn strict_match_accepts_a_release_with_an_omitted_possessive_apostrophe() {
+        // The valid 1080p release was excluded as fuzzy while a 720p
+        // release using the romaji alias passed the automatic title gate.
+        let aliases = vec![
+            "My Girlfriend's Friend".to_string(),
+            "Kanojo no Tomodachi".to_string(),
+        ];
+        let siblings = SiblingRejectPrecompute::build(&aliases, &[]);
+        let title = "[ToonsHub] My Girlfriends Friend S01E05 REPACK 1080p UNCENSORED ADN WEB-DL AAC2.0 H.264 (Kanojo no Tomodachi, Multi-Subs)";
+        let matched = classify_match(
+            title,
+            &aliases,
+            &siblings,
+            &SearchTarget::Episode(5),
+            1,
+            false,
+            0,
+        )
+        .expect("an omitted apostrophe must retain the strict alias match");
+        assert_eq!(matched.kind, MatchKind::Verbatim);
+        assert!(!names_more_than_the_series(title, &aliases));
+    }
+
+    #[test]
+    fn strict_short_alias_accepts_unbracketed_source_and_audio_metadata() {
+        let aliases = vec!["Devils' Crest".to_string(), "Demons' Crest".to_string()];
+        let siblings = SiblingRejectPrecompute::build(&aliases, &[]);
+        let title = "[ToonsHub] Devils Crest S01E01 1080p AMZN WEB-DL DUAL DDP2.0 H.264 (Demons' Crest, Dual-Audio, Multi-Subs)";
+        let matched = classify_match(
+            title,
+            &aliases,
+            &siblings,
+            &SearchTarget::Episode(1),
+            1,
+            false,
+            0,
+        )
+        .expect("technical tags must not exhaust the exact short title's budget");
+        assert_eq!(matched.kind, MatchKind::Verbatim);
+        assert!(!names_more_than_the_series(title, &aliases));
+        assert!(
+            classify_match(
+                title,
+                &aliases,
+                &siblings,
+                &SearchTarget::Episode(2),
+                1,
+                false,
+                0,
+            )
+            .is_none()
+        );
+        assert!(
+            classify_match(
+                &title.replace("S01E01", "S02E01"),
+                &aliases,
+                &siblings,
+                &SearchTarget::Episode(1),
+                1,
+                false,
+                0,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn parsed_short_title_budget_keeps_longer_titles_and_episode_titles_out() {
+        let aliases = vec!["Main Arc".to_string()];
+        let siblings = SiblingRejectPrecompute::build(&aliases, &[]);
+        for title in [
+            "[Group] Main Arc Another Story From Beyond S01E01 1080p AMZN WEB-DL DUAL DDP2.0 H.264",
+            "[Group] Different Stories S01E01 - Main Arc 1080p AMZN WEB-DL DUAL DDP2.0 H.264",
+        ] {
+            assert!(
+                classify_match(
+                    title,
+                    &aliases,
+                    &siblings,
+                    &SearchTarget::Episode(1),
+                    1,
+                    false,
+                    0,
+                )
+                .is_none(),
+                "{title}"
+            );
+        }
+    }
+
+    #[test]
+    fn apostrophe_folding_preserves_episode_season_and_sibling_checks() {
+        let aliases = vec!["The Witch’s Family".to_string()];
+        let sibling_aliases = vec!["The Witch's Family Mini Anime".to_string()];
+        let siblings = SiblingRejectPrecompute::build(&aliases, &sibling_aliases);
+        for title in [
+            "[Group] The Witchs Family - 06 [1080p]",
+            "[Group] The Witchs Family S02E05 [1080p]",
+            "[Group] The Witchs Family Mini Anime - 05 [1080p]",
+            "[Group] The Witchs Neighbor - 05 [1080p]",
+        ] {
+            assert!(
+                classify_match(
+                    title,
+                    &aliases,
+                    &siblings,
+                    &SearchTarget::Episode(5),
+                    1,
+                    false,
+                    0,
+                )
+                .is_none(),
+                "{title}"
+            );
+        }
+        assert!(names_more_than_the_series(
+            "[Group] The Witchs Family - Part 2 - 05 [1080p]",
+            &aliases
+        ));
+    }
 
     #[test]
     fn names_more_than_the_series_catches_sequel_subtitles_and_roman_seasons() {

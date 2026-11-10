@@ -14,6 +14,14 @@ use crate::services::recycle;
 
 use super::{do_file_op, extras};
 
+/// Only a confirmed content mismatch gets this tag. Probe, configuration,
+/// staging and rollback errors must remain reviewable import failures.
+const CONTENT_REJECTION_PREFIX: &str = "Media rejected: ";
+
+pub(crate) fn is_content_rejection(reason: &str) -> bool {
+    reason.starts_with(CONTENT_REJECTION_PREFIX)
+}
+
 pub(crate) struct RequiredSubtitleImport {
     dir: Option<TempDir>,
     source: PathBuf,
@@ -59,7 +67,13 @@ pub(crate) async fn prepare(
     let info = media_info::inspect_with_sidecars(db, source, candidates, span, videos_in_download)
         .await
         .map_err(|e| format!("Subtitle requirement: {e}"))?;
-    policy.validate_minimum(&info)?;
+    policy.validate_minimum(&info).map_err(|reason| {
+        if policy.minimum_failure_is_content_rejection(&info) {
+            format!("{CONTENT_REJECTION_PREFIX}{reason}")
+        } else {
+            reason
+        }
+    })?;
     let verdict =
         media_info::evaluate_subtitle_requirements(&info, &required, &cfg.subtitle_language_match);
     if enforce_subtitles && !verdict.satisfied {
@@ -454,6 +468,115 @@ mod tests {
             &serde_json::json!({"streams":streams}).to_string(),
         )
         .await;
+    }
+
+    async fn seed_probe_duration(
+        db: &SqlitePool,
+        path: &Path,
+        width: u32,
+        height: u32,
+        duration: f64,
+    ) {
+        seed_probe_dimensions(db, path, true, width, height).await;
+        let canonical = tokio::fs::canonicalize(path).await.unwrap();
+        let identity =
+            FileIdentity::from_metadata(&tokio::fs::metadata(&canonical).await.unwrap()).unwrap();
+        let raw = crate::models::media_probe_cache::get_identified(
+            db,
+            canonical.to_str().unwrap(),
+            &identity.cache_key(),
+        )
+        .await
+        .unwrap();
+        let mut probe: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        probe["format"] = serde_json::json!({"duration":duration.to_string()});
+        crate::models::media_probe_cache::upsert_identified(
+            db,
+            canonical.to_str().unwrap(),
+            &identity.cache_key(),
+            identity.size as i64,
+            &probe.to_string(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn shorter_cut_holds_real_import_bundle_until_explicit_replacement() {
+        let db = crate::test_support::in_memory_pool().await;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("new.mkv");
+        let old = temp.path().join("old.mkv");
+        let old_sub = temp.path().join("old.en.srt");
+        tokio::fs::write(&source, "shorter1080video").await.unwrap();
+        tokio::fs::write(&old, "full720video").await.unwrap();
+        tokio::fs::write(
+            &old_sub,
+            "1\n00:00:01,000 --> 00:00:02,000\nOriginal subtitle\n",
+        )
+        .await
+        .unwrap();
+        seed_probe_duration(&db, &source, 1920, 1080, 720.0).await;
+        seed_probe_duration(&db, &old, 1280, 720, 1340.0).await;
+        let cfg = Config {
+            media_requirements_enabled: true,
+            required_subtitle_languages: "en".into(),
+            ..Default::default()
+        };
+        let reason = import_required(
+            &db,
+            &cfg,
+            "copy",
+            &source,
+            &old,
+            std::slice::from_ref(&old),
+            1,
+            "Show",
+            &[],
+            None,
+            1,
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(reason.contains("shorter"), "{reason}");
+        assert!(
+            !is_content_rejection(&reason),
+            "a different cut needs review, not repeated downloads"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(&old).await.unwrap(),
+            "full720video"
+        );
+        assert!(old_sub.exists());
+        assert_eq!(
+            tokio::fs::read_to_string(&source).await.unwrap(),
+            "shorter1080video"
+        );
+        import_required(
+            &db,
+            &cfg,
+            "copy",
+            &source,
+            &old,
+            std::slice::from_ref(&old),
+            1,
+            "Show",
+            &[],
+            None,
+            1,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tokio::fs::read_to_string(&old).await.unwrap(),
+            "shorter1080video"
+        );
+        assert!(
+            !old_sub.exists(),
+            "old cut's subtitles must not be reused for a different cut"
+        );
+        assert!(source.exists());
     }
 
     #[tokio::test]
