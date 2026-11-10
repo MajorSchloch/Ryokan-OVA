@@ -806,6 +806,11 @@ mod non_htmx_path {
                 default_custom_query_tokens: Some("submit-tokens".to_string()), // seed=seed-tokens
                 required_subtitle_languages: None,
                 subtitle_language_match: None,
+                media_requirements_enabled: None,
+                minimum_resolution: None,
+                target_resolution: None,
+                minimum_subtitle_check: None,
+                target_subtitle_check: None,
             }),
         )
         .await
@@ -1362,6 +1367,11 @@ mod non_htmx_path {
                 default_custom_query_tokens: None,
                 required_subtitle_languages: None,
                 subtitle_language_match: None,
+                media_requirements_enabled: None,
+                minimum_resolution: None,
+                target_resolution: None,
+                minimum_subtitle_check: None,
+                target_subtitle_check: None,
             }),
         )
         .await
@@ -1762,6 +1772,11 @@ mod non_htmx_path {
                 default_custom_query_tokens: None,
                 required_subtitle_languages: None,
                 subtitle_language_match: None,
+                media_requirements_enabled: None,
+                minimum_resolution: None,
+                target_resolution: None,
+                minimum_subtitle_check: None,
+                target_subtitle_check: None,
             }),
         );
         let (_a, _b) = tokio::join!(general, quality);
