@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::models::series;
 use crate::services::anilist;
 
+pub(crate) mod availability;
 pub mod bulk;
 pub mod cleanup;
 pub mod crud;
@@ -29,30 +30,37 @@ fn view_cookie(view: &str) -> [(axum::http::HeaderName, String); 1] {
     )]
 }
 
-/// Per-card completeness summary for the library grid's status bar.
-/// Answers exactly one question — "do I have what's aired?" — in
-/// three states, reusing the episode table's color vocabulary
-/// (green complete / red missing-and-actionable / accent in-flight).
-/// Airing status deliberately isn't encoded here: the card's
-/// RELEASING/FINISHED text chip already carries it.
+/// A shared, read-only projection of actual files, episode monitoring, and
+/// confirmed air dates. The poster and parent page use the same counts.
 #[derive(Debug, Clone, Default)]
 pub struct CardProgress {
-    /// `complete` | `missing` | `downloading` | `idle` (nothing
-    /// aired yet, or the series has no episode data at all).
     pub state: String,
-    /// Distinct episodes on disk or with a completed grab tag.
     pub downloaded: i64,
-    /// Episodes aired so far (cached air dates <= today), falling
-    /// back to the total episode count when no air dates are cached
-    /// (honest fallback for Jikan-added series with sparse data).
     pub aired: i64,
-    /// Fill percentage, `downloaded / aired` clamped to 0..=100.
     pub pct: i64,
-    /// False when `monitor_mode == "none"` — the bar renders dimmed:
-    /// "I'm ignoring this" is a modifier, not a fourth color.
     pub monitored: bool,
-    /// Pre-built tooltip text for the bar.
     pub label: String,
+    pub description: String,
+    pub segments: Vec<AvailabilitySegment>,
+    pub downloading: i64,
+    pub missing: i64,
+    pub future: i64,
+    pub unmonitored: i64,
+    pub unknown: i64,
+    pub monitoring_label: String,
+    pub files_label: String,
+    pub next_airing: String,
+    pub next_airing_at: Option<i64>,
+    pub following: bool,
+    pub added_date: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AvailabilitySegment {
+    pub kind: &'static str,
+    pub label: &'static str,
+    pub count: i64,
+    pub percent: String,
 }
 
 #[derive(Template)]
