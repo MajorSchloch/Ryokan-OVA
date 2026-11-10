@@ -32,6 +32,7 @@ pub struct Policy {
 pub struct Observed {
     pub resolution: Resolution,
     pub subtitles_satisfied: bool,
+    pub duration_seconds: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -105,6 +106,7 @@ impl Policy {
         Observed {
             resolution,
             subtitles_satisfied: subtitles.satisfied,
+            duration_seconds: info.duration_seconds.filter(|d| d.is_finite() && *d > 0.0),
         }
     }
 
@@ -194,6 +196,42 @@ impl Policy {
         Ok(())
     }
 
+    /// Only a successfully inspected file that fails an active content rule
+    /// justifies searching another release. Invalid settings and unknown
+    /// video facts must stay available for review instead of causing retries.
+    pub fn minimum_failure_is_content_rejection(&self, info: &MediaInfo) -> bool {
+        if !self.enabled
+            || !self.valid()
+            || ((self.minimum_subtitle_check || self.target_subtitle_check)
+                && (!matches!(self.language_match.as_str(), "all" | "any")
+                    || self
+                        .required_languages
+                        .iter()
+                        .any(|language| media_info::normalize_language(language).is_none())))
+        {
+            return false;
+        }
+        let observed = self.observe(info);
+        if observed.resolution == Resolution::Unknown {
+            return false;
+        }
+        if observed.resolution.rank() < self.minimum_resolution.rank() {
+            return true;
+        }
+        // Sidecar inspection can report an unreadable/changing file as an
+        // invalid stream rather than returning an error. That is missing
+        // evidence, not proof that this release lacks the required language.
+        // Only known text-content failures justify rejecting the release.
+        let uncertain_subtitles = info.subtitles.iter().any(|stream| {
+            !stream.valid
+                && !matches!(
+                    stream.validation_status.as_str(),
+                    "invalid_encoding" | "empty_subtitle" | "no_valid_timed_text" | "empty_track"
+                )
+        });
+        self.minimum_subtitle_check && !observed.subtitles_satisfied && !uncertain_subtitles
+    }
+
     /// A candidate can justify a download, but its title cannot prove its
     /// subtitles. `validate_replacement` rechecks the downloaded file.
     pub fn judge_candidate(
@@ -246,6 +284,23 @@ impl Policy {
         }
         if self.target_met(old) {
             return Err(UpgradeRejection::RequirementsTargetMet.message());
+        }
+        // A resolution/language improvement cannot establish that a much
+        // shorter cut still contains the old episode. Ignore small timing
+        // changes from credits or disclaimers; hold substantial losses for
+        // review. An explicit interactive replacement can still choose a
+        // different edition deliberately.
+        if let (Some(before), Some(after)) = (old.duration_seconds, new.duration_seconds)
+            && before.is_finite()
+            && after.is_finite()
+            && before > 0.0
+            && after > 0.0
+            && before - after > 300.0
+            && after < before * 0.8
+        {
+            return Err(format!(
+                "Replacement is substantially shorter ({after:.0}s versus {before:.0}s); review the edition before replacing it automatically"
+            ));
         }
         if new.resolution == Resolution::Unknown
             || new.resolution.rank() < old.resolution.rank()
@@ -397,6 +452,7 @@ mod tests {
         Observed {
             resolution,
             subtitles_satisfied,
+            duration_seconds: None,
         }
     }
     #[test]
@@ -461,6 +517,120 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn automatic_replacement_holds_a_shorter_cut_but_allows_normal_timing_changes() {
+        let p = policy();
+        let mut old = observed(Resolution::R720p, true);
+        old.duration_seconds = Some(1340.694);
+        let mut new = observed(Resolution::R1080p, true);
+        new.duration_seconds = Some(720.590);
+        assert!(
+            p.validate_replacement(&old, &new)
+                .unwrap_err()
+                .contains("review the edition")
+        );
+
+        // Credits, disclaimers and container timing must not stop a valid
+        // upgrade. The guard requires a large absolute and relative loss.
+        for duration in [1369.660, 1300.0, 1150.0, 1500.0] {
+            new.duration_seconds = Some(duration);
+            assert!(p.validate_replacement(&old, &new).is_ok(), "{duration}");
+        }
+        old.duration_seconds = Some(3000.0);
+        new.duration_seconds = Some(2670.0);
+        assert!(p.validate_replacement(&old, &new).is_ok());
+    }
+
+    #[test]
+    fn missing_or_invalid_runtime_is_not_evidence_of_a_shorter_cut() {
+        let p = policy();
+        let mut old = observed(Resolution::R720p, true);
+        old.duration_seconds = Some(1400.0);
+        for duration in [
+            None,
+            Some(0.0),
+            Some(-1.0),
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+        ] {
+            let mut new = observed(Resolution::R1080p, true);
+            new.duration_seconds = duration;
+            assert!(p.validate_replacement(&old, &new).is_ok());
+        }
+    }
+
+    #[test]
+    fn only_verified_minimum_content_failures_allow_another_candidate() {
+        let identity = || media_info::FileIdentity {
+            size: 1,
+            mtime_ns: "1".into(),
+            device: None,
+            inode: None,
+        };
+        let info = |width, height, subtitle: Option<&str>| {
+            let mut streams = vec![serde_json::json!({
+                "index": 0, "codec_type": "video", "width": width, "height": height,
+            })];
+            if let Some(language) = subtitle {
+                streams.push(serde_json::json!({
+                    "index": 1, "codec_type": "subtitle", "codec_name": "ass",
+                    "tags": {"language": language},
+                }));
+            }
+            media_info::parse_probe_json(
+                &serde_json::json!({"streams": streams}).to_string(),
+                identity(),
+                false,
+            )
+            .unwrap()
+        };
+        let p = policy();
+        assert!(p.minimum_failure_is_content_rejection(&info(1280, 720, None)));
+        assert!(p.minimum_failure_is_content_rejection(&info(854, 480, Some("eng"))));
+        assert!(!p.minimum_failure_is_content_rejection(&info(1920, 1080, Some("eng"))));
+        assert!(!p.minimum_failure_is_content_rejection(&info(0, 0, None)));
+        let mut invalid = p.clone();
+        invalid.target_resolution = Resolution::Unknown;
+        assert!(!invalid.minimum_failure_is_content_rejection(&info(1280, 720, None)));
+        invalid = p.clone();
+        invalid.language_match = "restored-invalid-mode".into();
+        assert!(!invalid.minimum_failure_is_content_rejection(&info(1280, 720, None)));
+        invalid = p.clone();
+        invalid.required_languages = vec!["invalid-language".into()];
+        assert!(!invalid.minimum_failure_is_content_rejection(&info(1280, 720, None)));
+        invalid = p.clone();
+        invalid.enabled = false;
+        assert!(!invalid.minimum_failure_is_content_rejection(&info(1280, 720, None)));
+
+        let mut sidecar = info(1920, 1080, Some("eng"));
+        sidecar.subtitles[0].external = true;
+        sidecar.subtitles[0].valid = false;
+        for status in [
+            "unreadable",
+            "inspection_timeout",
+            "file_changed",
+            "validation_unavailable",
+            "size_limit_exceeded",
+            "unsupported_format",
+            "future-unknown-status",
+        ] {
+            sidecar.subtitles[0].validation_status = status.into();
+            assert!(
+                !p.minimum_failure_is_content_rejection(&sidecar),
+                "{status}"
+            );
+        }
+        for status in [
+            "invalid_encoding",
+            "empty_subtitle",
+            "no_valid_timed_text",
+            "empty_track",
+        ] {
+            sidecar.subtitles[0].validation_status = status.into();
+            assert!(p.minimum_failure_is_content_rejection(&sidecar), "{status}");
+        }
     }
     #[test]
     fn explicit_hardsub_cannot_justify_a_subtitle_only_download() {

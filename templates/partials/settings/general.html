@@ -122,7 +122,7 @@
                 <label class="setting-row">
                     <span class="setting-row-text">
                         <span class="setting-row-title">Search again after a failed download</span>
-                        <span class="setting-row-desc">When the download client reports a grab as failed, the release is blocklisted and a replacement is searched for. Stops after three failed grabs of one series in a day. Imports that fail are left for you to look at.</span>
+                        <span class="setting-row-desc">Client-reported failures and verified media-requirement rejections of single automatic episodes can trigger another search. Stops after three failed grabs of one series within 24 hours. Other import failures are left for review.</span>
                     </span>
                     <input type="checkbox" name="auto_redownload_failed" id="auto_redownload_failed" {% if config.auto_redownload_failed %}checked{% endif %}>
                 </label>

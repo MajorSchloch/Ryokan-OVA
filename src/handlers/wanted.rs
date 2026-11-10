@@ -839,6 +839,7 @@ mod tests {
                         Observed {
                             resolution: Resolution::R1080p,
                             subtitles_satisfied: true,
+                            duration_seconds: None,
                         },
                     ),
                     (
@@ -846,6 +847,7 @@ mod tests {
                         Observed {
                             resolution: Resolution::R1080p,
                             subtitles_satisfied: false,
+                            duration_seconds: None,
                         },
                     ),
                     (
@@ -853,6 +855,7 @@ mod tests {
                         Observed {
                             resolution: Resolution::R720p,
                             subtitles_satisfied: true,
+                            duration_seconds: None,
                         },
                     ),
                 ]),
@@ -864,6 +867,7 @@ mod tests {
                     Observed {
                         resolution: Resolution::R720p,
                         subtitles_satisfied: false,
+                        duration_seconds: None,
                     },
                 )]),
             ),

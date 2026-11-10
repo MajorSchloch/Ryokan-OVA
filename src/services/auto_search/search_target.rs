@@ -61,12 +61,13 @@ impl SearchTarget {
 }
 
 pub fn build_missing_targets(detail: &AnimeDetail, existing_episodes: &[i32]) -> Vec<SearchTarget> {
-    let total_eps = detail.episodes.unwrap_or(0);
-
-    if total_eps <= 1 || matches!(detail.format.as_str(), "MOVIE" | "SPECIAL" | "OVA" | "ONA") {
+    if matches!(SearchTarget::for_episode(detail, 1), SearchTarget::Single) {
         return vec![SearchTarget::Single];
     }
 
+    // An unknown total does not make an airing series single-entry media.
+    // Without explicit monitored episodes this builder has no range to search.
+    let total_eps = detail.episodes.unwrap_or(0);
     let existing: HashSet<i32> = existing_episodes.iter().copied().collect();
     let mut targets = Vec::new();
     for ep in 1..=total_eps.max(0) {
@@ -82,9 +83,7 @@ pub fn build_monitored_targets(
     existing_episodes: &[i32],
     monitored_episodes: &[i32],
 ) -> Vec<SearchTarget> {
-    if detail.episodes.unwrap_or(0) <= 1
-        || matches!(detail.format.as_str(), "MOVIE" | "SPECIAL" | "OVA" | "ONA")
-    {
+    if matches!(SearchTarget::for_episode(detail, 1), SearchTarget::Single) {
         if monitored_episodes.is_empty() || monitored_episodes.contains(&1) {
             return vec![SearchTarget::Single];
         }
@@ -270,6 +269,7 @@ mod tests {
         let facts = |resolution, subtitles_satisfied| Observed {
             resolution,
             subtitles_satisfied,
+            duration_seconds: None,
         };
         let observations = HashMap::from([
             (1, facts(Resolution::R1080p, true)), // complete despite legacy source quality
@@ -354,6 +354,108 @@ mod tests {
             synonyms: Vec::new(),
             streaming_episodes: Vec::new(),
             relations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn unknown_tv_total_searches_each_missing_monitored_episode() {
+        // Currently airing shows can have an unknown final total while
+        // monitoring already knows that episodes 1 and 2 have aired.
+        // A generic Single target used to select episode 2 and leave 1 missing.
+        let detail = detail_with("TV", None);
+        assert!(matches!(
+            build_monitored_targets(&detail, &[], &[2, 1, 2]).as_slice(),
+            [SearchTarget::Episode(1), SearchTarget::Episode(2)]
+        ));
+        assert!(matches!(
+            build_monitored_targets(&detail, &[2], &[1, 2]).as_slice(),
+            [SearchTarget::Episode(1)]
+        ));
+        assert!(matches!(
+            build_monitored_targets(&detail, &[1], &[1, 2]).as_slice(),
+            [SearchTarget::Episode(2)]
+        ));
+        assert!(build_monitored_targets(&detail, &[1, 2], &[1, 2]).is_empty());
+        assert!(build_monitored_targets(&detail, &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn unknown_episode_total_does_not_create_a_generic_missing_target() {
+        for format in ["TV", "TV_SHORT", "OVA", "ONA", "SPECIAL"] {
+            let detail = detail_with(format, None);
+            assert!(build_missing_targets(&detail, &[]).is_empty(), "{format}");
+            assert!(
+                matches!(
+                    build_monitored_targets(&detail, &[], &[1]).as_slice(),
+                    [SearchTarget::Episode(1)]
+                ),
+                "{format}"
+            );
+        }
+    }
+
+    #[test]
+    fn multi_episode_non_tv_entries_keep_numbered_targets() {
+        for format in ["OVA", "ONA", "SPECIAL"] {
+            let detail = detail_with(format, Some(3));
+            assert!(
+                matches!(
+                    build_missing_targets(&detail, &[2]).as_slice(),
+                    [SearchTarget::Episode(1), SearchTarget::Episode(3)]
+                ),
+                "{format}"
+            );
+            assert!(
+                matches!(
+                    build_monitored_targets(&detail, &[2], &[2, 3]).as_slice(),
+                    [SearchTarget::Episode(3)]
+                ),
+                "{format}"
+            );
+        }
+    }
+
+    #[test]
+    fn confirmed_single_entry_media_keeps_a_single_target() {
+        for (format, episodes) in [
+            ("MOVIE", None),
+            ("MOVIE", Some(1)),
+            ("MOVIE", Some(4)),
+            ("OVA", Some(1)),
+            ("ONA", Some(1)),
+            ("SPECIAL", Some(1)),
+        ] {
+            let detail = detail_with(format, episodes);
+            assert!(matches!(
+                build_missing_targets(&detail, &[]).as_slice(),
+                [SearchTarget::Single]
+            ));
+            assert!(matches!(
+                build_monitored_targets(&detail, &[], &[1]).as_slice(),
+                [SearchTarget::Single]
+            ));
+            assert!(matches!(
+                build_monitored_targets(&detail, &[], &[]).as_slice(),
+                [SearchTarget::Single]
+            ));
+            assert!(build_monitored_targets(&detail, &[], &[2]).is_empty());
+        }
+    }
+
+    #[test]
+    fn single_episode_tv_still_uses_a_numbered_target() {
+        for format in ["TV", "TV_SHORT"] {
+            let detail = detail_with(format, Some(1));
+            assert!(matches!(
+                build_missing_targets(&detail, &[]).as_slice(),
+                [SearchTarget::Episode(1)]
+            ));
+            assert!(build_missing_targets(&detail, &[1]).is_empty());
+            assert!(matches!(
+                build_monitored_targets(&detail, &[], &[1]).as_slice(),
+                [SearchTarget::Episode(1)]
+            ));
+            assert!(build_monitored_targets(&detail, &[1], &[1]).is_empty());
         }
     }
 
