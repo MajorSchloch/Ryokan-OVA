@@ -10,7 +10,11 @@ The library opens with one poster per franchise, including one-off titles. Selec
 
 Library search finds a franchise by any known member title, including English, Romaji, and native names. A custom-list filter includes a franchise when one of its tracked releases belongs to the list. Sorting uses the franchise title, its latest addition, or the main title's personal score.
 
-Open a franchise poster to see release covers, formats, status, file completeness, and premiere order. **Choose releases & follow** opens the existing reviewed selection flow. One follow covers the franchise. A release detail page links back with **Part of [franchise]**. Releases with no known saved parent still offer **Explore franchise**.
+Open a franchise poster to see covers, formats, dates, monitoring and follow settings in premiere order. Parent and release bars distinguish available, downloading, missing, future, unmonitored and unknown episodes. Only aired, monitored episodes absent from disk and active downloads count as missing. Unreleased and unmonitored episodes stay neutral. Existing files remain visible even when monitoring is off. Partial premiere dates retain their precision instead of inventing a day.
+
+**Choose releases & follow** separates current release choices from future formats. Existing library entries keep their monitoring and files. Selected outside entries are added with episodes monitored. One follow covers the franchise. Main-title, folder and file-preview details are under **Advanced organization**. **Save selection and follow** saves the choices; **Back to franchise** and **Cancel** leave without saving.
+
+A release detail page links back with **Part of [franchise]**. Releases with no saved parent still offer **Explore franchise**.
 
 Saved franchises have local page addresses independent of their folder names and provider IDs. Metadata refreshes and identity promotion preserve them. Supported moves preserve the remaining parent's address; moving every member into a new parent keeps previous addresses usable through aliases. Browsing and view changes do not move files or change selections.
 
