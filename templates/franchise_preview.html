@@ -41,7 +41,7 @@
         <div class="follow-editor-formats">
             <label class="follow-editor-format"><input type="checkbox" name="include" value="tv"{% if policy.tv %} checked{% endif %}><span><strong>TV and online series</strong><small>New seasons and series</small></span></label>
             <label class="follow-editor-format"><input type="checkbox" name="include" value="movies"{% if policy.movies %} checked{% endif %}><span><strong>Movies</strong><small>New films in this franchise</small></span></label>
-            <label class="follow-editor-format"><input type="checkbox" name="include" value="ovas"{% if policy.ovas %} checked{% endif %}><span><strong>OVAs and specials</strong><small>Extra releases and side stories</small></span></label>
+            <label class="follow-editor-format"><input type="checkbox" name="include" value="ovas"{% if policy.ovas %} checked{% endif %}><span><strong>OVAs</strong><small>Original video releases</small></span></label>
             <label class="follow-editor-format"><input type="checkbox" name="include" value="alternatives"{% if policy.alternatives %} checked{% endif %}><span><strong>Alternative versions</strong><small>Include alternatives of the selected formats</small></span></label>
         </div>
         {% if !follows.is_empty() %}<p class="form-hint follow-editor-follow-status">Following since <time datetime="{{ follow_started_on }}">{{ follow_started_on }}</time>.</p>{% else %}<p class="form-hint follow-editor-follow-status">A new follow starts today.</p>{% endif %}
