@@ -19,7 +19,7 @@ No. Ryokan only manages anime in the current 1.x line. Manga, light novels, and 
 
 ## How do I follow future releases after I remove a series?
 
-For a title in your library, open **Franchise**, choose the releases and future formats you want, and select **Save franchise follow**. A standalone title starts with one release. For an anime outside your library, select **Follow future releases** on its details page. Open **Library → Release follows** to edit or stop a follow, even after you remove the series.
+Open the franchise poster and select **Choose releases & follow** or **Manage releases & follow**. Choose the releases and future formats you want, then select **Save franchise follow**. A standalone title starts with one release. Release details link to the parent with **Part of [franchise]**. For an anime with no saved parent, select **Explore franchise**. Open **Library → Release follows** to edit or stop a follow, even after you remove the series.
 
 Ryokan saves the UTC date when you start the follow. It checks AniList when you save, at startup, and every six hours. An upcoming sequel qualifies even if AniList announced it before you started the follow. For a sequel that has aired, its first air date must be on or after your follow date. If AniList gives only a month or year, the whole period must qualify.
 

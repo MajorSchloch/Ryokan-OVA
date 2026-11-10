@@ -133,6 +133,15 @@ async fn start(
             "Select an AniList anime from its series page.",
         ));
     }
+    // Existing parent pages own franchise following. A stale child form must
+    // not create a second season-level follow outside the reviewed merge.
+    if let Some((page_id, _)) =
+        crate::handlers::library::navigation::parent_for_provider(&state.db, selection.anilist_id)
+            .await
+            .map_err(internal_error)?
+    {
+        return Ok(htmx_aware_redirect(htmx, &format!("/franchises/{page_id}")));
+    }
     release_follows::start(
         &state.db,
         selection.anilist_id,
@@ -176,6 +185,94 @@ mod tests {
     use super::*;
     use crate::test_support::{build_test_app_state, seed_series};
     use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
+
+    #[tokio::test]
+    async fn stale_child_follow_form_opens_parent_without_creating_another_follow() {
+        let db = crate::test_support::in_memory_pool().await;
+        let child = seed_series(&db, 200, "Second season").await;
+        let mut tx = db.begin().await.unwrap();
+        crate::models::library_layout::record_move(&mut tx, child, "Parent/Second season")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let page_id = crate::models::library_layout::page_for_provider(&db, 200)
+            .await
+            .unwrap()
+            .unwrap()
+            .0;
+        let response = start(
+            State(build_test_app_state(db.clone(), None)),
+            HxRequest(false),
+            Form(NewFollow {
+                anilist_id: 200,
+                title: "Second season".into(),
+                movies: false,
+                ovas: false,
+                alternatives: false,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers()[axum::http::header::LOCATION],
+            format!("/franchises/{page_id}")
+        );
+        assert!(release_follows::list(&db).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn untracked_child_and_unique_mal_alias_cannot_start_separate_follows() {
+        let db = crate::test_support::in_memory_pool().await;
+        let id = seed_series(&db, 100, "Main title").await;
+        let mut tx = db.begin().await.unwrap();
+        crate::models::library_layout::record_move(&mut tx, id, "Parent/Main title")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let detail = crate::services::anilist::parse_media_node(&serde_json::json!({"id":100,"type":"ANIME","title":{"english":"Main title"},"relations":{"edges":[{"relationType":"SEQUEL","node":{"id":200,"type":"ANIME","title":{"english":"Upcoming sequel"}}}]}})).unwrap();
+        crate::models::metadata_cache::upsert_provider(&db, 100, None, &detail)
+            .await
+            .unwrap();
+        let mal = seed_series(&db, -800, "MAL child").await;
+        sqlx::query("UPDATE series SET mal_id=800 WHERE id=?")
+            .bind(mal)
+            .execute(&db)
+            .await
+            .unwrap();
+        let mut tx = db.begin().await.unwrap();
+        crate::models::library_layout::record_move(&mut tx, mal, "MAL parent/MAL child")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let detail = crate::services::anilist::parse_media_node(&serde_json::json!({"id":8000,"idMal":800,"type":"ANIME","title":{"english":"MAL child"}})).unwrap();
+        crate::models::metadata_cache::upsert_provider(&db, 8000, Some(800), &detail)
+            .await
+            .unwrap();
+        for provider in [200, 8000] {
+            let response = start(
+                State(build_test_app_state(db.clone(), None)),
+                HxRequest(false),
+                Form(NewFollow {
+                    anilist_id: provider,
+                    title: "Child".into(),
+                    movies: false,
+                    ovas: false,
+                    alternatives: false,
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            assert!(
+                response.headers()[axum::http::header::LOCATION]
+                    .to_str()
+                    .unwrap()
+                    .starts_with("/franchises/")
+            );
+        }
+        assert!(release_follows::list(&db).await.unwrap().is_empty());
+    }
 
     async fn matched_sequel() -> (SqlitePool, i64) {
         let db = SqlitePoolOptions::new()

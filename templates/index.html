@@ -20,7 +20,7 @@
     <div class="library-identity-row">
         <div class="library-title-group">
             <h2>Anime Library</h2>
-            <span class="library-count">{{ total_count }} series{% if airing_count > 0 %} &middot; {{ airing_count }} airing{% endif %}</span>
+            <span class="library-count">{% if individual %}{{ total_count }} releases{% else %}{{ franchise_count }} franchise{% if franchise_count != 1 %}s{% endif %} &middot; {{ total_count }} releases{% endif %}{% if airing_count > 0 %} &middot; {{ airing_count }} airing{% endif %}</span>
         </div>
         {# Search form: the server GET is the no-JS fallback; with JS,
            liveLibrarySearch filters the rendered grid client-side and
@@ -29,6 +29,7 @@
            them. Enter is prevented so the live filter stays canonical
            when JS runs. Press / anywhere on the page to focus. #}
         <form method="get" action="/" class="library-search-form">
+            <input type="hidden" name="individual" value="{% if individual %}1{% else %}0{% endif %}">
             {% if !custom_list_filter.is_empty() %}<input type="hidden" name="list" value="{{ custom_list_filter }}">{% endif %}
             {% if sort_value.as_str() != "recent" %}<input type="hidden" name="sort" value="{{ sort_value }}">{% endif %}
             <label for="library-search" class="visually-hidden">Search library</label>
@@ -56,9 +57,9 @@
     <div class="library-scope-row">
         {% if !list_counts.is_empty() %}
         <nav class="library-chips" aria-label="Filter by custom list">
-            <a class="library-chip{% if custom_list_filter.is_empty() %} active{% endif %}" href="/{% if sort_value.as_str() != "recent" %}?sort={{ sort_value }}{% endif %}">All <span class="library-chip-count">{{ total_count }}</span></a>
+            <a class="library-chip{% if custom_list_filter.is_empty() %} active{% endif %}" href="/?individual={% if individual %}1{% else %}0{% endif %}{% if sort_value.as_str() != "recent" %}&amp;sort={{ sort_value }}{% endif %}">All <span class="library-chip-count">{{ total_count }}</span></a>
             {% for (name, count) in list_counts %}
-            <a class="library-chip{% if name.as_str() == custom_list_filter.as_str() %} active{% endif %}" href="/?list={{ name|urlencode }}{% if sort_value.as_str() != "recent" %}&amp;sort={{ sort_value }}{% endif %}">{{ name }} <span class="library-chip-count">{{ count }}</span></a>
+            <a class="library-chip{% if name.as_str() == custom_list_filter.as_str() %} active{% endif %}" href="/?individual={% if individual %}1{% else %}0{% endif %}&amp;list={{ name|urlencode }}{% if sort_value.as_str() != "recent" %}&amp;sort={{ sort_value }}{% endif %}">{{ name }} <span class="library-chip-count">{{ count }}</span></a>
             {% endfor %}
         </nav>
         {% else %}
@@ -69,7 +70,14 @@
         {% endif %}
         <div class="library-scope-tools">
             <a href="/library/table" class="btn btn-secondary btn-sm">Table view</a>
-            <a href="/library/groups" class="btn btn-secondary btn-sm">Grouped view</a>
+            <form method="get" action="/" class="library-presentation-form" onsubmit="libraryPresentationSubmit(this)">
+                {% if !custom_list_filter.is_empty() %}<input type="hidden" name="list" value="{{ custom_list_filter }}">{% endif %}
+                {% if !search_query.is_empty() %}<input type="hidden" name="search" value="{{ search_query }}">{% endif %}
+                {% if sort_value.as_str() != "recent" %}<input type="hidden" name="sort" value="{{ sort_value }}">{% endif %}
+                <input type="hidden" name="individual" value="{% if individual %}0{% else %}1{% endif %}">
+                <label class="checkbox-row"><input id="library-individual" type="checkbox"{% if individual %} checked{% endif %} onchange="this.form.requestSubmit()"> Show individual releases</label>
+                <noscript><button class="btn btn-secondary btn-sm" type="submit">Change view</button></noscript>
+            </form>
             <a href="/library/follows" class="btn btn-secondary btn-sm">Release follows</a>
             {# Two-part sort: key select + direction toggle. Option
                values are each key's DEFAULT direction (recent =
@@ -90,7 +98,7 @@
                 <option value="recent"{% if sort_key.as_str() == "recent" %} selected{% endif %}>Recently added</option>
                 <option value="title"{% if sort_key.as_str() == "title" %} selected{% endif %}>Title</option>
                 {% if !score_format.is_empty() %}
-                <option value="score"{% if sort_key.as_str() == "score" %} selected{% endif %}>My score</option>
+                <option value="score"{% if sort_key.as_str() == "score" %} selected{% endif %}>{% if individual %}My score{% else %}Main title score{% endif %}</option>
                 {% endif %}
             </select>
             <button type="button"
@@ -112,13 +120,13 @@
                so it sits last among the quiet tools. index.js owns
                the mode; this button gets .active + the "Cancel" label
                swap while selecting. #}
-            <button type="button" id="bulk-select-toggle" class="btn btn-secondary btn-sm bulk-select-toggle" onclick="toggleBulkSelectMode()" title="Select series">
+            {% if individual %}<button type="button" id="bulk-select-toggle" class="btn btn-secondary btn-sm bulk-select-toggle" onclick="toggleBulkSelectMode()" title="Select series">
                 <svg class="bulk-select-toggle-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <polyline points="9 11 12 14 22 4"/>
                     <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
                 </svg>
                 <span class="bulk-select-toggle-label">Select</span>
-            </button>
+            </button>{% endif %}
             {% if recycle_count > 0 %}
             {# Recycle bin (#123): a quiet icon control, same footprint as
                the sort-direction toggle, shown only while the bin holds
@@ -132,13 +140,13 @@
     </div>
 </div>
 
-{% if cards.is_empty() %}
+{% if cards.is_empty() && franchise_cards.is_empty() %}
 <div class="empty-state">
     {% if !search_query.is_empty() || !custom_list_filter.is_empty() %}
     {# Distinguish "filter excluded everything" from "library is
        genuinely empty." Keeps the user from thinking the library
        was wiped. #}
-    <p>No series match your current filter.</p>
+    <p>No library entries match your current filter.</p>
     <p class="form-hint">
         {% if !search_query.is_empty() && !custom_list_filter.is_empty() %}
         Filtered by list <strong>{{ custom_list_filter }}</strong> and search <strong>"{{ search_query }}"</strong>.
@@ -149,7 +157,7 @@
         {% endif %}
     </p>
     <div class="empty-state-actions">
-        <a class="btn btn-secondary" href="/{% if sort_value.as_str() != "recent" %}?sort={{ sort_value }}{% endif %}">Clear filters</a>
+        <a class="btn btn-secondary" href="/?individual={% if individual %}1{% else %}0{% endif %}{% if sort_value.as_str() != "recent" %}&amp;sort={{ sort_value }}{% endif %}">Clear filters</a>
     </div>
     {% else %}
     <p>Your library is empty.</p>
@@ -161,9 +169,24 @@
     {% endif %}
 </div>
 {% else %}
-<div class="library-grid" id="library-grid">
+<div class="library-grid" id="library-grid"{% if !individual && visible_franchise_count == 0 || individual && visible_release_count == 0 %} style="display: none"{% endif %}>
+    {% for franchise in franchise_cards %}
+    <a href="{{ franchise.path }}" class="franchise-card" data-library-card data-search-titles="{{ franchise.search_titles }}"{% if !franchise.matches_search %} style="display: none"{% endif %}>
+        <div class="series-cover">
+            {% if !franchise.cover_url.is_empty() %}<img src="{{ franchise.cover_url }}" alt="" loading="lazy">{% else %}<div class="series-cover-placeholder">No Image</div>{% endif %}
+            {% if franchise.following %}<span class="franchise-follow-badge">Following</span>{% endif %}
+        </div>
+        <div class="card-progress card-progress-{{ franchise.progress.state }}{% if !franchise.progress.monitored %} card-progress-unmonitored{% endif %}" title="{{ franchise.progress.label }}"><div class="card-progress-fill" style="width: {{ franchise.progress.pct }}%"></div></div>
+        <div class="series-info">
+            <p class="series-title" title="{{ franchise.title }}">{{ franchise.title }}</p>
+            <p class="franchise-card-summary">{{ franchise.tracked }} release{% if franchise.tracked != 1 %}s{% endif %} in library{% if franchise.available > 0 %} &middot; {{ franchise.available }} more{% endif %}</p>
+            {% if !franchise.formats.is_empty() %}<p class="franchise-card-formats">{{ franchise.formats }}</p>{% endif %}
+            <p class="franchise-card-progress">{{ franchise.progress.label }}</p>
+        </div>
+    </a>
+    {% endfor %}
     {% for (s, prog) in cards %}
-    <a href="{{ crate::handlers::library::detail::path(s.anilist_id) }}" class="series-card" id="series-{{ s.id }}">
+    <a href="{{ crate::handlers::library::detail::path(s.anilist_id) }}" class="series-card" data-library-card id="series-{{ s.id }}"{% if hidden_release_ids.contains(&s.id) %} style="display: none"{% endif %}>
         {# Bulk-select checkbox overlay (issue #125). Hidden until the
            library grid enters .selecting mode (see static/js/index.js
            toggleBulkSelectMode). All click handling happens in a
@@ -227,6 +250,7 @@
     </a>
     {% endfor %}
 </div>
+<div id="library-search-empty" class="empty-state"{% if individual && visible_release_count > 0 || !individual && visible_franchise_count > 0 %} style="display: none"{% endif %}><p>No library entries match your search.</p></div>
 {% endif %}
 </div>{# /#library-page #}
 

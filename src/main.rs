@@ -803,6 +803,7 @@ async fn main() {
         )
         .route("/library/table", get(handlers::library::table::page))
         .route("/library/groups", get(handlers::library::groups::page))
+        .route("/franchises/{id}", get(handlers::library::navigation::page))
         .route(
             "/library/groups/{seed}/preview",
             get(handlers::library::groups::preview::page),
