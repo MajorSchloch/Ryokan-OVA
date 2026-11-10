@@ -54,7 +54,7 @@ function librarySortParams(what, el) {
     if (document.body.classList.contains('bulk-selecting') && typeof toggleBulkSelectMode === 'function') {
         toggleBulkSelectMode();
     }
-    var params = {};
+    var params = { individual: document.getElementById('library-individual')?.checked ? '1' : '0' };
     if (sort !== 'recent') params.sort = sort;
     var current = new URL(window.location.href);
     var list = current.searchParams.get('list');
@@ -73,12 +73,12 @@ function _liveLibrarySearchImmediate(input) {
     if (!grid) return;
 
     let visibleCount = 0;
-    grid.querySelectorAll('.series-card').forEach((card) => {
+    grid.querySelectorAll('[data-library-card]').forEach((card) => {
         // Match against all three title fields. They're in the DOM
         // as .title-option spans (title-switcher controls which one
         // is visible via CSS, but all three are searchable).
         const titles = card.querySelectorAll('.title-option');
-        let matches = q === '';
+        let matches = q === '' || (card.dataset.searchTitles || '').toLowerCase().includes(q);
         if (!matches) {
             for (let i = 0; i < titles.length; i++) {
                 if (titles[i].textContent.toLowerCase().includes(q)) {
@@ -108,7 +108,7 @@ function _liveLibrarySearchImmediate(input) {
             empty.id = 'library-search-empty';
             empty.className = 'empty-state';
             const p = document.createElement('p');
-            p.textContent = 'No series match your search.';
+            p.textContent = 'No library entries match your search.';
             empty.appendChild(p);
             grid.parentNode.insertBefore(empty, grid.nextSibling);
         }
@@ -118,6 +118,16 @@ function _liveLibrarySearchImmediate(input) {
         empty.style.display = 'none';
         grid.style.display = '';
     }
+}
+
+function libraryPresentationSubmit(form) {
+    if (document.body.classList.contains('bulk-selecting')) toggleBulkSelectMode();
+    var search = document.getElementById('library-search');
+    var field = form.querySelector('[name=search]');
+    if (search && search.value.trim()) {
+        if (!field) { field = document.createElement('input'); field.type = 'hidden'; field.name = 'search'; form.appendChild(field); }
+        field.value = search.value.trim();
+    } else if (field) { field.remove(); }
 }
 
 function openAddModal() {
