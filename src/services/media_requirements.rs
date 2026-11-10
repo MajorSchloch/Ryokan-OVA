@@ -290,11 +290,19 @@ pub async fn observe_files(
     }
     let mut observed = HashMap::new();
     let mut unavailable = HashSet::new();
+    let mut seen = HashSet::new();
     for file in files {
         if !file.is_own_season() || file.is_special {
             continue;
         }
         let episodes = file.episode_number..=file.episode_last.max(file.episode_number);
+        // Multiple files for one slot need an explicit choice. Combining
+        // their facts could manufacture a lower resolution or subtitle gain.
+        for ep in episodes.clone() {
+            if !seen.insert(ep) {
+                unavailable.insert(ep);
+            }
+        }
         let path = match tokio::fs::canonicalize(folder.join(&file.filename)).await {
             Ok(path) if path.starts_with(&folder) => path,
             _ => {
@@ -605,5 +613,49 @@ mod tests {
             let candidate = super::super::source::classify_release_sync("Show [2160p]", None);
             assert!(p.judge_candidate(&actual, &candidate, "Show").is_err());
         }
+    }
+    #[tokio::test]
+    async fn overlapping_valid_files_require_review_instead_of_combining_capabilities() {
+        let db = crate::test_support::in_memory_pool().await;
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().join("Show");
+        tokio::fs::create_dir(&folder).await.unwrap();
+        for (name, width, height, subtitles) in [
+            ("Show - S01E01 [1080p].mkv", 1920, 1080, false),
+            ("Show - S01E01 [720p].mkv", 1280, 720, true),
+        ] {
+            let video = folder.join(name);
+            tokio::fs::write(&video, name).await.unwrap();
+            let identity = media_info::FileIdentity::from_metadata(
+                &tokio::fs::metadata(&video).await.unwrap(),
+            )
+            .unwrap();
+            let mut streams =
+                vec![serde_json::json!({"codec_type":"video","width":width,"height":height})];
+            if subtitles {
+                streams.push(serde_json::json!({"codec_type":"subtitle","codec_name":"ass","tags":{"language":"eng"}}));
+            }
+            crate::models::media_probe_cache::upsert_identified(
+                &db,
+                video.to_str().unwrap(),
+                &identity.cache_key(),
+                identity.size as i64,
+                &serde_json::json!({"streams":streams}).to_string(),
+            )
+            .await;
+        }
+        let cfg = Config {
+            media_requirements_enabled: true,
+            required_subtitle_languages: "en".into(),
+            media_root: temp.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let files = media::scan_series_folder(&cfg.media_root, "Show").await;
+        assert_eq!(files.len(), 2);
+        assert!(
+            !observe_files(&db, &cfg, "Show", &files)
+                .await
+                .contains_key(&1)
+        );
     }
 }
