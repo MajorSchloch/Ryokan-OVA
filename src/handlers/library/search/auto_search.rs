@@ -163,6 +163,8 @@ pub(crate) struct UpgradeContext {
         std::collections::HashMap<i32, crate::services::source::ClassificationResult>,
     pub quality_tags: std::collections::HashMap<i32, episode_tags::EpisodeQualityTag>,
     pub disk_files: Vec<media::EpisodeFile>,
+    pub observed: std::collections::HashMap<i32, crate::services::media_requirements::Observed>,
+    pub requirements_loaded: bool,
 }
 
 /// Optional `?progress_id=<opaque>` query string the frontend appends to
@@ -308,7 +310,7 @@ async fn run_auto_search_targets_with_upgrades(
     targets: Vec<auto_search::SearchTarget>,
     allow_batch: bool,
     series_id: Option<i64>,
-    upgrades: UpgradeContext,
+    mut upgrades: UpgradeContext,
 ) -> Result<auto_search::AutoSearchReport, (axum::http::StatusCode, String)> {
     // Up-front configuration check — fail fast if NO client is
     // configured at all. The per-release dispatch below resolves the
@@ -332,10 +334,46 @@ async fn run_auto_search_targets_with_upgrades(
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .unwrap_or_default();
     let upgrade_policy = crate::services::source::UpgradePolicy::from_config(&cfg);
+    let requirements = crate::services::media_requirements::Policy::from_config(&cfg);
 
-    let (_, _, detail) = resolve_series_context_by(&state.db, request_id, by_anilist)
+    let (tracked, _, detail) = resolve_series_context_by(&state.db, request_id, by_anilist)
         .await
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+    // Every automatic entry point, including the per-episode button, reads
+    // the same actual files. An empty caller context must not bypass targets.
+    if requirements.enabled
+        && let Some(tracked) = &tracked
+    {
+        if !upgrades.requirements_loaded {
+            upgrades.disk_files =
+                media::scan_series_folder(&cfg.media_root, &tracked.folder_name).await;
+            upgrades.quality_tags = episode_tags::get_for_series(&state.db, tracked.id)
+                .await
+                .unwrap_or_default();
+            upgrades.observed = crate::services::media_requirements::observe_files(
+                &state.db,
+                &cfg,
+                &tracked.folder_name,
+                &upgrades.disk_files,
+            )
+            .await;
+        }
+        upgrades.classifications = upgrades
+            .disk_files
+            .iter()
+            .flat_map(|file| {
+                file.episodes().map(|ep| {
+                    (
+                        ep,
+                        auto_search::resolve_existing_classification(
+                            file,
+                            upgrades.quality_tags.get(&ep),
+                        ),
+                    )
+                })
+            })
+            .collect();
+    }
 
     let title = if !detail.title_english.is_empty() {
         &detail.title_english
@@ -412,11 +450,45 @@ async fn run_auto_search_targets_with_upgrades(
     // Clone the compiled-CF Arc out from under the read lock so the
     // scoring loop below runs without holding it.
     let cfs = state.custom_formats.read().await.clone();
+    let pt_indexer_ids: std::collections::HashSet<i64> = state
+        .indexers
+        .read()
+        .await
+        .iter()
+        .filter(|indexer| indexer.is_private_tracker())
+        .map(|indexer| indexer.id())
+        .collect();
 
     let mut grabbed = Vec::new();
     let mut skipped = Vec::new();
     let total_targets = targets.len();
     for (idx, target) in targets.into_iter().enumerate() {
+        let target_episode = match target {
+            auto_search::SearchTarget::Episode(ep) => ep,
+            auto_search::SearchTarget::Single => 1,
+        };
+        if requirements.enabled && upgrades.classifications.contains_key(&target_episode) {
+            let target_blocked = tracked.as_ref().is_none_or(|row| !row.allow_upgrades)
+                || upgrades
+                    .observed
+                    .get(&target_episode)
+                    .is_none_or(|file| requirements.target_met(file))
+                || upgrades
+                    .quality_tags
+                    .get(&target_episode)
+                    .is_some_and(|tag| tag.manual_override || tag.state == "grabbed")
+                || upgrades
+                    .disk_files
+                    .iter()
+                    .any(|file| file.holds(target_episode) && file.is_multi_episode());
+            if target_blocked {
+                skipped.push(format!(
+                    "{}: existing file is at its target or is protected from automatic replacement",
+                    auto_search::target_label(&target)
+                ));
+                continue;
+            }
+        }
         // Issue #102 — auto-search of a "monitor all" series queues a
         // per-episode loop. If the user removes the series mid-loop
         // (typical stress-test discovery: notice the wrong show was
@@ -457,7 +529,7 @@ async fn run_auto_search_targets_with_upgrades(
             });
         }
         let label = auto_search::target_label(&target);
-        let is_upgrade = matches!(&target, auto_search::SearchTarget::Episode(n) if upgrades.classifications.contains_key(n));
+        let is_upgrade = upgrades.classifications.contains_key(&target_episode);
         progress::emit(
             "search",
             "info",
@@ -470,7 +542,49 @@ async fn run_auto_search_targets_with_upgrades(
             false,
         )
         .await;
-        let (best_pick, fuzzy_only) = auto_search::find_best_for_target_with_diag(
+        let eligible =
+            |result: &crate::services::nyaa::SearchResult,
+             incoming: &crate::services::source::ClassificationResult| {
+                if !requirements.enabled {
+                    return true;
+                }
+                // Mixed packs and reviewed multi-episode sources cannot bypass
+                // protection by winning a search for a missing episode.
+                if !upgrades.disk_files.is_empty()
+                    && crate::services::upgrade::release_covers_multiple(result)
+                {
+                    return false;
+                }
+                if !is_upgrade {
+                    return true;
+                }
+                if tracked.as_ref().is_none_or(|row| !row.allow_pt_upgrades)
+                    && result
+                        .indexer_id
+                        .is_some_and(|id| pt_indexer_ids.contains(&id))
+                {
+                    return false;
+                }
+                let Some(existing) = upgrades.classifications.get(&target_episode) else {
+                    return false;
+                };
+                crate::services::upgrade::judge_release_with_requirements(
+                    &requirements,
+                    upgrades.observed.get(&target_episode),
+                    &upgrade_policy,
+                    &cfs,
+                    existing,
+                    upgrades.quality_tags.get(&target_episode),
+                    upgrades
+                        .disk_files
+                        .iter()
+                        .find(|file| file.holds(target_episode)),
+                    incoming,
+                    result,
+                )
+                .is_ok()
+            };
+        let (best_pick, fuzzy_only) = auto_search::find_best_for_target_with_filter(
             &state.db,
             &detail,
             &cfg,
@@ -479,6 +593,7 @@ async fn run_auto_search_targets_with_upgrades(
             is_upgrade,
             &cfs,
             &state.indexers,
+            Some(&eligible),
         )
         .await;
         match best_pick {
@@ -511,15 +626,15 @@ async fn run_auto_search_targets_with_upgrades(
                 // Custom Format score). A bare rank comparison here let
                 // the Wanted page's cutoff search take a BDMV pack for
                 // a Remux file the sweep refuses.
-                if let auto_search::SearchTarget::Episode(ep_num) = &target
-                    && let Some(existing) = upgrades.classifications.get(ep_num)
-                {
-                    match crate::services::upgrade::judge_release_for_episode(
+                if let Some(existing) = upgrades.classifications.get(&target_episode) {
+                    match crate::services::upgrade::judge_release_with_requirements(
+                        &requirements,
+                        upgrades.observed.get(&target_episode),
                         &upgrade_policy,
                         &cfs,
                         existing,
-                        upgrades.quality_tags.get(ep_num),
-                        upgrades.disk_files.iter().find(|f| f.holds(*ep_num)),
+                        upgrades.quality_tags.get(&target_episode),
+                        upgrades.disk_files.iter().find(|f| f.holds(target_episode)),
                         &incoming_classification,
                         &result,
                     ) {
@@ -1116,15 +1231,37 @@ pub async fn auto_search_series(
         &existing_eps,
         &monitored_eps,
     );
-    let upgrade_targets = auto_search::build_upgrade_targets(
-        &existing_files,
-        upgrade_candidates,
-        cutoff_source,
-        cutoff_resolution,
-        cutoff_is_remux,
-        cutoff_is_bdmv,
-        &quality_tags,
-    );
+    let requirements = crate::services::media_requirements::Policy::from_config(&cfg);
+    let observed = if requirements.enabled {
+        crate::services::media_requirements::observe_files(
+            &state.db,
+            &cfg,
+            &folder_name,
+            &existing_files,
+        )
+        .await
+    } else {
+        std::collections::HashMap::new()
+    };
+    let upgrade_targets = if requirements.enabled {
+        auto_search::build_requirements_upgrade_targets(
+            &existing_files,
+            upgrade_candidates,
+            &quality_tags,
+            &requirements,
+            &observed,
+        )
+    } else {
+        auto_search::build_upgrade_targets(
+            &existing_files,
+            upgrade_candidates,
+            cutoff_source,
+            cutoff_resolution,
+            cutoff_is_remux,
+            cutoff_is_bdmv,
+            &quality_tags,
+        )
+    };
     // Merge upgrade targets (avoid duplicates with missing targets).
     let existing_target_eps: std::collections::HashSet<i32> = targets
         .iter()
@@ -1183,6 +1320,8 @@ pub async fn auto_search_series(
             .collect(),
         quality_tags,
         disk_files: existing_files,
+        observed,
+        requirements_loaded: requirements.enabled,
     };
     // Spawn as an independent task so the grab completes even if the client
     // disconnects. The spawned future is wrapped in `progress::scope` when a

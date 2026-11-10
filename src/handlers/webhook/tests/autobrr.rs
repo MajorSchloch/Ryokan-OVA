@@ -299,6 +299,245 @@ impl crate::services::download_client::DownloadClient for AcceptingClient {
     }
 }
 
+struct RequirementsFixture {
+    db: SqlitePool,
+    app: axum::Router,
+    root: tempfile::TempDir,
+    folder: std::path::PathBuf,
+    series_id: i64,
+    adds: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+async fn requirements_fixture() -> RequirementsFixture {
+    let db = in_memory_pool().await;
+    seed_autobrr_enabled(&db, KEY).await;
+    let series_id = seed_series(&db).await;
+    let root = tempfile::tempdir().unwrap();
+    let mut cfg = crate::models::config::get_config(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    cfg.media_requirements_enabled = true;
+    cfg.media_root = root.path().to_string_lossy().into_owned();
+    cfg.minimum_resolution = "720".into();
+    cfg.target_resolution = "1080".into();
+    cfg.required_subtitle_languages = "de".into();
+    crate::models::config::save_config(&db, &cfg).await.unwrap();
+    let relative = "Test franchise/Test Show [AniList 1]";
+    sqlx::query("UPDATE series SET folder_name=?,allow_upgrades=1 WHERE id=?")
+        .bind(relative)
+        .bind(series_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    let client = AcceptingClient::default();
+    let adds = client.adds.clone();
+    let state = build_test_app_state(db.clone(), Some(std::sync::Arc::new(client)));
+    RequirementsFixture {
+        db,
+        app: autobrr_webhook_router(state),
+        folder: root.path().join(relative),
+        root,
+        series_id,
+        adds,
+    }
+}
+
+fn requirements_payload(title: &str) -> String {
+    serde_json::json!({
+        "torrent_name": title,
+        "info_hash": "c12fe1c06bba254a9dc9f519b335aa7c1367a88a",
+        "magnet_uri": "magnet:?xt=urn:btih:c12fe1c06bba254a9dc9f519b335aa7c1367a88a",
+        "indexer": "Nyaa",
+    })
+    .to_string()
+}
+
+async fn assert_no_requirement_add(fixture: &RequirementsFixture, title: &str, reason: &str) {
+    let (status, body) = post_payload(fixture.app.clone(), &requirements_payload(title)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("\"status\":\"skipped\""), "{body}");
+    assert!(body.contains(reason), "{body}");
+    assert_eq!(fixture.adds.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn requirements_push_keeps_target_met_and_range_files_without_a_client_add() {
+    let fixture = requirements_fixture().await;
+    std::fs::create_dir_all(&fixture.folder).unwrap();
+    let file = fixture.folder.join("Test Show S01E01-E02 [1080p].mkv");
+    std::fs::write(&file, "existing target file").unwrap();
+    let identity = crate::services::media_info::FileIdentity::from_metadata(
+        &std::fs::metadata(&file).unwrap(),
+    )
+    .unwrap();
+    crate::models::media_probe_cache::upsert_identified(&fixture.db,file.to_str().unwrap(),&identity.cache_key(),identity.size as i64,r#"{"streams":[{"index":0,"codec_type":"video","width":1920,"height":1080},{"index":1,"codec_type":"subtitle","codec_name":"ass","tags":{"language":"deu"}}]}"#).await;
+    assert_no_requirement_add(
+        &fixture,
+        "[Other] Test Show S01E01-E03 [2160p BluRay v2]",
+        "overlaps existing episodes",
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "existing target file"
+    );
+    let grabs: i64 = sqlx::query_scalar("SELECT count(*) FROM grabbed_torrents")
+        .fetch_one(&fixture.db)
+        .await
+        .unwrap();
+    assert_eq!(grabs, 0);
+}
+
+#[tokio::test]
+async fn requirements_push_checks_configured_floor_and_unknown_resolution_before_add() {
+    for (title, reason) in [
+        ("Test Show - 03 [720p]", "below the configured minimum"),
+        ("Test Show - 03", "resolution is unknown"),
+    ] {
+        let fixture = requirements_fixture().await;
+        let mut cfg = crate::models::config::get_config(&fixture.db)
+            .await
+            .unwrap()
+            .unwrap();
+        cfg.minimum_resolution = "1080".into();
+        cfg.target_resolution = "2160".into();
+        crate::models::config::save_config(&fixture.db, &cfg)
+            .await
+            .unwrap();
+        assert_no_requirement_add(&fixture, title, reason).await;
+    }
+}
+
+#[tokio::test]
+async fn requirements_push_respects_upgrade_switch_but_allows_missing_nested_release() {
+    let fixture = requirements_fixture().await;
+    sqlx::query("UPDATE series SET allow_upgrades=0 WHERE id=?")
+        .bind(fixture.series_id)
+        .execute(&fixture.db)
+        .await
+        .unwrap();
+    assert!(
+        !fixture.folder.exists(),
+        "the franchise and release are both legitimately absent"
+    );
+    let (status, body) = post_payload(
+        fixture.app.clone(),
+        &requirements_payload("Test Show - 03 [1080p]"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("\"status\":\"ok\""), "{body}");
+    assert_eq!(fixture.adds.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    let fixture = requirements_fixture().await;
+    sqlx::query("UPDATE series SET allow_upgrades=0 WHERE id=?")
+        .bind(fixture.series_id)
+        .execute(&fixture.db)
+        .await
+        .unwrap();
+    std::fs::create_dir_all(&fixture.folder).unwrap();
+    std::fs::write(fixture.folder.join("Test Show S01E03.mkv"), "existing").unwrap();
+    assert_no_requirement_add(
+        &fixture,
+        "Test Show - 03 [2160p]",
+        "Upgrades are turned off",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn requirements_push_respects_pins_active_tags_and_pending_jobs() {
+    for protection in ["pin", "tag", "pending"] {
+        let fixture = requirements_fixture().await;
+        if protection == "pending" {
+            crate::models::grabbed_torrents::record_grab(
+                &fixture.db,
+                "aabbccddeeff00112233445566778899aabbccdd",
+                "Other release",
+                fixture.series_id,
+                &[3],
+                false,
+            )
+            .await
+            .unwrap();
+        } else {
+            sqlx::query("INSERT INTO episode_quality_tags(series_id,episode_number,state,manual_override) VALUES(?,3,?,?)")
+                .bind(fixture.series_id).bind(if protection == "tag" {"grabbed"} else {"completed"}).bind(protection == "pin").execute(&fixture.db).await.unwrap();
+        }
+        assert_no_requirement_add(
+            &fixture,
+            "Test Show - 03 [1080p]",
+            if protection == "pin" {
+                "pinned"
+            } else {
+                "already downloading"
+            },
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn requirements_push_fails_closed_for_unavailable_or_escaped_roots() {
+    let fixture = requirements_fixture().await;
+    let mut cfg = crate::models::config::get_config(&fixture.db)
+        .await
+        .unwrap()
+        .unwrap();
+    cfg.media_root = fixture
+        .root
+        .path()
+        .join("unmounted")
+        .to_string_lossy()
+        .into_owned();
+    crate::models::config::save_config(&fixture.db, &cfg)
+        .await
+        .unwrap();
+    assert_no_requirement_add(
+        &fixture,
+        "Test Show - 03 [1080p]",
+        "media folder is unavailable",
+    )
+    .await;
+    #[cfg(unix)]
+    {
+        let fixture = requirements_fixture().await;
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), fixture.root.path().join("escape")).unwrap();
+        sqlx::query("UPDATE series SET folder_name='escape' WHERE id=?")
+            .bind(fixture.series_id)
+            .execute(&fixture.db)
+            .await
+            .unwrap();
+        assert_no_requirement_add(
+            &fixture,
+            "Test Show - 03 [1080p]",
+            "could not be checked safely",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn legacy_push_keeps_its_existing_dispatch_behavior() {
+    let fixture = requirements_fixture().await;
+    let mut cfg = crate::models::config::get_config(&fixture.db)
+        .await
+        .unwrap()
+        .unwrap();
+    cfg.media_requirements_enabled = false;
+    cfg.media_root = "/unavailable/legacy-webhook".into();
+    crate::models::config::save_config(&fixture.db, &cfg)
+        .await
+        .unwrap();
+    let (status, body) =
+        post_payload(fixture.app.clone(), &requirements_payload("Test Show - 03")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("\"status\":\"ok\""), "{body}");
+    assert_eq!(fixture.adds.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn a_push_without_a_hash_records_the_torrents_own() {
     // With no hash the grab could only be found in the client by name,

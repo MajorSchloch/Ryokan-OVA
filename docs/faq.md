@@ -19,7 +19,7 @@ No. Ryokan only manages anime in the current 1.x line. Manga, light novels, and 
 
 ## How do I follow future releases after I remove a series?
 
-Open the franchise poster and select **Choose releases & follow** or **Manage releases & follow**. Choose the releases and future formats you want, then select **Save franchise follow**. A standalone title starts with one release. Release details link to the parent with **Part of [franchise]**. For an anime with no saved parent, select **Explore franchise**. Open **Library → Release follows** to edit or stop a follow, even after you remove the series.
+Open the franchise poster and select **Choose releases & follow** or **Manage releases & follow**. Choose the releases and future formats you want, then select **Save selection and follow**. A standalone title starts with one release. Release details link to the parent with **Part of [franchise]**. For an anime with no saved parent, select **Explore franchise**. Open **Library → Release follows** to edit or stop a follow, even after you remove the series.
 
 Ryokan saves the UTC date when you start the follow. It checks AniList when you save, at startup, and every six hours. An upcoming sequel qualifies even if AniList announced it before you started the follow. For a sequel that has aired, its first air date must be on or after your follow date. If AniList gives only a month or year, the whole period must qualify.
 
@@ -47,7 +47,7 @@ Yes. Ryokan exposes a Swagger UI at `/api-docs` and the OpenAPI JSON at `/api-do
 
 ## How do I see related anime in the library?
 
-Select **Grouped view** in the library. Open a group to see its entries in release order, oldest first. Ryokan uses the AniList relationships in its metadata cache. Entries without a known release date appear last. Each title keeps its own episode numbers.
+The library opens with one poster per franchise. Open a poster to see releases in premiere order. Select **Show individual releases** for separate posters. Each release keeps its own episode numbers. Availability counts follow episode monitoring; future and unmonitored episodes do not count as missing.
 
 Select **Franchise** to manage the same follow from any tracked release. Saving a follow preserves existing episode settings and adds missing releases you select. An unchecked release stays outside the follow. A sync exclusion also prevents an automatic add.
 

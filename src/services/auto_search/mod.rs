@@ -52,7 +52,8 @@ use seadex_lookup::{fetch_seadex_payload, is_seadex_match};
 pub use seadex_lookup::{prewarm_seadex_negative, seadex_warm_cache_from_db};
 pub(crate) use seadex_lookup::{seadex_gates, seadex_hashes_for_rss};
 pub use search_target::{
-    SearchTarget, build_missing_targets, build_monitored_targets, build_upgrade_targets,
+    SearchTarget, build_missing_targets, build_monitored_targets,
+    build_requirements_upgrade_targets, build_upgrade_targets,
 };
 
 #[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
@@ -430,7 +431,7 @@ pub async fn find_best_for_target_with_diag(
     cfs: &[CompiledCustomFormat],
     indexers_cache: &crate::IndexerCache,
 ) -> (Option<SearchResult>, Vec<String>) {
-    let (scored, fuzzy_only) = collect_scored_for_target(
+    find_best_for_target_with_filter(
         db,
         detail,
         config,
@@ -439,6 +440,38 @@ pub async fn find_best_for_target_with_diag(
         batch_episode_match,
         cfs,
         indexers_cache,
+        None,
+    )
+    .await
+}
+
+pub type CandidateFilter<'a> = &'a (dyn Fn(&SearchResult, &ClassificationResult) -> bool + Sync);
+
+/// Apply capability/provenance eligibility to the complete candidate pool
+/// before choosing a winner, so an ineligible top score cannot hide a valid
+/// second result. Interactive/manual search remains unchanged.
+#[allow(clippy::too_many_arguments)]
+pub async fn find_best_for_target_with_filter(
+    db: &SqlitePool,
+    detail: &AnimeDetail,
+    config: &Config,
+    target: &SearchTarget,
+    allow_batch: bool,
+    batch_episode_match: bool,
+    cfs: &[CompiledCustomFormat],
+    indexers_cache: &crate::IndexerCache,
+    eligible: Option<CandidateFilter<'_>>,
+) -> (Option<SearchResult>, Vec<String>) {
+    let (scored, fuzzy_only) = collect_scored_for_target_filtered(
+        db,
+        detail,
+        config,
+        target,
+        allow_batch,
+        batch_episode_match,
+        cfs,
+        indexers_cache,
+        eligible,
     )
     .await;
     (scored.into_iter().next(), fuzzy_only)
@@ -704,6 +737,16 @@ pub async fn collect_scored_batches_for_target_with_diag(
     // text-query sweep can't find batches whose titles don't carry
     // the target's alias tokens.
     for mut result in seadex_payload.candidates {
+        if require_verbatim
+            && config.media_requirements_enabled
+            && !passes_presearch_requirements(
+                &result,
+                Some(Resolution::from_str(&config.minimum_resolution)),
+                None,
+            )
+        {
+            continue;
+        }
         let dedupe_key = if !result.info_hash.is_empty() {
             result.info_hash.clone()
         } else {
@@ -727,7 +770,11 @@ pub async fn collect_scored_batches_for_target_with_diag(
         anilist_id: detail.id,
         phase: MatchPhase::Primary,
         require_verbatim,
+        minimum_resolution: config
+            .media_requirements_enabled
+            .then(|| Resolution::from_str(&config.minimum_resolution)),
         fuzzy_rejected: &fuzzy_rejected,
+        eligible: None,
         aliases: &aliases,
         indexer_categories: &indexer_categories,
         sibling_precompute: &sibling_precompute,
@@ -841,12 +888,22 @@ pub async fn collect_scored_batches_for_target_with_diag(
         .await;
 
         if is_finished
+            && !config.media_requirements_enabled
             && finished_mode == quality::FinishedSeriesMode::BdOnly
             && !source::passes_bd_only_filter(&classification)
         {
             continue;
         }
 
+        if require_verbatim && config.media_requirements_enabled {
+            if classification.resolution != Resolution::Unknown
+                && classification.resolution.rank()
+                    < Resolution::from_str(&config.minimum_resolution).rank()
+            {
+                continue;
+            }
+            c.resolution = classification.resolution.as_str().to_string();
+        }
         // `collect_scored_batches_for_target` feeds both the user-facing
         // `interactive_search_batches` and the auto-grab
         // `find_best_batch_for_target`. Populating the breakdown here
@@ -885,7 +942,11 @@ pub async fn collect_scored_batches_for_target_with_diag(
         }
     }
 
-    scored.sort_by(|a, b| b.score.cmp(&a.score).then(b.seeders.cmp(&a.seeders)));
+    if require_verbatim {
+        sort_automatic_candidates(&mut scored, config);
+    } else {
+        scored.sort_by(|a, b| b.score.cmp(&a.score).then(b.seeders.cmp(&a.seeders)));
+    }
     // Misgrab guardrails: never hand back a release the blocklist knows,
     // by hash (any series) or by exact title (this series). One read per
     // search; the interactive picker deliberately skips this so its
@@ -926,7 +987,7 @@ pub async fn collect_scored_batches_for_target_with_diag(
 /// same answer as filtering pre-scoring because `rescore_for_auto_search`
 /// applies its per-target batch bump uniformly inside each target kind.
 #[allow(clippy::too_many_arguments)]
-async fn collect_scored_for_target(
+async fn collect_scored_for_target_filtered(
     db: &SqlitePool,
     detail: &AnimeDetail,
     config: &Config,
@@ -935,6 +996,7 @@ async fn collect_scored_for_target(
     batch_episode_match: bool,
     cfs: &[CompiledCustomFormat],
     indexers_cache: &crate::IndexerCache,
+    eligible: Option<CandidateFilter<'_>>,
 ) -> (Vec<SearchResult>, Vec<String>) {
     let require_verbatim = true;
     let (aliases, canonical_aliases, variant_aliases) = collect_aliases_with_variants(detail);
@@ -997,6 +1059,15 @@ async fn collect_scored_for_target(
         if !allow_batch && result.is_batch {
             continue;
         }
+        if config.media_requirements_enabled
+            && !passes_presearch_requirements(
+                &result,
+                Some(Resolution::from_str(&config.minimum_resolution)),
+                eligible,
+            )
+        {
+            continue;
+        }
         let dedupe_key = if !result.info_hash.is_empty() {
             result.info_hash.clone()
         } else {
@@ -1021,6 +1092,10 @@ async fn collect_scored_for_target(
         phase: MatchPhase::Primary,
         require_verbatim,
         fuzzy_rejected: &fuzzy_rejected,
+        minimum_resolution: config
+            .media_requirements_enabled
+            .then(|| Resolution::from_str(&config.minimum_resolution)),
+        eligible,
         aliases: &aliases,
         indexer_categories: &indexer_categories,
         sibling_precompute: &sibling_precompute,
@@ -1168,6 +1243,7 @@ async fn collect_scored_for_target(
     // exactly once, and both the BdOnly filter and the classification-aware
     // scoring reuse that single result.
     let mut scored: Vec<SearchResult> = Vec::with_capacity(candidates.len());
+    let mut classified = std::collections::HashMap::new();
     for mut c in candidates.drain(..) {
         let classification = source::classify_release(
             db,
@@ -1189,12 +1265,25 @@ async fn collect_scored_for_target(
         // BdOnly filter: drop non-BluRay releases for finished series when the
         // user has asked for BD only. Unknown sources get a pass.
         if is_finished
+            && !config.media_requirements_enabled
             && finished_mode == quality::FinishedSeriesMode::BdOnly
             && !source::passes_bd_only_filter(&classification)
         {
             continue;
         }
 
+        if config.media_requirements_enabled {
+            if classification.resolution != Resolution::Unknown
+                && classification.resolution.rank()
+                    < Resolution::from_str(&config.minimum_resolution).rank()
+            {
+                continue;
+            }
+            c.resolution = classification.resolution.as_str().to_string();
+        }
+        if eligible.is_some_and(|filter| !filter(&c, &classification)) {
+            continue;
+        }
         let base = rescore_for_auto_search(
             &c,
             &classification,
@@ -1220,11 +1309,12 @@ async fn collect_scored_for_target(
             config.custom_format_minimum_score,
         ) {
             c.score = final_score;
+            classified.insert((c.info_hash.clone(), c.title.clone()), classification);
             scored.push(c);
         }
     }
 
-    scored.sort_by(|a, b| b.score.cmp(&a.score).then(b.seeders.cmp(&a.seeders)));
+    sort_automatic_candidates(&mut scored, config);
     // Misgrab guardrails: never hand back a release the blocklist knows,
     // by hash (any series) or by exact title (this series). One read per
     // search; the interactive picker deliberately skips this so its
@@ -1249,6 +1339,15 @@ async fn collect_scored_for_target(
         scored,
     )
     .await;
+    // Numbering decisions may reveal a reviewed replay or a wider range.
+    // Recheck that effective coverage before choosing the winner.
+    if let Some(eligible) = eligible {
+        scored.retain(|candidate| {
+            classified
+                .get(&(candidate.info_hash.clone(), candidate.title.clone()))
+                .is_some_and(|classification| eligible(candidate, classification))
+        });
+    }
     (scored, fuzzy_rejected.into_inner().unwrap_or_default())
 }
 
@@ -1275,6 +1374,8 @@ impl AutoQueryCtx<'_> {
 
 #[derive(Clone, Copy)]
 struct AutoQueryCtx<'a> {
+    minimum_resolution: Option<Resolution>,
+    eligible: Option<CandidateFilter<'a>>,
     db: &'a sqlx::SqlitePool,
     anilist_id: i64,
     /// Which query pass this context runs; stamped on every candidate.
@@ -1540,6 +1641,9 @@ async fn run_queries(
             // silently letting SeaDex-curated batches through would
             // bypass that setting. SeaDex bypasses *heuristic* title
             // matching, not the user's batch-allowed policy.
+            if !passes_presearch_requirements(&result, ctx.minimum_resolution, ctx.eligible) {
+                continue;
+            }
             if !ctx.allow_batch && result.is_batch {
                 continue;
             }
@@ -1620,6 +1724,9 @@ async fn run_queries(
             result.title.to_lowercase()
         };
         if seen.contains(&dedupe_key) || rejected_here.contains(&dedupe_key) {
+            continue;
+        }
+        if !passes_presearch_requirements(&result, ctx.minimum_resolution, ctx.eligible) {
             continue;
         }
         if !ctx.allow_batch && result.is_batch {
@@ -2092,7 +2199,20 @@ fn nyaa_search_categories(config: &Config, format: &str) -> Vec<String> {
     if !config.nyaa_enabled {
         return Vec::new();
     }
-    quality::nyaa_categories_for_format(format, config.allow_non_english)
+    quality::nyaa_categories_for_format(format, allows_non_english(config))
+}
+
+/// Configured subtitle requirements may need releases outside Nyaa's
+/// English-only category. Legacy categories remain unchanged otherwise.
+pub fn allows_non_english(config: &Config) -> bool {
+    config.allow_non_english
+        || (config.media_requirements_enabled
+            && (config.minimum_subtitle_check || config.target_subtitle_check)
+            && config
+                .required_subtitle_languages
+                .split(',')
+                .filter_map(crate::services::media_info::normalize_language)
+                .any(|language| language != "en"))
 }
 
 /// Async entry-point variant — hits the DB for franchise aliases when
@@ -2285,7 +2405,11 @@ fn display_title(detail: &AnimeDetail) -> &str {
 /// Map the config's resolution preference to the bare-number string form that
 /// Nyaa search options expect ("480", "720", "1080", "2160").
 fn preferred_resolution_search_value(config: &Config) -> String {
-    match Resolution::from_str(&config.preferred_resolution) {
+    match Resolution::from_str(if config.media_requirements_enabled {
+        &config.target_resolution
+    } else {
+        &config.preferred_resolution
+    }) {
         Resolution::R480p => "480".to_string(),
         Resolution::R576p => "576".to_string(),
         Resolution::R720p => "720".to_string(),
@@ -2293,6 +2417,46 @@ fn preferred_resolution_search_value(config: &Config) -> String {
         Resolution::R2160p => "2160".to_string(),
         Resolution::Unknown => "1080".to_string(),
     }
+}
+
+fn passes_presearch_requirements(
+    result: &SearchResult,
+    minimum: Option<Resolution>,
+    eligible: Option<CandidateFilter<'_>>,
+) -> bool {
+    if minimum.is_none() && eligible.is_none() {
+        return true;
+    }
+    let classification = source::classify_release_sync(&result.title, Some(&result.resolution));
+    // Unknown labels may be resolved by the full classifier later. Known
+    // ineligible claims must not suppress the extended-alias fallback.
+    (classification.resolution == Resolution::Unknown
+        || minimum.is_none_or(|minimum| classification.resolution.rank() >= minimum.rank()))
+        && eligible.is_none_or(|filter| filter(result, &classification))
+}
+
+pub(crate) fn requirements_resolution_priority(cfg: &Config, resolution: &str) -> (i32, i32) {
+    let target = Resolution::from_str(&cfg.target_resolution).rank();
+    let incoming = Resolution::from_str(resolution).rank();
+    if incoming >= target {
+        (0, i32::from(incoming - target))
+    } else {
+        (1, i32::from(target - incoming))
+    }
+}
+
+fn sort_automatic_candidates(scored: &mut [SearchResult], cfg: &Config) {
+    scored.sort_by(|a, b| {
+        let preference = if cfg.media_requirements_enabled {
+            requirements_resolution_priority(cfg, &a.resolution)
+                .cmp(&requirements_resolution_priority(cfg, &b.resolution))
+        } else {
+            std::cmp::Ordering::Equal
+        };
+        preference
+            .then(b.score.cmp(&a.score))
+            .then(b.seeders.cmp(&a.seeders))
+    });
 }
 
 /// Numbers that look like episode numbers but are actually technical metadata.
@@ -3545,6 +3709,158 @@ mod episode_set_tests {
             indexer_id: None,
             indexer_name: String::new(),
         }
+    }
+
+    #[test]
+    fn requirements_target_resolution_beats_source_and_format_scores() {
+        let cfg = Config {
+            media_requirements_enabled: true,
+            target_resolution: "1080".into(),
+            ..Config::default()
+        };
+        let mut hits = vec![
+            hit("[BD] Show - 01 (720p)", 10_000, false),
+            hit("[WEB] Show - 01 (1080p)", 5, false),
+            hit("[BD] Show - 01 (2160p)", 20_000, false),
+        ];
+        hits[0].resolution = "720".into();
+        hits[2].resolution = "2160".into();
+        sort_automatic_candidates(&mut hits, &cfg);
+        assert!(hits[0].title.contains("1080"));
+        assert!(hits[1].title.contains("2160"));
+        let mut legacy = cfg;
+        legacy.media_requirements_enabled = false;
+        sort_automatic_candidates(&mut hits, &legacy);
+        assert_eq!(hits[0].score, 20_000);
+    }
+
+    #[test]
+    fn requirements_floor_and_upgrade_filter_leave_eligible_alternative() {
+        let mut candidates = vec![
+            hit("[BD] Show - 01 (720p)", 10_000, false),
+            hit("[WEB] Show - 01 (1080p)", 5, false),
+        ];
+        candidates[0].resolution = "720".into();
+        let eligible = |_: &SearchResult, classification: &ClassificationResult| {
+            classification.resolution == Resolution::R1080p
+        };
+        candidates.retain(|result| {
+            passes_presearch_requirements(result, Some(Resolution::R720p), Some(&eligible))
+        });
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].title.contains("1080"));
+        assert!(!passes_presearch_requirements(
+            &hit("[BD] Show - 01 (480p)", 999, false),
+            Some(Resolution::R720p),
+            None
+        ));
+    }
+
+    #[test]
+    fn requirements_use_configured_non_english_languages_and_target() {
+        let mut cfg = Config {
+            media_requirements_enabled: true,
+            required_subtitle_languages: "es".into(),
+            target_resolution: "2160".into(),
+            ..Config::default()
+        };
+        assert!(allows_non_english(&cfg));
+        assert_eq!(preferred_resolution_search_value(&cfg), "2160");
+        assert_eq!(
+            nyaa_search_categories(&cfg, "TV"),
+            quality::nyaa_categories_for_format("TV", true)
+        );
+        cfg.required_subtitle_languages = "eng".into();
+        assert!(!allows_non_english(&cfg));
+        cfg.required_subtitle_languages = "es".into();
+        cfg.media_requirements_enabled = false;
+        assert!(!allows_non_english(&cfg));
+    }
+
+    #[test]
+    fn requirements_prospective_gate_refuses_numeric_and_reviewed_ranges() {
+        use crate::services::media_requirements::{Observed, Policy};
+        use crate::services::upgrade::judge_release_with_requirements;
+        let cfg = Config {
+            media_requirements_enabled: true,
+            required_subtitle_languages: "es".into(),
+            ..Default::default()
+        };
+        let policy = Policy::from_config(&cfg);
+        let legacy = source::UpgradePolicy::from_config(&cfg);
+        let existing = source::classify_release_sync("[A] Show - 01 WEB 1080p", None);
+        let incoming = source::classify_release_sync("[B] Show - 01 WEB 1080p", None);
+        let observed = Observed {
+            resolution: Resolution::R1080p,
+            subtitles_satisfied: false,
+        };
+        let judge = |result: &SearchResult| {
+            judge_release_with_requirements(
+                &policy,
+                Some(&observed),
+                &legacy,
+                &[],
+                &existing,
+                None,
+                None,
+                &incoming,
+                result,
+            )
+        };
+        let mut single = hit("[B] Show - 01 WEB 1080p", 1, false);
+        assert!(judge(&single).is_ok());
+        let range = hit("[B] Show - S01E01-E02 WEB 1080p", 1, false);
+        assert_eq!(judge(&range), Err(source::UpgradeRejection::SpanNotCovered));
+        single.replay_episodes = Some(vec![1, 2]);
+        assert_eq!(
+            judge(&single),
+            Err(source::UpgradeRejection::SpanNotCovered)
+        );
+        single.replay_episodes = None;
+        single.release_mapping=Some(serde_json::from_value(serde_json::json!({"version":1,"anilist_id":1,"tv_series":true,"source_first":1,"source_last":2,"target_first":1,"source_season":1,"basis":"season_relative"})).unwrap());
+        assert_eq!(
+            judge(&single),
+            Err(source::UpgradeRejection::SpanNotCovered)
+        );
+        single.release_mapping = None;
+        let mut raw = incoming.clone();
+        raw.is_bdmv = true;
+        assert_eq!(
+            judge_release_with_requirements(
+                &policy,
+                Some(&observed),
+                &legacy,
+                &[],
+                &existing,
+                None,
+                None,
+                &raw,
+                &single
+            ),
+            Err(source::UpgradeRejection::BdmvCrossing)
+        );
+        let unknown = hit("[B] Show - 01", 1, false);
+        let eligible = |result: &SearchResult, classification: &ClassificationResult| {
+            judge_release_with_requirements(
+                &policy,
+                Some(&observed),
+                &legacy,
+                &[],
+                &existing,
+                None,
+                None,
+                classification,
+                result,
+            )
+            .is_ok()
+        };
+        let mut unknown = unknown;
+        unknown.resolution.clear();
+        assert!(!passes_presearch_requirements(
+            &unknown,
+            Some(Resolution::R720p),
+            Some(&eligible)
+        ));
     }
 
     #[test]

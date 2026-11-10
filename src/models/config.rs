@@ -5,6 +5,16 @@ fn default_subtitle_language_match() -> String {
     "all".to_string()
 }
 
+fn default_minimum_resolution() -> String {
+    "720".to_string()
+}
+fn default_target_resolution() -> String {
+    "1080".to_string()
+}
+fn default_subtitle_check() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Legacy single-client discriminator. Pre-multi-client routing
@@ -114,6 +124,17 @@ pub struct Config {
     /// Require all listed languages, or any one.
     #[serde(default = "default_subtitle_language_match")]
     pub subtitle_language_match: String,
+    /// Opt-in requirements mode; legacy profiles retain their existing behavior.
+    #[serde(default)]
+    pub media_requirements_enabled: bool,
+    #[serde(default = "default_minimum_resolution")]
+    pub minimum_resolution: String,
+    #[serde(default = "default_target_resolution")]
+    pub target_resolution: String,
+    #[serde(default = "default_subtitle_check")]
+    pub minimum_subtitle_check: bool,
+    #[serde(default = "default_subtitle_check")]
+    pub target_subtitle_check: bool,
     pub allow_non_english: bool,
     pub sonarr_enabled: bool,
     pub sonarr_api_key: String,
@@ -295,6 +316,11 @@ impl Default for Config {
             prefer_subs: true,
             required_subtitle_languages: String::new(),
             subtitle_language_match: default_subtitle_language_match(),
+            media_requirements_enabled: false,
+            minimum_resolution: default_minimum_resolution(),
+            target_resolution: default_target_resolution(),
+            minimum_subtitle_check: true,
+            target_subtitle_check: true,
             allow_non_english: false,
             sonarr_enabled: false,
             sonarr_api_key: String::new(),
@@ -382,6 +408,11 @@ struct ConfigRow {
     prefer_subs: i64,
     required_subtitle_languages: String,
     subtitle_language_match: String,
+    media_requirements_enabled: i64,
+    minimum_resolution: String,
+    target_resolution: String,
+    minimum_subtitle_check: i64,
+    target_subtitle_check: i64,
     allow_non_english: i64,
     sonarr_enabled: i64,
     sonarr_api_key: String,
@@ -475,7 +506,7 @@ pub async fn get_naming_prefs<'e>(db: impl sqlx::SqliteExecutor<'e>) -> NamingPr
 
 pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> {
     let row: Option<ConfigRow> = sqlx::query_as(
-        "SELECT active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, rss_master_enabled, disable_nyaa_rss, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, autobrr_api_key, upgrade_search_enabled, custom_format_minimum_score, proper_policy, custom_format_cutoff_score, custom_format_upgrade_increment, auto_redownload_failed, import_extra_files, extra_file_extensions, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader, grab_preview_mode, external_sync_interval_minutes, nyaa_download_client_id, manual_search_auto_add, recycle_bin_path, recycle_bin_age_days, series_folder_format, season_folder_format, episode_file_format, backup_schedule, backup_directory, backup_retention_count, backup_include_artwork, misgrab_auto_remove, import_stall_hours, nyaa_enabled, default_allow_upgrades, required_subtitle_languages, subtitle_language_match FROM config WHERE id = 1",
+        "SELECT active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, rss_master_enabled, disable_nyaa_rss, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, autobrr_api_key, upgrade_search_enabled, custom_format_minimum_score, proper_policy, custom_format_cutoff_score, custom_format_upgrade_increment, auto_redownload_failed, import_extra_files, extra_file_extensions, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader, grab_preview_mode, external_sync_interval_minutes, nyaa_download_client_id, manual_search_auto_add, recycle_bin_path, recycle_bin_age_days, series_folder_format, season_folder_format, episode_file_format, backup_schedule, backup_directory, backup_retention_count, backup_include_artwork, misgrab_auto_remove, import_stall_hours, nyaa_enabled, default_allow_upgrades, required_subtitle_languages, subtitle_language_match, media_requirements_enabled, minimum_resolution, target_resolution, minimum_subtitle_check, target_subtitle_check FROM config WHERE id = 1",
     )
     .fetch_optional(db)
     .await?;
@@ -527,6 +558,11 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
         prefer_subs: r.prefer_subs != 0,
         required_subtitle_languages: r.required_subtitle_languages,
         subtitle_language_match: r.subtitle_language_match,
+        media_requirements_enabled: r.media_requirements_enabled != 0,
+        minimum_resolution: r.minimum_resolution,
+        target_resolution: r.target_resolution,
+        minimum_subtitle_check: r.minimum_subtitle_check != 0,
+        target_subtitle_check: r.target_subtitle_check != 0,
         allow_non_english: r.allow_non_english != 0,
         sonarr_enabled: r.sonarr_enabled != 0,
         sonarr_api_key: r.sonarr_api_key,
@@ -568,8 +604,8 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
 pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO config (id, active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, rss_master_enabled, disable_nyaa_rss, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, autobrr_api_key, upgrade_search_enabled, custom_format_minimum_score, proper_policy, custom_format_cutoff_score, custom_format_upgrade_increment, auto_redownload_failed, import_extra_files, extra_file_extensions, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader, grab_preview_mode, external_sync_interval_minutes, manual_search_auto_add, recycle_bin_path, recycle_bin_age_days, series_folder_format, season_folder_format, episode_file_format, backup_schedule, backup_directory, backup_retention_count, backup_include_artwork, misgrab_auto_remove, import_stall_hours, nyaa_enabled, default_allow_upgrades, required_subtitle_languages, subtitle_language_match)
-        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO config (id, active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, rss_master_enabled, disable_nyaa_rss, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, autobrr_api_key, upgrade_search_enabled, custom_format_minimum_score, proper_policy, custom_format_cutoff_score, custom_format_upgrade_increment, auto_redownload_failed, import_extra_files, extra_file_extensions, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader, grab_preview_mode, external_sync_interval_minutes, manual_search_auto_add, recycle_bin_path, recycle_bin_age_days, series_folder_format, season_folder_format, episode_file_format, backup_schedule, backup_directory, backup_retention_count, backup_include_artwork, misgrab_auto_remove, import_stall_hours, nyaa_enabled, default_allow_upgrades, required_subtitle_languages, subtitle_language_match, media_requirements_enabled, minimum_resolution, target_resolution, minimum_subtitle_check, target_subtitle_check)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             active_client = excluded.active_client,
             qbit_url = excluded.qbit_url,
@@ -649,6 +685,11 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
             import_stall_hours = excluded.import_stall_hours,
             required_subtitle_languages = excluded.required_subtitle_languages,
             subtitle_language_match = excluded.subtitle_language_match,
+            media_requirements_enabled = excluded.media_requirements_enabled,
+            minimum_resolution = excluded.minimum_resolution,
+            target_resolution = excluded.target_resolution,
+            minimum_subtitle_check = excluded.minimum_subtitle_check,
+            target_subtitle_check = excluded.target_subtitle_check,
             nyaa_enabled = excluded.nyaa_enabled
         "#,
     )
@@ -743,6 +784,11 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
     .bind(i64::from(config.default_allow_upgrades))
     .bind(&config.required_subtitle_languages)
     .bind(&config.subtitle_language_match)
+    .bind(i64::from(config.media_requirements_enabled))
+    .bind(&config.minimum_resolution)
+    .bind(&config.target_resolution)
+    .bind(i64::from(config.minimum_subtitle_check))
+    .bind(i64::from(config.target_subtitle_check))
     .execute(db)
     .await?;
 
@@ -758,6 +804,11 @@ mod subtitle_policy_tests {
         let cfg = Config {
             required_subtitle_languages: "en,de".into(),
             subtitle_language_match: "any".into(),
+            media_requirements_enabled: true,
+            minimum_resolution: "1080".into(),
+            target_resolution: "2160".into(),
+            minimum_subtitle_check: false,
+            target_subtitle_check: true,
             ..Default::default()
         };
         save_config(&db, &cfg).await.unwrap();
@@ -766,5 +817,10 @@ mod subtitle_policy_tests {
         assert_eq!(stored.required_subtitle_languages, "en,de");
         assert_eq!(stored.subtitle_language_match, "any");
         assert_eq!(stored.qbit_url, cfg.qbit_url);
+        assert!(stored.media_requirements_enabled);
+        assert_eq!(stored.minimum_resolution, "1080");
+        assert_eq!(stored.target_resolution, "2160");
+        assert!(!stored.minimum_subtitle_check);
+        assert!(stored.target_subtitle_check);
     }
 }

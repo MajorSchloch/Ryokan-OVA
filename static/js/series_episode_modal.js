@@ -492,13 +492,13 @@ function loadEpisodeMediaInfo(epNum, section) {
             const data = await response.json();
             if (!section.isConnected || _currentEpNum !== epNum) return;
             if (!response.ok || !data.ok) {
-                section.textContent = data.message || 'File inspection is unavailable. Subtitle status is unknown.';
+                section.textContent = (data.message || 'File inspection is unavailable.') + ' File and requirement status is unknown.';
                 return;
             }
             renderEpisodeMediaInfo(section, data);
         }).catch(() => {
             if (section.isConnected && _currentEpNum === epNum) {
-                section.textContent = 'File inspection failed. Subtitle status is unknown.';
+                section.textContent = 'File inspection failed. File and requirement status is unknown.';
             }
         });
 }
@@ -509,9 +509,63 @@ function mediaLanguageLabel(code) {
     catch (_) { return code; }
 }
 
+function mediaSubtitleRequirementKind(status, subtitles) {
+    if (!subtitles || !subtitles.enabled) return 'none';
+    if (!status || !status.enabled || status.minimum_subtitle_check) return 'required';
+    return status.target_subtitle_check ? 'preferred' : 'none';
+}
+
+function renderMediaRequirements(status, subtitles, upgradesAllowed) {
+    if (!status || !status.enabled) return '';
+    const known = typeof status.resolution === 'string' && status.resolution.trim() !== ''
+        && status.resolution.toLowerCase() !== 'unknown';
+    const minimum = known ? (status.minimum_met ? 'Passed' : 'Failed') : 'Unknown';
+    const target = known ? (status.target_met ? 'Met' : 'Below target') : 'Unknown';
+    const result = (label, value, state) => '<div class="ep-requirement-result ep-requirement-' + state
+        + '"><dt>' + escHtml(label) + '</dt><dd>' + escHtml(value) + '</dd></div>';
+    const requirement = (label, value) => '<div><dt>' + escHtml(label) + '</dt><dd>' + escHtml(value) + '</dd></div>';
+    let html = '<section class="ep-media-requirements" aria-label="Configured media requirements">'
+        + '<h5>Quality requirements</h5><dl class="ep-requirement-results">'
+        + result('Minimum', minimum, !known ? 'unknown' : status.minimum_met ? 'passed' : 'failed')
+        + result('Good enough target', target, !known ? 'unknown' : status.target_met ? 'passed' : 'pending')
+        + '</dl><dl class="ep-requirement-details">'
+        + requirement('Actual resolution', known ? status.resolution : 'Unknown — cannot verify the minimum or target')
+        + requirement('Minimum resolution', status.minimum_resolution || 'Unknown')
+        + requirement('Target resolution', status.target_resolution || 'Unknown');
+    const subtitleKind = mediaSubtitleRequirementKind(status, subtitles);
+    if (subtitleKind !== 'none') {
+        const names = (subtitles.required_languages || []).map(mediaLanguageLabel).join(', ');
+        const match = subtitles.match_mode === 'any' ? 'Any of: ' : 'All of: ';
+        html += requirement('Selectable languages', match + names)
+            + requirement('Language result', (subtitleKind === 'required' ? 'Required' : 'Preferred')
+                + ' selectable subtitles ' + (status.selectable_subtitles_satisfied ? 'present' : 'not verified'))
+            + requirement('At minimum', status.minimum_subtitle_check
+                ? 'Required' : 'Selectable subtitles are not required at minimum')
+            + requirement('At target', status.target_subtitle_check || status.minimum_subtitle_check
+                ? 'Required' : 'Selectable subtitles are not required at target');
+    } else {
+        html += requirement('Selectable language check', subtitles && subtitles.enabled
+            ? 'Not required at minimum or target' : 'No required languages configured');
+    }
+    html += '</dl>';
+    if (Array.isArray(status.reasons) && status.reasons.length) {
+        html += '<ul class="ep-requirement-reasons">' + status.reasons.map(reason => '<li>' + escHtml(reason) + '</li>').join('') + '</ul>';
+    }
+    if (known && status.target_met) {
+        html += '<p class="form-hint">This file meets the configured good enough target.</p>';
+    } else if (known) {
+        html += '<p class="form-hint">Automatic upgrades also depend on this release’s Upgrades switch.'
+            + (upgradesAllowed === false ? ' That switch is off for this release.' : '') + '</p>';
+    } else {
+        html += '<p class="form-hint">The resolution is unverified. This result does not authorize an automatic replacement.</p>';
+    }
+    return html + '</section>';
+}
+
 function renderEpisodeMediaInfo(section, data) {
     const info = data.media;
     const policy = data.subtitle_requirements;
+    const subtitleKind = mediaSubtitleRequirementKind(data.media_requirements, policy);
     const row = (label, value) => '<div class="ep-detail-row"><span class="ep-detail-label">'
         + escHtml(label) + '</span><span class="ep-detail-value">' + escHtml(value) + '</span></div>';
     const trackLabel = track => [mediaLanguageLabel(track.language), track.codec,
@@ -520,8 +574,13 @@ function renderEpisodeMediaInfo(section, data) {
         track.forced ? 'Forced' : '', track.signs_only ? 'Signs / songs only' : '',
         track.valid === false ? 'Invalid or unreadable' : ''].filter(Boolean).join(' · ');
     let html = '<h4>File information</h4>';
-    if (!info.subtitles.length) html += '<p class="ep-media-verdict ep-media-verdict-missing">No selectable subtitles found</p>';
-    else if (policy.enabled) html += '<p class="ep-media-verdict ' + (policy.satisfied ? 'ep-media-verdict-present' : 'ep-media-verdict-missing') + '">' + (policy.satisfied ? 'Required selectable subtitles present' : 'Required selectable subtitles missing') + '</p>';
+    html += renderMediaRequirements(data.media_requirements, policy, data.upgrades_allowed);
+    if (subtitleKind !== 'none') {
+        const prefix = subtitleKind === 'required' ? 'Required' : 'Preferred';
+        const state = policy.satisfied ? 'present' : subtitleKind === 'required' ? 'missing' : 'preferred';
+        const result = policy.satisfied ? 'present' : subtitleKind === 'required' ? 'missing' : 'not verified';
+        html += '<p class="ep-media-verdict ep-media-verdict-' + state + '">' + prefix + ' selectable subtitles ' + result + '</p>';
+    } else if (!info.subtitles.length) html += '<p class="ep-media-verdict ep-media-verdict-neutral">No selectable subtitles found</p>';
     html += row('Container', info.container || 'Unknown');
     if (info.duration_seconds != null) html += row('Duration', Math.round(info.duration_seconds / 60) + ' min');
     info.video.forEach(track => {
@@ -530,12 +589,15 @@ function renderEpisodeMediaInfo(section, data) {
     });
     html += row('Audio', info.audio.length ? info.audio.map(trackLabel).join(' / ') : 'No audio tracks found');
     html += row('Subtitles', info.subtitles.length ? info.subtitles.map(trackLabel).join(' / ') : 'No selectable subtitle tracks or matching files found');
-    if (policy.enabled) {
-        html += row('Subtitle check', policy.satisfied ? 'Required selectable subtitle languages present' : 'Does not meet selectable subtitle requirements');
-        html += row(policy.match_mode === 'any' ? 'Requires any' : 'Requires all', policy.required_languages.map(mediaLanguageLabel).join(', '));
+    if (subtitleKind !== 'none') {
+        html += row('Subtitle check', subtitleKind === 'required'
+            ? (policy.satisfied ? 'Required selectable subtitle languages present' : 'Does not meet selectable subtitle requirements')
+            : (policy.satisfied ? 'Preferred selectable subtitles present' : 'Preferred selectable subtitles not verified'));
+        html += row(subtitleKind === 'required' ? (policy.match_mode === 'any' ? 'Requires any' : 'Requires all')
+            : (policy.match_mode === 'any' ? 'Preferred languages (any)' : 'Preferred languages (all)'), policy.required_languages.map(mediaLanguageLabel).join(', '));
         if (policy.reasons.length) html += row('Details', policy.reasons.join(' '));
-    } else html += row('Subtitle check', 'No required languages configured');
-    html += '<p class="form-hint">Subtitle requirements apply to selectable embedded tracks or matching external subtitle files. Track languages come from file labels. These labels cannot prove translation quality or detect burned-in subtitles.</p>';
+    } else html += row('Subtitle check', policy.enabled ? 'Not required at minimum or target' : 'No required languages configured');
+    html += '<p class="form-hint">Burned-in captions: unverified. This check reads selectable embedded tracks and matching external subtitle files. Language labels cannot prove translation language or quality.</p>';
     if (info.warnings.length) html += row('Notes', info.warnings.join(' '));
     section.innerHTML = html;
 }

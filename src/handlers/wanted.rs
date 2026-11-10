@@ -181,7 +181,9 @@ fn build_cutoff_rows(
     library: &[series::Series],
     disk: &HashMap<i64, Vec<media::EpisodeFile>>,
     tags_by_series: &HashMap<i64, HashMap<i32, episode_tags::EpisodeQualityTag>>,
+    observations: &HashMap<i64, HashMap<i32, crate::services::media_requirements::Observed>>,
 ) -> Vec<WantedRow> {
+    let requirements = crate::services::media_requirements::Policy::from_config(cfg);
     let (cutoff_source, cutoff_is_remux, cutoff_is_bdmv) =
         source::parse_cutoff_source(&cfg.cutoff_source);
     let cutoff_resolution = Resolution::from_str(&cfg.cutoff_resolution);
@@ -196,22 +198,51 @@ fn build_cutoff_rows(
         };
         let tags = tags_by_series.get(&s.id).unwrap_or(&empty);
         let on_disk: Vec<i32> = files.iter().flat_map(|f| f.episodes()).collect();
-        let targets = auto_search::build_upgrade_targets(
-            files,
-            &on_disk,
-            cutoff_source,
-            cutoff_resolution,
-            cutoff_is_remux,
-            cutoff_is_bdmv,
-            tags,
-        );
+        let targets = if requirements.enabled {
+            let empty_observations = HashMap::new();
+            auto_search::build_requirements_upgrade_targets(
+                files,
+                &on_disk,
+                tags,
+                &requirements,
+                observations.get(&s.id).unwrap_or(&empty_observations),
+            )
+        } else {
+            auto_search::build_upgrade_targets(
+                files,
+                &on_disk,
+                cutoff_source,
+                cutoff_resolution,
+                cutoff_is_remux,
+                cutoff_is_bdmv,
+                tags,
+            )
+        };
         let slots: Vec<WantedSlot> = targets
             .into_iter()
             .filter_map(|(t, existing)| match t {
                 auto_search::SearchTarget::Episode(ep) => Some(WantedSlot {
                     episode: ep,
                     label: format!("E{ep:02}"),
-                    quality: existing.label(),
+                    quality: if requirements.enabled {
+                        observations
+                            .get(&s.id)
+                            .and_then(|files| files.get(&ep))
+                            .map(|file| {
+                                format!(
+                                    "{} · required selectable subtitles {}",
+                                    file.resolution.as_str(),
+                                    if file.subtitles_satisfied {
+                                        "present"
+                                    } else {
+                                        "unverified or missing"
+                                    }
+                                )
+                            })
+                            .unwrap_or_else(|| existing.label())
+                    } else {
+                        existing.label()
+                    },
                 }),
                 auto_search::SearchTarget::Single => None,
             })
@@ -229,6 +260,48 @@ fn build_cutoff_rows(
     }
     rows.sort_by_key(|r| r.title.to_lowercase());
     rows
+}
+
+async fn observe_library(
+    state: &AppState,
+    cfg: &config::Config,
+    library: &[series::Series],
+    disk: &HashMap<i64, Vec<media::EpisodeFile>>,
+) -> HashMap<i64, HashMap<i32, crate::services::media_requirements::Observed>> {
+    if !cfg.media_requirements_enabled {
+        return HashMap::new();
+    }
+    use futures_util::{StreamExt, stream};
+    // Own each job's inputs so the buffered futures also satisfy the
+    // HTTP handlers' Send requirement across their entire lifetime.
+    let jobs: Vec<_> = library
+        .iter()
+        .filter(|series| series.allow_upgrades)
+        .filter_map(|series| {
+            disk.get(&series.id)
+                .map(|files| (series.id, series.folder_name.clone(), files.clone()))
+        })
+        .collect();
+    let db = state.db.clone();
+    let cfg = cfg.clone();
+    stream::iter(jobs)
+        .map(move |(series_id, folder_name, files)| {
+            let db = db.clone();
+            let cfg = cfg.clone();
+            async move {
+                let observations = crate::services::media_requirements::observe_files(
+                    &db,
+                    &cfg,
+                    &folder_name,
+                    &files,
+                )
+                .await;
+                (series_id, observations)
+            }
+        })
+        .buffer_unordered(4)
+        .collect()
+        .await
 }
 
 #[derive(Deserialize, Default)]
@@ -263,7 +336,8 @@ async fn rows_for(
         let tags = episode_tags::get_for_all_series(&state.db)
             .await
             .unwrap_or_default();
-        build_cutoff_rows(cfg, library, &disk, &tags)
+        let observed = observe_library(state, cfg, library, &disk).await;
+        build_cutoff_rows(cfg, library, &disk, &tags, &observed)
     } else {
         let (aired, tag_rows, monitored) = tokio::join!(
             local_metadata::aired_episode_counts(&state.db),
@@ -301,7 +375,8 @@ async fn rows_for_series(
         .unwrap_or_default();
     if tab == "cutoff" {
         let tags_by_series = HashMap::from([(series.id, tags)]);
-        build_cutoff_rows(cfg, library, &disk, &tags_by_series)
+        let observed = observe_library(state, cfg, library, &disk).await;
+        build_cutoff_rows(cfg, library, &disk, &tags_by_series, &observed)
     } else {
         let (aired, monitored_eps) = tokio::join!(
             local_metadata::aired_episode_count(&state.db, series.id),
@@ -430,6 +505,7 @@ struct WantedPageTemplate {
     /// `config.grab_preview_mode`, for the interactive search modal's
     /// batch grabs: `never` skips the file picker, as on the series page.
     grab_preview_mode: String,
+    requirements_enabled: bool,
 }
 
 #[derive(Template)]
@@ -438,6 +514,7 @@ struct WantedListPartial {
     tab: String,
     rows: Vec<WantedRow>,
     library_is_empty: bool,
+    requirements_enabled: bool,
 }
 
 /// `GET /wanted?tab=missing|cutoff`. An HTMX (non-boost) request gets
@@ -462,6 +539,7 @@ pub async fn page(
             tab,
             rows,
             library_is_empty,
+            requirements_enabled: cfg.media_requirements_enabled,
         };
         return Html(partial.render().unwrap_or_default());
     }
@@ -472,6 +550,7 @@ pub async fn page(
         rows,
         library_is_empty,
         grab_preview_mode: cfg.grab_preview_mode.clone(),
+        requirements_enabled: cfg.media_requirements_enabled,
     };
     Html(tmpl.render().unwrap_or_default())
 }
@@ -663,6 +742,28 @@ pub async fn search(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn wanted_http_handlers_keep_send_futures() {
+        fn assert_send<T: Send>(_: T) {}
+        let state = crate::test_support::build_test_app_state(
+            crate::test_support::in_memory_pool().await,
+            None,
+        );
+        assert_send(page(
+            State(state.clone()),
+            HxRequest(false),
+            HxBoosted(false),
+            Query(WantedQuery::default()),
+        ));
+        assert_send(search_menu(
+            State(state),
+            Query(SearchMenuQuery {
+                series_id: 1,
+                tab: Some("cutoff".into()),
+            }),
+        ));
+    }
+
     fn show(id: i64, monitor_mode: &str, episodes: Option<i32>, status: &str) -> series::Series {
         series::Series {
             is_adult: false,
@@ -705,6 +806,81 @@ mod tests {
             modified_secs: None,
             is_special: false,
         }
+    }
+
+    #[test]
+    fn requirement_rows_follow_actual_deficits_and_the_series_switch() {
+        use crate::services::media_requirements::Observed;
+        let cfg = config::Config {
+            media_requirements_enabled: true,
+            ..Default::default()
+        };
+        let mut disabled = show(2, "all", Some(2), "FINISHED");
+        disabled.allow_upgrades = false;
+        let library = vec![show(1, "all", Some(4), "FINISHED"), disabled];
+        let disk = HashMap::from([
+            (
+                1,
+                vec![
+                    file(1, 1, Some(1)),
+                    file(2, 2, Some(1)),
+                    file(3, 3, Some(1)),
+                    file(4, 4, Some(1)),
+                ],
+            ),
+            (2, vec![file(1, 1, Some(1))]),
+        ]);
+        let observed = HashMap::from([
+            (
+                1,
+                HashMap::from([
+                    (
+                        1,
+                        Observed {
+                            resolution: Resolution::R1080p,
+                            subtitles_satisfied: true,
+                        },
+                    ),
+                    (
+                        2,
+                        Observed {
+                            resolution: Resolution::R1080p,
+                            subtitles_satisfied: false,
+                        },
+                    ),
+                    (
+                        3,
+                        Observed {
+                            resolution: Resolution::R720p,
+                            subtitles_satisfied: true,
+                        },
+                    ),
+                ]),
+            ),
+            (
+                2,
+                HashMap::from([(
+                    1,
+                    Observed {
+                        resolution: Resolution::R720p,
+                        subtitles_satisfied: false,
+                    },
+                )]),
+            ),
+        ]);
+        let rows = build_cutoff_rows(&cfg, &library, &disk, &HashMap::new(), &observed);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].series_id, 1);
+        assert_eq!(
+            rows[0]
+                .slots
+                .iter()
+                .map(|slot| slot.episode)
+                .collect::<Vec<_>>(),
+            [2, 3]
+        );
+        assert!(rows[0].slots[0].quality.contains("unverified or missing"));
+        assert!(rows[0].slots[1].quality.contains("720"));
     }
 
     #[test]

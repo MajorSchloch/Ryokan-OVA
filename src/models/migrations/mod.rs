@@ -3014,6 +3014,11 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         for (name, declaration) in [
             ("required_subtitle_languages", "TEXT NOT NULL DEFAULT ''"),
             ("subtitle_language_match", "TEXT NOT NULL DEFAULT 'all'"),
+            ("media_requirements_enabled", "INTEGER NOT NULL DEFAULT 0"),
+            ("minimum_resolution", "TEXT NOT NULL DEFAULT '720'"),
+            ("target_resolution", "TEXT NOT NULL DEFAULT '1080'"),
+            ("minimum_subtitle_check", "INTEGER NOT NULL DEFAULT 1"),
+            ("target_subtitle_check", "INTEGER NOT NULL DEFAULT 1"),
         ] {
             if !column_exists(db, "config", name).await {
                 sqlx::query(sqlx::AssertSqlSafe(format!(

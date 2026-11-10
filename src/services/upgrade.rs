@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::AppState;
 use crate::models::log::LogCategory;
 use crate::models::{config, episode_tags, metadata_cache, series};
+use crate::services::media_requirements::{self, Observed, Policy as RequirementsPolicy};
 use crate::services::source::{self, ClassificationResult, Resolution};
 use crate::services::{auto_search, logger, media};
 
@@ -78,6 +79,64 @@ pub fn judge_release_for_episode(
     source::judge_upgrade(policy, &existing_file, &candidate, false)
 }
 
+/// Shared prospective gate for every automatic replacement path. The
+/// downloaded file still has to pass the final observed replacement gate.
+#[allow(clippy::too_many_arguments)]
+pub fn judge_release_with_requirements(
+    requirements: &RequirementsPolicy,
+    observed: Option<&Observed>,
+    policy: &source::UpgradePolicy,
+    cfs: &[crate::services::custom_formats::CompiledCustomFormat],
+    existing: &ClassificationResult,
+    tag: Option<&crate::models::episode_tags::EpisodeQualityTag>,
+    disk_file: Option<&media::EpisodeFile>,
+    incoming: &ClassificationResult,
+    result: &crate::services::nyaa::SearchResult,
+) -> Result<source::UpgradeKind, source::UpgradeRejection> {
+    if !requirements.enabled {
+        return judge_release_for_episode(policy, cfs, existing, tag, disk_file, incoming, result);
+    }
+    if tag.is_some_and(|tag| tag.manual_override) {
+        return Err(source::UpgradeRejection::Pinned);
+    }
+    if tag.is_some_and(|tag| tag.state == "grabbed") {
+        return Err(source::UpgradeRejection::RequirementsNoImprovement);
+    }
+    if incoming.is_bdmv && !existing.is_bdmv {
+        return Err(source::UpgradeRejection::BdmvCrossing);
+    }
+    // Automatic single-slot upgrade searches cannot authorize a complete
+    // season pack, including other episodes already at their target.
+    if release_covers_multiple(result) {
+        return Err(source::UpgradeRejection::SpanNotCovered);
+    }
+    let previous = tag
+        .map(|tag| tag.release_title.trim())
+        .filter(|title| !title.is_empty())
+        .or_else(|| disk_file.map(|file| file.filename.trim()));
+    if previous.is_some_and(|title| title.eq_ignore_ascii_case(result.title.trim())) {
+        return Err(source::UpgradeRejection::RequirementsNoImprovement);
+    }
+    let observed = observed.ok_or(source::UpgradeRejection::RequirementsUnverified)?;
+    requirements.judge_candidate(observed, incoming, &result.title)
+}
+
+/// Advertised and reviewed coverage must agree before an automatic
+/// single-episode replacement is authorized.
+pub(crate) fn release_covers_multiple(result: &crate::services::nyaa::SearchResult) -> bool {
+    result.is_batch
+        || result
+            .replay_episodes
+            .as_ref()
+            .is_some_and(|episodes| episodes.iter().copied().collect::<HashSet<_>>().len() > 1)
+        || result
+            .release_mapping
+            .as_ref()
+            .is_some_and(|mapping| mapping.episodes().len() > 1)
+        || media::parse_episode_span(&result.title.to_ascii_lowercase())
+            .is_some_and(|span| span.first != span.last)
+}
+
 pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
     let _guard = UPGRADE_LOCK
         .try_lock()
@@ -95,7 +154,8 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
     // score) for the per-candidate gate below; the quality cutoff
     // pieces above still drive the target selection.
     let policy = source::UpgradePolicy::from_config(&cfg);
-    if !policy.has_quality_cutoff() {
+    let requirements = RequirementsPolicy::from_config(&cfg);
+    if !requirements.enabled && !policy.has_quality_cutoff() {
         return Ok(UpgradeSummary {
             series_checked: 0,
             episodes_checked: 0,
@@ -215,15 +275,27 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
         // disk presence directly rather than monitor state.
         let on_disk_eps: Vec<i32> = disk_files.iter().flat_map(|f| f.episodes()).collect();
 
-        let upgrade_targets = auto_search::build_upgrade_targets(
-            &disk_files,
-            &on_disk_eps,
-            cutoff_source,
-            cutoff_resolution,
-            cutoff_is_remux,
-            cutoff_is_bdmv,
-            &quality_tags,
-        );
+        let observed =
+            media_requirements::observe_files(&state.db, &cfg, &row.folder_name, &disk_files).await;
+        let upgrade_targets = if requirements.enabled {
+            auto_search::build_requirements_upgrade_targets(
+                &disk_files,
+                &on_disk_eps,
+                &quality_tags,
+                &requirements,
+                &observed,
+            )
+        } else {
+            auto_search::build_upgrade_targets(
+                &disk_files,
+                &on_disk_eps,
+                cutoff_source,
+                cutoff_resolution,
+                cutoff_is_remux,
+                cutoff_is_bdmv,
+                &quality_tags,
+            )
+        };
         // Targets are quality-only, as in Sonarr: a file at the quality
         // cutoff with a Custom Format total under the format cutoff is
         // reached through RSS, not swept. `find_best_for_target` returns
@@ -301,7 +373,38 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
 
             let label = auto_search::target_label(&target);
             // batch_episode_match=true so BD season packs can match episode targets.
-            let best = auto_search::find_best_for_target(
+            let eligible = |result: &crate::services::nyaa::SearchResult,
+                            incoming: &ClassificationResult| {
+                if !requirements.enabled {
+                    return true;
+                }
+                let auto_search::SearchTarget::Episode(ep) = &target else {
+                    return false;
+                };
+                let Some(existing) = upgrade_classifications.get(ep) else {
+                    return false;
+                };
+                if !row.allow_pt_upgrades
+                    && result
+                        .indexer_id
+                        .is_some_and(|id| pt_indexer_ids.contains(&id))
+                {
+                    return false;
+                }
+                judge_release_with_requirements(
+                    &requirements,
+                    observed.get(ep),
+                    &policy,
+                    &cfs,
+                    existing,
+                    quality_tags.get(ep),
+                    disk_files.iter().find(|file| file.holds(*ep)),
+                    incoming,
+                    result,
+                )
+                .is_ok()
+            };
+            let (best, _) = auto_search::find_best_for_target_with_filter(
                 &state.db,
                 &detail,
                 &cfg,
@@ -310,6 +413,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 true,
                 &cfs,
                 &state.indexers,
+                Some(&eligible),
             )
             .await;
 
@@ -378,7 +482,9 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             if let auto_search::SearchTarget::Episode(ep_num) = &target
                 && let Some(existing_classification) = upgrade_classifications.get(ep_num)
             {
-                match judge_release_for_episode(
+                match judge_release_with_requirements(
+                    &requirements,
+                    observed.get(ep_num),
                     &policy,
                     &cfs,
                     existing_classification,

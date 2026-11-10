@@ -1,0 +1,3 @@
+{% if !availability.segments.is_empty() %}<ul class="availability-legend" aria-label="Episode availability">
+    {% for segment in availability.segments %}<li><span class="availability-dot availability-{{ segment.kind }}" aria-hidden="true"></span>{{ segment.count }} {{ segment.label|lowercase }}</li>{% endfor %}
+</ul>{% endif %}

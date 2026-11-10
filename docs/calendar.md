@@ -4,11 +4,11 @@ Ryokan's calendar shows what's airing for the shows in your library. It lives at
 
 ## Views
 
-Three quick toggles at the top of the page:
+Choose **Day**, **Week** or **Month**. Day and week use an episode list; month uses a calendar grid.
 
-- **This week**: list view. Each day is a sticky header with the episodes airing that day stacked beneath. Today gets a colored stripe so your eye lands there.
-- **Next week**: same shape, for the seven days after that (days 8 to 14 from now).
-- **This month**: calendar grid view. Sun-to-Sat rows for the current month; each cell holds the episodes for that day.
+Use **Previous**, **Today** and **Next** in every view. In Day view, Previous opens yesterday directly. Use **Go to date** for a specific date. The selected view, anchor date and filters remain in the address, so browser Back and Forward restore them.
+
+Day buckets use UTC, as before. Episode times use your browser's local timezone. The page states this distinction. Empty windows and unavailable schedule data have separate messages.
 
 ## Upcoming anime
 
@@ -63,4 +63,4 @@ A few series in your library may have come from MAL instead of AniList. These ar
 
 ---
 
-*Last updated: 2026-10-04.*
+*Last updated: 2026-11-10.*

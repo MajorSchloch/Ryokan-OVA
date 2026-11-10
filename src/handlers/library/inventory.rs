@@ -9,6 +9,11 @@ use std::collections::{BTreeSet, HashMap};
 #[derive(Default)]
 pub(super) struct Inventory {
     pub on_disk: Option<usize>,
+    pub have: Option<std::collections::HashSet<i32>>,
+    pub aired: BTreeSet<i32>,
+    pub upcoming: BTreeSet<i32>,
+    pub future_frontier: Option<i32>,
+    pub next_known: Option<(i64, i32, bool)>,
     pub missing: Option<Vec<i32>>,
     pub next: Option<(i64, i32)>,
 }
@@ -18,6 +23,8 @@ struct Schedule {
     aired: BTreeSet<i32>,
     upcoming: BTreeSet<i32>,
     next: Option<(i64, i32)>,
+    next_known: Option<(i64, i32, bool)>,
+    future_frontier: Option<i32>,
 }
 
 pub(super) async fn load(
@@ -67,6 +74,15 @@ pub(super) async fn load(
             schedule.aired.insert(ep);
         } else {
             schedule.upcoming.insert(ep);
+            let candidate = (at, ep, exact);
+            schedule.next_known = Some(
+                schedule
+                    .next_known
+                    .map_or(candidate, |next| next.min(candidate)),
+            );
+            if frontier {
+                schedule.future_frontier = Some(ep);
+            }
             if exact {
                 let candidate = (at, ep);
                 schedule.next = Some(schedule.next.map_or(candidate, |next| next.min(candidate)));
@@ -87,6 +103,7 @@ pub(super) async fn load(
             .aired
             .retain(|ep| !schedule.upcoming.contains(ep) && total.is_none_or(|n| *ep <= n));
         let slots = disk.get(&s.folder_name);
+        let aired = schedule.aired.clone();
         let missing = slots.and_then(|have| {
             let enough = !schedule.aired.is_empty()
                 || matches!(s.status.as_str(), "NOT_YET_RELEASED" | "NOT_YET_AIRED")
@@ -104,6 +121,11 @@ pub(super) async fn load(
             s.id,
             Inventory {
                 on_disk: slots.map(|s| s.len()),
+                have: slots.cloned(),
+                aired,
+                upcoming: schedule.upcoming,
+                future_frontier: schedule.future_frontier,
+                next_known: schedule.next_known,
                 missing,
                 next: schedule.next,
             },

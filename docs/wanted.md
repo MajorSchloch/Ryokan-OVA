@@ -6,9 +6,9 @@ The Wanted page lists what the library is still after, the way Sonarr's Wanted p
 
 Every monitored episode that has already aired and is not on disk or downloading, grouped by series. A series whose monitoring is off does not appear, and neither do episodes that have not aired yet. Each row links to the series page and shows the episode numbers it is short of.
 
-## Quality cutoff unmet
+## Upgrade targets
 
-Every episode on disk whose quality is below your cutoff (Settings → Quality & Releases), for series that allow upgrades. Each entry shows the quality of the file you have. This is the same list the daily upgrade search works through.
+The tab is **Below good enough target** in requirements mode and **Quality cutoff unmet** in advanced mode. It lists every episode on disk that is below the selected upgrade target (Settings → Quality & Releases), for series that allow upgrades. In Minimum + good enough mode, actual resolution and selectable subtitle languages determine this status. In advanced mode, the existing source and resolution cutoff applies. Each entry shows the quality of the file you have. This is the same list the daily upgrade search works through.
 
 ## Searching
 

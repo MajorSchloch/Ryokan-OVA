@@ -272,113 +272,28 @@ pub async fn index(
         _ => ("recent", true),
     };
 
-    // Per-card completeness summaries ("do I have what's aired?").
-    // Three sources, each one round-trip and proportional to the
-    // library: a batched folder scan (single spawn_blocking hop), the
-    // aired-count GROUP BY, and the active-tag-state slice. Computed
-    // AFTER filter + sort so only rendered cards pay for it.
+    // One read-only projection supplies every release and franchise card.
+    // Monitoring and exact air-date sets decide which gaps are actionable.
     let media_root = cfg
         .as_ref()
         .map(|c| c.media_root.clone())
         .unwrap_or_default();
-    let folder_list: Vec<(i64, String)> = library
-        .iter()
-        .map(|s| (s.id, s.folder_name.clone()))
-        .collect();
-    let (disk_map, aired_map, tag_rows) = tokio::join!(
-        media::scan_series_folders_batch(&media_root, folder_list),
-        local_metadata::aired_episode_counts(&state.db),
-        episode_tags::active_states_all_series(&state.db),
-    );
-    let aired_map = aired_map.unwrap_or_default();
-    let mut completed_by_series: HashMap<i64, std::collections::HashSet<i32>> = HashMap::new();
-    let mut downloading_series: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    for (sid, ep, tag_state) in tag_rows.unwrap_or_default() {
-        if tag_state == "grabbed" {
-            downloading_series.insert(sid);
-        } else {
-            completed_by_series.entry(sid).or_default().insert(ep);
+    let mut progress = match super::availability::load(&state.db, &media_root, &library).await {
+        Ok(progress) => progress,
+        Err(error) => {
+            tracing::error!("Cannot read library availability: {error}");
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not read library availability. Try again.",
+            )
+                .into_response();
         }
-    }
-    let cards: Vec<(series::Series, super::CardProgress)> = library
+    };
+    let cards: Vec<_> = library
         .into_iter()
         .map(|s| {
-            let total = i64::from(s.episodes.unwrap_or(0));
-            // Downloaded = distinct episode numbers on disk or with a
-            // completed grab tag — same union the series page's
-            // `downloaded` flag uses. The season filter mirrors
-            // build_episodes: with a known episode count, only
-            // season-1 / unseasoned files belong to the main list.
-            let mut have: std::collections::HashSet<i32> = std::collections::HashSet::new();
-            if let Some(files) = disk_map.get(&s.id) {
-                for f in files {
-                    if f.episode_number <= 0 {
-                        continue;
-                    }
-                    if total > 0 && matches!(f.season_number, Some(n) if n != 1) {
-                        continue;
-                    }
-                    // Every episode the file holds (issue #246).
-                    have.extend(f.episodes());
-                }
-            }
-            if let Some(eps) = completed_by_series.get(&s.id) {
-                have.extend(eps);
-            }
-            let downloaded = have.len() as i64;
-            let aired = match aired_map.get(&s.id) {
-                Some(&n) if n > 0 => n,
-                // No cached air dates. NOT_YET_RELEASED genuinely has
-                // nothing aired; everything else counts against the
-                // total (exact for FINISHED, honest degradation for
-                // releasing series with sparse Jikan-fallback data).
-                _ if s.status == "NOT_YET_RELEASED" => 0,
-                _ => total,
-            };
-            let downloading = downloading_series.contains(&s.id);
-            let pct = if aired > 0 {
-                (downloaded * 100 / aired).clamp(0, 100)
-            } else {
-                0
-            };
-            // While downloading, guarantee a visible sliver even at
-            // zero on-disk episodes — an invisible "in flight" state
-            // defeats the point of the bar.
-            let pct = if downloading { pct.max(6) } else { pct };
-            let (card_state, label) = if downloading {
-                if aired > 0 {
-                    (
-                        "downloading",
-                        format!(
-                            "Downloading; {} of {} aired episodes on disk",
-                            downloaded, aired
-                        ),
-                    )
-                } else {
-                    ("downloading", "Downloading".to_string())
-                }
-            } else if aired == 0 {
-                ("idle", "Nothing aired yet".to_string())
-            } else if downloaded >= aired {
-                (
-                    "complete",
-                    format!("All {} aired episodes downloaded", aired),
-                )
-            } else {
-                (
-                    "missing",
-                    format!("{} of {} aired episodes downloaded", downloaded, aired),
-                )
-            };
-            let progress = super::CardProgress {
-                state: card_state.to_string(),
-                downloaded,
-                aired,
-                pct,
-                monitored: s.monitor_mode != "none",
-                label,
-            };
-            (s, progress)
+            let summary = progress.remove(&s.id).unwrap_or_default();
+            (s, summary)
         })
         .collect();
 
