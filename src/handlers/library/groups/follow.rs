@@ -132,10 +132,12 @@ pub async fn save(
     save_choices(&mut tx, id, &plan).await?;
     tx.commit().await.map_err(read_error)?;
     SETTINGS_CHANGED.notify_one();
-    Ok(htmx_aware_redirect(
-        htmx,
-        &format!("/library/groups/{owner}/preview"),
-    ))
+    let mut destination = format!("/library/groups/{owner}/preview");
+    if let Some(return_to) = &plan.return_to {
+        destination.push_str("?return_to=");
+        destination.push_str(&urlencoding::encode(return_to));
+    }
+    Ok(htmx_aware_redirect(htmx, &destination))
 }
 
 async fn save_choices(

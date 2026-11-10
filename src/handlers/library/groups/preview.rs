@@ -1,7 +1,7 @@
 //! A projection of cached releases and follows. The query string owns all draft choices.
 use super::{Entry, Group, load_groups};
 use crate::{
-    models::release_follows,
+    models::{monitoring, release_follows, series},
     services::{franchise_files, media},
 };
 use askama::Template;
@@ -21,7 +21,13 @@ use std::{
 pub(super) struct Preview {
     page: &'static str,
     title_language: String,
+    title: String,
     seed: i64,
+    back_path: String,
+    back_label: &'static str,
+    pub(super) return_to: Option<String>,
+    follow_started_on: String,
+    advanced_open: bool,
     pub(super) owner: Option<i64>,
     folder: String,
     pub(super) name_override: String,
@@ -76,6 +82,9 @@ impl Policy {
 pub(super) struct Row {
     pub(super) entry: Entry,
     pub(super) selected: bool,
+    detail_path: String,
+    cover_url: String,
+    monitoring_label: String,
     source: Option<String>,
     destination: String,
     file_preview: Option<franchise_files::ReleaseFiles>,
@@ -149,6 +158,61 @@ fn proposed_owner(entries: &[Entry]) -> Option<i64> {
     }
 }
 
+fn safe_return_to(value: &str) -> Option<String> {
+    if value.len() > 2048 || value.contains(['\\', '\r', '\n']) {
+        return None;
+    }
+    let uri: axum::http::Uri = value.parse().ok()?;
+    if uri.scheme().is_some() || uri.authority().is_some() || !value.starts_with('/') {
+        return None;
+    }
+    let path = uri.path();
+    let allowed = path == "/"
+        || path
+            .strip_prefix("/franchises/")
+            .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        || ["/anime/anilist/", "/anime/mal/"].iter().any(|prefix| {
+            path.strip_prefix(prefix).is_some_and(|id| {
+                !id.is_empty()
+                    && id.bytes().all(|byte| byte.is_ascii_digit())
+                    && id.parse::<i64>().is_ok_and(|id| id > 0)
+            })
+        });
+    allowed.then(|| value.to_owned())
+}
+
+fn monitoring_label(row: &series::Series, states: &[monitoring::EpisodeMonitorState]) -> String {
+    let states: Vec<_> = states
+        .iter()
+        .filter(|state| state.episode_number > 0)
+        .collect();
+    if !states.is_empty() {
+        let count = states.iter().filter(|state| state.monitored).count();
+        if count == 0 {
+            return "Unmonitored".into();
+        }
+        let total = row
+            .episodes
+            .filter(|total| *total > 0)
+            .map(|total| total as usize)
+            .unwrap_or(states.len());
+        if count == total {
+            return format!("Monitoring all {total} episodes");
+        }
+        return format!("Monitoring {count} of {total} episodes");
+    }
+    match row.monitor_mode_enum() {
+        monitoring::MonitorMode::None => "Unmonitored".into(),
+        monitoring::MonitorMode::All => match row.episodes.filter(|count| *count > 0) {
+            Some(total) => format!("Monitoring all {total} episodes"),
+            None => "Monitoring all episodes".into(),
+        },
+        monitoring::MonitorMode::Future => "Monitoring future episodes".into(),
+        monitoring::MonitorMode::Missing => "Monitoring missing episodes".into(),
+        monitoring::MonitorMode::Existing => "Monitoring existing episodes".into(),
+    }
+}
+
 pub(super) type Error = (StatusCode, &'static str);
 
 fn project(
@@ -159,11 +223,44 @@ fn project(
     follows: Vec<release_follows::Follow>,
     title_language: String,
 ) -> Result<Preview, Error> {
+    let title = group.title.clone();
+    let source_provider = group
+        .entries
+        .iter()
+        .find(|entry| entry.provider_id == seed)
+        .map(|entry| entry.library_provider_id.unwrap_or(entry.provider_id))
+        .unwrap_or(seed);
+    let return_to = query
+        .iter()
+        .rev()
+        .find(|(name, _)| name == "return_to")
+        .and_then(|(_, value)| safe_return_to(value));
+    let back_path = return_to.clone().unwrap_or_else(|| {
+        group
+            .page_id
+            .as_ref()
+            .map(|id| format!("/franchises/{id}"))
+            .unwrap_or_else(|| super::super::detail::path(source_provider))
+    });
+    let back_label = if back_path.starts_with("/franchises/") {
+        "Back to franchise"
+    } else if back_path.starts_with("/anime/") {
+        "Back to anime"
+    } else {
+        "Back to library"
+    };
     let entries: HashMap<_, _> = group.entries.iter().map(|e| (e.provider_id, e)).collect();
     let follows: Vec<_> = follows
         .into_iter()
         .filter(|f| entries.contains_key(&f.anilist_id))
         .collect();
+    let follow_started_on = follows
+        .iter()
+        .map(|follow| follow.started_on.as_str())
+        .filter(|date| !date.is_empty())
+        .min()
+        .map(str::to_owned)
+        .unwrap_or_else(|| chrono::Utc::now().date_naive().to_string());
     let managed = follows.iter().find(|f| f.revision > 0);
     let mut owner = managed
         .map(|f| f.anilist_id)
@@ -273,6 +370,20 @@ fn project(
                 String::new()
             };
             Row {
+                detail_path: super::super::detail::path(
+                    entry.library_provider_id.unwrap_or(entry.provider_id),
+                ),
+                cover_url: entry
+                    .related
+                    .as_ref()
+                    .map(|related| related.cover_url.clone())
+                    .unwrap_or_default(),
+                monitoring_label: if entry.series_id.is_some() {
+                    "Episode monitoring unavailable"
+                } else {
+                    "Added releases will monitor all episodes"
+                }
+                .into(),
                 entry,
                 selected,
                 source,
@@ -284,7 +395,15 @@ fn project(
     Ok(Preview {
         page: "library",
         title_language,
+        title,
         seed,
+        back_path,
+        back_label,
+        return_to,
+        follow_started_on,
+        advanced_open: query
+            .iter()
+            .any(|(name, value)| name == "advanced" && value == "1"),
         owner,
         folder,
         name_override,
@@ -358,14 +477,44 @@ pub(super) async fn draft(
             StatusCode::NOT_FOUND,
             "Open this release's detail page to load its franchise, then try again.",
         ))?;
-    project(
+    let mut preview = project(
         group,
         seed,
         query,
         &view.media_root,
         follows,
         view.title_language,
+    )?;
+    let mut library = series::get_all(db).await.map_err(read_error)?;
+    library.retain(|series| {
+        preview
+            .rows
+            .iter()
+            .any(|row| row.entry.series_id == Some(series.id))
+    });
+    super::super::reconcile::populate_series_cover_urls(
+        db,
+        &mut library,
+        |series| series.id,
+        |series, url| series.cover_url = url,
     )
+    .await;
+    let library: HashMap<_, _> = library
+        .into_iter()
+        .map(|series| (series.id, series))
+        .collect();
+    for row in &mut preview.rows {
+        if let Some(series) = row.entry.series_id.and_then(|id| library.get(&id)) {
+            let states = monitoring::get_series_states(db, series.id)
+                .await
+                .map_err(read_error)?;
+            row.monitoring_label = monitoring_label(series, &states);
+            if !series.cover_url.is_empty() {
+                row.cover_url.clone_from(&series.cover_url);
+            }
+        }
+    }
+    Ok(preview)
 }
 
 pub async fn page(
@@ -456,6 +605,32 @@ mod tests {
     use super::*;
     use crate::handlers::library::groups::Catalog;
     use serde_json::json;
+    #[test]
+    fn return_context_only_accepts_known_local_navigation_routes() {
+        for path in [
+            "/",
+            "/?search=Fate&sort=added_desc",
+            "/anime/anilist/19603",
+            "/anime/mal/22297?from=search",
+            "/franchises/0123456789abcdef0123456789abcdef",
+        ] {
+            assert_eq!(safe_return_to(path).as_deref(), Some(path));
+        }
+        for path in [
+            "https://other.example/",
+            "//other.example/",
+            "/\\other.example/",
+            "/settings",
+            "/anime/anilist/-1",
+            "/anime/anilist/0",
+            "/anime/anilist/1/extra",
+            "/franchises/not-a-page",
+            "/\r\nlocation: external",
+        ] {
+            assert_eq!(safe_return_to(path), None, "accepted {path:?}");
+        }
+    }
+
     #[test]
     fn franchise_folder_names_use_titles_and_disambiguate_only_conflicts() {
         let entries: Vec<_> = [
