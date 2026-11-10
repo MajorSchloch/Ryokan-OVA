@@ -593,7 +593,9 @@ fn decode_subtitle_text(bytes: &[u8]) -> Result<String, String> {
         }
         let little = bytes.starts_with(&[0xff, 0xfe]);
         let units: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 if little {
                     u16::from_le_bytes([pair[0], pair[1]])
