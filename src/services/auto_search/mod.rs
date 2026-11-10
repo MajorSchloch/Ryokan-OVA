@@ -17,6 +17,7 @@ use crate::services::{
 // ── Pre-compiled regexes for parse_release_numbers ─────────────────────────
 
 mod aliases;
+mod numeric_title;
 mod pack_detection;
 mod provenance;
 mod release_parse;
@@ -31,16 +32,17 @@ pub use aliases::{
     names_more_than_the_series, normalize_title, sequel_variant_aliases, token_overlap_ratio,
     token_set, with_alternate_titles,
 };
+pub(crate) use numeric_title::TitleNumberEvidence;
 pub use pack_detection::{
     TRANSITIVE_WALK_MAX_FETCHES, detect_sibling_entries_in_pack,
     expand_parent_with_transitive_relations, is_transitive_walk_source,
 };
 pub use provenance::{AliasMatch, MatchKind, MatchPhase, MatchProvenance, history_summary};
-pub(crate) use release_parse::is_media_filename;
 pub use release_parse::{
     has_selective_discriminator, infer_season_from_detail, parse_release_numbers,
     parse_release_season, pick_wanted_file_indices,
 };
+pub(crate) use release_parse::{is_media_filename, part_cour_numbers};
 use release_parse::{
     normalize_subtitle, season_mismatch, trailing_subtitle_of, within_episode_slack,
 };
@@ -300,7 +302,8 @@ async fn find_all_for_target_with_probes(
         && let SearchTarget::Episode(ep) = target
     {
         absolute_target = SearchTarget::Episode(ep.saturating_add(series_ctx.absolute_offset));
-        franchise_precompute = SiblingRejectPrecompute::build(&series_ctx.franchise_aliases, &[]);
+        franchise_precompute =
+            SiblingRejectPrecompute::for_absolute_fallback(&series_ctx.franchise_aliases, &aliases);
         let franchise_queries = append_custom_tokens(
             build_queries_from_aliases(
                 &series_ctx.franchise_aliases,
@@ -1213,7 +1216,8 @@ async fn collect_scored_for_target_filtered(
         && let SearchTarget::Episode(ep) = target
     {
         absolute_target = SearchTarget::Episode(ep.saturating_add(series_ctx.absolute_offset));
-        franchise_precompute = SiblingRejectPrecompute::build(&series_ctx.franchise_aliases, &[]);
+        franchise_precompute =
+            SiblingRejectPrecompute::for_absolute_fallback(&series_ctx.franchise_aliases, &aliases);
         let franchise_queries = append_custom_tokens(
             build_queries_from_aliases(
                 &series_ctx.franchise_aliases,
