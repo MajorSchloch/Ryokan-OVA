@@ -8,3 +8,5 @@ mod exact_title;
 mod parse_release;
 mod queue;
 mod source;
+
+mod title_identity;

@@ -81,25 +81,12 @@ static RE_CORE_TITLE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(?:season\s*\d+|\d+(?:st|nd|rd|th)\s+season|s\d{1,2}(?:e\d{1,4})?|part\s*\d+|cour\s*\d+|final|end(?:ing)?s?)\b").unwrap()
 });
 
-// Season number extraction (tried in order)
-static RE_SEASON_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    vec![
-        Regex::new(r"(?i)\bseason\s*(\d{1,2})\b").unwrap(),
-        Regex::new(r"(?i)\b(\d{1,2})(?:st|nd|rd|th)\s+season\b").unwrap(),
-        Regex::new(r"(?i)\bs(\d{1,2})\b").unwrap(),
-        Regex::new(r"(?i)\bpart\s*(\d{1,2})\b").unwrap(),
-        Regex::new(r"(?i)\bcour\s*(\d{1,2})\b").unwrap(),
-    ]
-});
-
 // Season+episode range patterns
 static RE_SEASON_EP_RANGE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
     Regex::new(r"(?i)\bs(\d{1,2})\s*e(\d{1,4})\s*[-~]\s*e?(\d{1,4})(?:v\d+)?\b").unwrap(),
     Regex::new(r"(?i)\b(\d{1,2})(?:st|nd|rd|th)\s+season\b\s*[-:]\s*(\d{1,4})\s*[-~]\s*(\d{1,4})(?:v\d+)?\b").unwrap(),
     Regex::new(r"(?i)\bseason\s*(\d{1,2})\b\s*[-:]\s*(\d{1,4})\s*[-~]\s*(\d{1,4})(?:v\d+)?\b").unwrap(),
-    Regex::new(r"(?i)\bpart\s*(\d{1,2})\b\s*[-:]\s*(\d{1,4})\s*[-~]\s*(\d{1,4})(?:v\d+)?\b").unwrap(),
-    Regex::new(r"(?i)\bcour\s*(\d{1,2})\b\s*[-:]\s*(\d{1,4})\s*[-~]\s*(\d{1,4})(?:v\d+)?\b").unwrap(),
 ]
 });
 
@@ -117,8 +104,6 @@ static RE_SEASON_DASH: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     Regex::new(r"(?i)\bs(\d{1,2})\b\s*[-:]\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap(),
     Regex::new(r"(?i)\b(\d{1,2})(?:st|nd|rd|th)\s+season\b\s*[-:]\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap(),
     Regex::new(r"(?i)\bseason\s*(\d{1,2})\b\s*[-:]\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap(),
-    Regex::new(r"(?i)\bpart\s*(\d{1,2})\b\s*[-:]\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap(),
-    Regex::new(r"(?i)\bcour\s*(\d{1,2})\b\s*[-:]\s*(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap(),
 ]
 });
 
@@ -320,11 +305,13 @@ struct CandidateDecision {
 #[derive(Clone)]
 struct SeriesMeta {
     series: series::Series,
+    original_aliases: Vec<String>,
     aliases: Vec<String>,
     core_aliases: Vec<String>,
     collapsed_aliases: Vec<String>,
     collapsed_core_aliases: Vec<String>,
     season_num: Option<i32>,
+    target_parts: HashSet<i32>,
 }
 
 #[derive(Clone)]
@@ -354,43 +341,64 @@ impl SeriesMeta {
         alias_input.extend(series.alternate_title_list());
         let aliases = auto_search::dedupe_strings(alias_input);
 
-        let season_num = aliases
+        let season_num = aliases.iter().find_map(|alias| parse_season_number(alias));
+        let target_parts = aliases
             .iter()
-            .find_map(|alias| parse_season_number(&auto_search::normalize_title(alias)));
+            .flat_map(|alias| auto_search::part_cour_numbers(alias))
+            .collect();
 
-        let mut expanded = aliases.clone();
-        let mut core_aliases = Vec::new();
-        let mut collapsed_aliases = Vec::new();
-        let mut collapsed_core_aliases = Vec::new();
-
-        for alias in &aliases {
-            let normalized = auto_search::normalize_title(alias);
-            if !normalized.is_empty() {
-                expanded.push(normalized.clone());
-                collapsed_aliases.push(collapse_alias(&normalized));
-            }
-            let core = normalize_core_title(&normalized);
-            if !core.is_empty() {
-                core_aliases.push(core.clone());
-                expanded.push(core.clone());
-                collapsed_core_aliases.push(collapse_alias(&core));
-                if let Some(season) = season_num {
-                    expanded.push(format!("{} s{}", core, season));
-                    expanded.push(format!("{} season {}", core, season));
-                    expanded.push(format!("{} {} season", core, ordinal_suffix(season)));
-                }
-            }
-        }
+        let [
+            expanded,
+            core_aliases,
+            collapsed_aliases,
+            collapsed_core_aliases,
+        ] = series_alias_views(&aliases, season_num);
 
         Self {
             series: series.clone(),
-            aliases: auto_search::dedupe_strings(expanded),
-            core_aliases: auto_search::dedupe_strings(core_aliases),
-            collapsed_aliases: auto_search::dedupe_strings(collapsed_aliases),
-            collapsed_core_aliases: auto_search::dedupe_strings(collapsed_core_aliases),
+            original_aliases: aliases,
+            aliases: expanded,
+            core_aliases,
+            collapsed_aliases,
+            collapsed_core_aliases,
             season_num,
+            target_parts,
         }
     }
+}
+
+fn series_alias_views(aliases: &[String], season_num: Option<i32>) -> [Vec<String>; 4] {
+    let mut expanded = aliases.to_vec();
+    let mut core_aliases = Vec::new();
+    let mut collapsed_aliases = Vec::new();
+    let mut collapsed_core_aliases = Vec::new();
+
+    for alias in aliases {
+        let normalized = auto_search::normalize_title(alias);
+        if !normalized.is_empty() {
+            expanded.push(normalized.clone());
+            collapsed_aliases.push(collapse_alias(&normalized));
+        }
+        let core = normalize_core_title(&normalized);
+        if !core.is_empty() {
+            core_aliases.push(core.clone());
+            expanded.push(core.clone());
+            collapsed_core_aliases.push(collapse_alias(&core));
+            if let Some(season) = season_num {
+                expanded.push(format!("{} s{}", core, season));
+                expanded.push(format!("{} season {}", core, season));
+                expanded.push(format!("{} {} season", core, ordinal_suffix(season)));
+            }
+        }
+    }
+
+    [
+        expanded,
+        core_aliases,
+        collapsed_aliases,
+        collapsed_core_aliases,
+    ]
+    .map(auto_search::dedupe_strings)
 }
 
 pub async fn sync_once(state: &AppState, trigger: &str) -> Result<SyncSummary, String> {
@@ -2018,8 +2026,10 @@ fn logical_bucket_key(cand: &PendingCandidate) -> String {
     logical_episode_key(&cand.found, cand.item.is_batch)
 }
 
-/// The logical item a release delivers: series family, batch or
-/// single, and the episode set. Empty when no episode resolved.
+/// The logical item a release delivers: tracked entry, family, batch
+/// or single, and the episode set. Source-local absolute offsets can
+/// overlap across different entries in the same franchise family.
+/// Empty when no episode resolved.
 fn logical_episode_key(found: &MatchResult, is_batch: bool) -> String {
     let episode_key = if !found.canonical_abs_eps.is_empty() {
         format_episode_set(&found.canonical_abs_eps)
@@ -2030,8 +2040,9 @@ fn logical_episode_key(found: &MatchResult, is_batch: bool) -> String {
         return String::new();
     }
     format!(
-        "{}|{}|{}",
+        "{}|entry:{}|{}|{}",
         found.family_key,
+        found.series.id,
         if is_batch { "batch" } else { "single" },
         episode_key,
     )
@@ -2504,6 +2515,8 @@ fn best_series_match(item: &RssItem, all_meta: &[SeriesMeta]) -> Option<MatchRes
     let item_core_tokens = auto_search::token_set(&parsed.core_title);
 
     let mut best: Option<(f32, MatchResult)> = None;
+    let title_numbers = auto_search::TitleNumberEvidence::new(&item.title);
+    let release_parts = auto_search::part_cour_numbers(&item.title);
 
     let item_view = ItemView {
         normalized: &parsed.normalized_title,
@@ -2515,11 +2528,51 @@ fn best_series_match(item: &RssItem, all_meta: &[SeriesMeta]) -> Option<MatchRes
     };
 
     for meta in all_meta {
-        let alias_set = AliasSet {
-            aliases: &meta.aliases,
-            core_aliases: &meta.core_aliases,
-            collapsed_aliases: &meta.collapsed_aliases,
-            collapsed_core_aliases: &meta.collapsed_core_aliases,
+        // A Part/Cour is its own release identity, never a TV season.
+        // These checks precede alias scoring so a stripped core alias
+        // cannot rescue a different season or part.
+        if !release_parts.is_empty() && release_parts != meta.target_parts {
+            continue;
+        }
+        if parsed
+            .season_hint
+            .is_some_and(|season| season != meta.season_num.unwrap_or(1))
+        {
+            continue;
+        }
+        let standalone = meta.series.format.eq_ignore_ascii_case("MOVIE")
+            || (meta.series.episodes == Some(1)
+                && matches!(meta.series.format.as_str(), "OVA" | "ONA" | "SPECIAL"));
+        let filter_numbers = !item.is_batch && !standalone;
+        // Filter the original owner before deriving core/collapsed aliases.
+        // A removed numeric title must not survive through a looser view.
+        let eligible = if filter_numbers {
+            title_numbers.filter_aliases(&meta.original_aliases)
+        } else {
+            std::borrow::Cow::Borrowed(meta.original_aliases.as_slice())
+        };
+        let filtered_views = matches!(eligible, std::borrow::Cow::Owned(_))
+            .then(|| series_alias_views(&eligible, meta.season_num));
+        let alias_set = match &filtered_views {
+            Some(
+                [
+                    aliases,
+                    core_aliases,
+                    collapsed_aliases,
+                    collapsed_core_aliases,
+                ],
+            ) => AliasSet {
+                aliases,
+                core_aliases,
+                collapsed_aliases,
+                collapsed_core_aliases,
+            },
+            None => AliasSet {
+                aliases: &meta.aliases,
+                core_aliases: &meta.core_aliases,
+                collapsed_aliases: &meta.collapsed_aliases,
+                collapsed_core_aliases: &meta.collapsed_core_aliases,
+            },
         };
         let alias_score = score_alias_overlap(&item_view, &alias_set);
         if alias_score < 0.82 {
@@ -2527,7 +2580,26 @@ fn best_series_match(item: &RssItem, all_meta: &[SeriesMeta]) -> Option<MatchRes
         }
 
         let siblings = related_family(meta, all_meta);
-        let (resolved_eps, resolution_mode) = resolve_episode_numbers(&parsed, meta, &siblings);
+        let omitted_part = !standalone && !meta.target_parts.is_empty() && release_parts.is_empty();
+        let (resolved_eps, resolution_mode) = if omitted_part {
+            // A plain parent episode cannot stand in for an omitted
+            // Part/Cour. A saved absolute offset and a fully fitting
+            // absolute slot supply the evidence that the qualifier lacks.
+            let offset = meta.series.cumulative_prior_episodes;
+            if offset <= 0 || parsed.season_hint.is_some() || parsed.absolute_eps.is_empty() {
+                continue;
+            }
+            let mapped: HashSet<_> = parsed.absolute_eps.iter().map(|ep| ep - offset).collect();
+            if !mapped
+                .iter()
+                .all(|ep| *ep > 0 && meta.series.episodes.is_some_and(|total| *ep <= total))
+            {
+                continue;
+            }
+            (mapped, "absolute_part_mapped")
+        } else {
+            resolve_episode_numbers(&parsed, meta, &siblings)
+        };
         let canonical_abs_eps = canonical_absolute_numbers(meta, &siblings, &resolved_eps);
         let family_key = canonical_family_key(&siblings);
 
@@ -2593,7 +2665,11 @@ fn canonical_absolute_numbers(
     if resolved_eps.is_empty() {
         return HashSet::new();
     }
-    let offset = family_offset_for(meta, family);
+    let offset = if meta.target_parts.is_empty() {
+        family_offset_for(meta, family)
+    } else {
+        meta.series.cumulative_prior_episodes.max(0)
+    };
     resolved_eps.iter().map(|ep| ep + offset).collect()
 }
 
@@ -2757,16 +2833,8 @@ fn collapse_alias(value: &str) -> String {
 }
 
 fn parse_season_number(value: &str) -> Option<i32> {
-    for re in RE_SEASON_PATTERNS.iter() {
-        if let Some(value) = re
-            .captures(value)
-            .and_then(|caps| caps.get(1))
-            .and_then(|m| m.as_str().parse::<i32>().ok())
-        {
-            return Some(value);
-        }
-    }
-    None
+    let season = auto_search::parse_release_season(value);
+    (season > 0).then_some(season)
 }
 
 fn parse_release(item: &RssItem) -> ParsedRelease {
@@ -2776,7 +2844,7 @@ fn parse_release(item: &RssItem) -> ParsedRelease {
     let collapsed_core_title = collapse_alias(&core_title);
     let lower = item.title.to_lowercase();
 
-    let mut season_hint = parse_season_number(&normalized_title);
+    let mut season_hint = parse_season_number(&item.title);
     let mut season_relative_eps = HashSet::new();
     let mut absolute_eps = HashSet::new();
     let mut parse_mode = "unknown";

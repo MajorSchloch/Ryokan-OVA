@@ -207,15 +207,12 @@ pub fn collect_aliases(detail: &AnimeDetail) -> Vec<String> {
 // movie trilogies: AL says `Kizumonogatari II: Nekketsu-hen`; MTBB names
 // their files `Kizumonogatari - 02`. Nyaa never unions these.
 //
-// The fix: detect a sequel/part marker in the alias, extract a franchise
-// base, and emit three synthetic aliases covering the release-group
-// conventions actually observed in the wild (`S{N}`, `S{NN}`, `- {NN}`).
-// These variants feed into BOTH the query-generation side (so Nyaa sees
-// queries that actually match the groups' titling) and the alias list
-// passed to `matches_target` (so a release matching via the variant isn't
-// rejected by the token-overlap filter).
+// Explicit seasons can use season shorthand; a Part/Cour number cannot
+// establish the TV season. Keep only the numbered-part shorthand for
+// those entries, preserving movie trilogy matching without inventing S2.
+// Variants feed both query generation and the target-matching alias list.
 //
-// The variant set is kept to three forms specifically because every
+// The variant set is kept to at most four forms because every
 // variant is a net new HTTP round-trip per sweep — see mod.rs's
 // `build_queries_mixed` for the canonical-full / variant-collapsed
 // query shape that keeps the per-sweep query count bounded.
@@ -246,9 +243,10 @@ static RE_SEASON_N: LazyLock<Regex> =
 static RE_S_N: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(.+?)\s+S(\d{1,2})\b.*$").unwrap());
 static RE_PART_N: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^(.+?)\s+Part\s+(\d+)(?::\s+.+)?\s*$").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)^(.+?)\s+(?:Part|Cour)\s+(\d+)(?::\s+.+)?\s*$").unwrap());
 static RE_PART_ROMAN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(.+?)\s+Part\s+(II|III|IV|V|VI|VII|VIII|IX|X)(?::\s+.+)?\s*$").unwrap()
+    Regex::new(r"(?i)^(.+?)\s+(?:Part|Cour)\s+(II|III|IV|V|VI|VII|VIII|IX|X)(?::\s+.+)?\s*$")
+        .unwrap()
 });
 // Roman numeral at the tail, optionally followed by `: subtitle`. Excludes
 // plain "I" — a single trailing letter is too often an initial (e.g.
@@ -308,49 +306,55 @@ fn n_to_roman(n: u32) -> Option<&'static str> {
 /// of the alias is recognized (optionally followed by `: subtitle` for
 /// the part/roman conventions that carry a sub-title), so mid-string
 /// false positives like `Persona 5 the Animation` don't trip `RE_S_N`.
-fn extract_sequel_position(alias: &str) -> Option<(String, u32)> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NumberedAlias {
+    Season,
+    Part,
+}
+
+fn extract_sequel_position(alias: &str) -> Option<(String, u32, NumberedAlias)> {
     // Ordinal-season and word-season come first because they strictly
     // embed the position number — matching them is unambiguous.
     if let Some(cap) = RE_ORDINAL_SEASON.captures(alias) {
         let base = cap.get(1)?.as_str().trim();
         let n: u32 = cap.get(2)?.as_str().parse().ok()?;
         if !base.is_empty() && (1..=20).contains(&n) {
-            return Some((base.to_string(), n));
+            return Some((base.to_string(), n, NumberedAlias::Season));
         }
     }
     if let Some(cap) = RE_WORD_SEASON.captures(alias) {
         let base = cap.get(1)?.as_str().trim();
         let n = ordinal_word_to_n(cap.get(2)?.as_str())?;
         if !base.is_empty() {
-            return Some((base.to_string(), n));
+            return Some((base.to_string(), n, NumberedAlias::Season));
         }
     }
     if let Some(cap) = RE_SEASON_N.captures(alias) {
         let base = cap.get(1)?.as_str().trim();
         let n: u32 = cap.get(2)?.as_str().parse().ok()?;
         if !base.is_empty() && (1..=20).contains(&n) {
-            return Some((base.to_string(), n));
+            return Some((base.to_string(), n, NumberedAlias::Season));
         }
     }
     if let Some(cap) = RE_S_N.captures(alias) {
         let base = cap.get(1)?.as_str().trim();
         let n: u32 = cap.get(2)?.as_str().parse().ok()?;
         if !base.is_empty() && (1..=20).contains(&n) {
-            return Some((base.to_string(), n));
+            return Some((base.to_string(), n, NumberedAlias::Season));
         }
     }
     if let Some(cap) = RE_PART_N.captures(alias) {
         let base = cap.get(1)?.as_str().trim();
         let n: u32 = cap.get(2)?.as_str().parse().ok()?;
         if !base.is_empty() && (1..=20).contains(&n) {
-            return Some((base.to_string(), n));
+            return Some((base.to_string(), n, NumberedAlias::Part));
         }
     }
     if let Some(cap) = RE_PART_ROMAN.captures(alias) {
         let base = cap.get(1)?.as_str().trim();
         let n = roman_to_n(cap.get(2)?.as_str())?;
         if !base.is_empty() {
-            return Some((base.to_string(), n));
+            return Some((base.to_string(), n, NumberedAlias::Part));
         }
     }
     if let Some(cap) = RE_ROMAN_TAIL.captures(alias) {
@@ -358,7 +362,7 @@ fn extract_sequel_position(alias: &str) -> Option<(String, u32)> {
         let n = roman_to_n(cap.get(2)?.as_str())?;
         // RE_ROMAN_TAIL only captures II..X, so n ≥ 2 here.
         if !base.is_empty() {
-            return Some((base.to_string(), n));
+            return Some((base.to_string(), n, NumberedAlias::Season));
         }
     }
     None
@@ -384,10 +388,10 @@ fn is_distinctive_base(base: &str) -> bool {
     normalized.chars().count() >= 7
 }
 
-/// Generate synthetic alias variants for sequel / part markers. Given an
-/// alias carrying a season or part marker, emits the four release-group
-/// shorthand forms that Nyaa's AND-tokenized search uses: `S{N}`, `S{NN}`,
-/// `- {NN}`, and `{base} {roman}`. Feeds into both query generation (so
+/// Generate shorthand aliases without turning a part/cour into a season.
+/// Explicit season markers can produce `S{N}`, `S{NN}`, `- {NN}`, and a
+/// bare Roman sequel. Parts/cours produce only their numbered `- {NN}`
+/// form, which preserves numbered movie matching. Feeds query generation (so
 /// Nyaa returns the groups' shorthand titles) and `matches_target`'s
 /// alias list (so the shorthand titles survive the token-overlap filter).
 ///
@@ -408,16 +412,27 @@ fn is_distinctive_base(base: &str) -> bool {
 pub fn sequel_variant_aliases(aliases: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for alias in aliases {
-        let Some((base, pos)) = extract_sequel_position(alias) else {
+        let Some((base, pos, kind)) = extract_sequel_position(alias) else {
             continue;
         };
         if !is_distinctive_base(&base) {
             continue;
         }
-        out.push(format!("{} S{}", base, pos));
-        out.push(format!("{} S{:02}", base, pos));
+        // "Season 2 Part 2" must keep both dimensions; dropping the
+        // part would make the first cour of season 2 look like this one.
+        if kind == NumberedAlias::Season
+            && !super::release_parse::part_cour_numbers(alias).is_empty()
+        {
+            continue;
+        }
+        if kind == NumberedAlias::Season {
+            out.push(format!("{} S{}", base, pos));
+            out.push(format!("{} S{:02}", base, pos));
+        }
         out.push(format!("{} - {:02}", base, pos));
-        if let Some(roman) = n_to_roman(pos) {
+        if kind == NumberedAlias::Season
+            && let Some(roman) = n_to_roman(pos)
+        {
             // Skip when the canonical alias this variant came from
             // already ends in `{base} {roman}` — common for Overlord-
             // style AL titles where the Roman numeral IS the marker.
@@ -528,6 +543,11 @@ pub struct SiblingRejectPrecompute {
     /// `HashSet::iter()` per call, which is nondeterministic order and
     /// would silently misbehave on contiguous-substring checks).
     siblings: Vec<(String, HashSet<String>)>,
+    /// Provider-owned part/cour numbers, independent of TV seasons.
+    target_parts: HashSet<i32>,
+    /// The franchise fallback has already converted the requested slot
+    /// through its known offset. Its Episode target is already absolute.
+    absolute_fallback: bool,
 }
 
 impl SiblingRejectPrecompute {
@@ -551,7 +571,25 @@ impl SiblingRejectPrecompute {
         Self {
             own_token_sets,
             siblings,
+            target_parts: own_aliases
+                .iter()
+                .flat_map(|alias| super::release_parse::part_cour_numbers(alias))
+                .collect(),
+            absolute_fallback: false,
         }
+    }
+
+    pub(super) fn for_absolute_fallback(
+        franchise_aliases: &[String],
+        target_aliases: &[String],
+    ) -> Self {
+        let mut value = Self::build(franchise_aliases, &[]);
+        value.target_parts = target_aliases
+            .iter()
+            .flat_map(|alias| super::release_parse::part_cour_numbers(alias))
+            .collect();
+        value.absolute_fallback = true;
+        value
     }
 }
 
@@ -1049,6 +1087,12 @@ pub fn classify_match(
     allow_batch_episode: bool,
     absolute_offset: i32,
 ) -> Option<AliasMatch> {
+    let title_numbers =
+        matches!(target, SearchTarget::Episode(_)).then(|| super::TitleNumberEvidence::new(title));
+    let eligible_aliases = title_numbers
+        .as_ref()
+        .map(|numbers| numbers.filter_aliases(aliases));
+    let aliases = eligible_aliases.as_deref().unwrap_or(aliases);
     let normalized_title = normalize_title(title);
     let title_tokens = token_set(&normalized_title);
 
@@ -1066,6 +1110,11 @@ pub fn classify_match(
         return None;
     }
 
+    let release_parts = super::release_parse::part_cour_numbers(title);
+    if !release_parts.is_empty() && release_parts != sibling_precompute.target_parts {
+        return None;
+    }
+
     match target {
         SearchTarget::Single => Some(alias_match),
         SearchTarget::Episode(target_ep) => {
@@ -1076,6 +1125,17 @@ pub fn classify_match(
 
             let parsed = parse_release_numbers(title);
             if parsed.is_empty() {
+                return None;
+            }
+            // Omitting the target's Part/Cour qualifier must not make a
+            // relative episode from the parent look like this entry.
+            // A known absolute slot is the safe marker-free fallback.
+            let needs_part_evidence = !sibling_precompute.target_parts.is_empty()
+                && release_parts.is_empty()
+                && !sibling_precompute.absolute_fallback;
+            let has_absolute_evidence =
+                absolute_offset > 0 && parsed.contains(&target_ep.saturating_add(absolute_offset));
+            if needs_part_evidence && !has_absolute_evidence {
                 return None;
             }
             // Reject releases with 3+ episode numbers (batch/multi-episode)
@@ -1119,6 +1179,204 @@ pub fn matches_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mushoku_cour_and_season_keep_distinct_identities_through_franchise_fallback() {
+        // AniList 127720 is the 2021 second cour, not 146065's 2023
+        // second season. These are the exact DKB titles grabbed for it.
+        let cour_canonical = vec![
+            "Mushoku Tensei: Isekai Ittara Honki Dasu Part 2".to_string(),
+            "Mushoku Tensei: Jobless Reincarnation Cour 2".to_string(),
+        ];
+        let cour_aliases = dedupe_strings(
+            cour_canonical
+                .iter()
+                .cloned()
+                .chain(sequel_variant_aliases(&cour_canonical))
+                .collect(),
+        );
+        let cour_season = super::super::release_parse::infer_season_from_title(&cour_canonical[0]);
+        let cour_precompute = SiblingRejectPrecompute::build(&cour_aliases, &[]);
+        let franchise = vec!["Mushoku Tensei: Isekai Ittara Honki Dasu".to_string()];
+        for (episode, absolute) in [(11, 22), (12, 23)] {
+            let target = SearchTarget::Episode(episode);
+            for title in [
+                format!(
+                    "[DKB] Mushoku Tensei - Isekai Ittara Honki Dasu - S02E{episode:02} [1080p][HEVC x265 10bit][Multi-Subs][weekly]"
+                ),
+                format!(
+                    "[DKB] Mushoku Tensei - Isekai Ittara Honki Dasu - S02E{absolute:02} [1080p][HEVC x265 10bit][Multi-Subs][weekly]"
+                ),
+            ] {
+                for aliases in [&cour_aliases, &franchise] {
+                    assert!(
+                        !matches_target(
+                            &title,
+                            aliases,
+                            &cour_precompute,
+                            &target,
+                            cour_season,
+                            false,
+                            11
+                        ),
+                        "2021 cour must reject the 2023 season through either alias phase: {title}"
+                    );
+                }
+            }
+            for title in [
+                format!(
+                    "[Group] Mushoku Tensei: Isekai Ittara Honki Dasu Part 2 - S01E{episode:02} [1080p]"
+                ),
+                format!(
+                    "[Group] Mushoku Tensei: Jobless Reincarnation Cour 2 - S01E{episode:02} [1080p]"
+                ),
+                format!(
+                    "[Group] Mushoku Tensei: Isekai Ittara Honki Dasu Part.2 - S01E{episode:02} [1080p]"
+                ),
+            ] {
+                assert!(
+                    matches_target(
+                        &title,
+                        &cour_aliases,
+                        &cour_precompute,
+                        &target,
+                        cour_season,
+                        false,
+                        11
+                    ),
+                    "explicit cour remains valid: {title}"
+                );
+            }
+            for title in [
+                format!(
+                    "[SubsPlease] Mushoku Tensei: Isekai Ittara Honki Dasu - {absolute:02} (1080p)"
+                ),
+                format!(
+                    "[Group] Mushoku Tensei: Isekai Ittara Honki Dasu S01E{absolute:02} [1080p]"
+                ),
+            ] {
+                assert!(
+                    matches_target(
+                        &title,
+                        &franchise,
+                        &cour_precompute,
+                        &target,
+                        cour_season,
+                        false,
+                        11
+                    ),
+                    "verified absolute episode remains valid: {title}"
+                );
+            }
+            let absolute_precompute =
+                SiblingRejectPrecompute::for_absolute_fallback(&franchise, &cour_aliases);
+            let absolute_title = format!(
+                "[Group] Mushoku Tensei: Isekai Ittara Honki Dasu S01E{absolute:02} [1080p]"
+            );
+            assert!(matches_target(
+                &absolute_title,
+                &franchise,
+                &absolute_precompute,
+                &SearchTarget::Episode(absolute),
+                cour_season,
+                false,
+                0
+            ));
+            let wrong_season = absolute_title.replace("S01E", "S02E");
+            assert!(!matches_target(
+                &wrong_season,
+                &franchise,
+                &absolute_precompute,
+                &SearchTarget::Episode(absolute),
+                cour_season,
+                false,
+                0
+            ));
+        }
+
+        let season_canonical = vec![
+            "Mushoku Tensei II: Isekai Ittara Honki Dasu".to_string(),
+            "Mushoku Tensei: Jobless Reincarnation Season 2".to_string(),
+        ];
+        let season_aliases = dedupe_strings(
+            season_canonical
+                .iter()
+                .cloned()
+                .chain(sequel_variant_aliases(&season_canonical))
+                .collect(),
+        );
+        let season_precompute = SiblingRejectPrecompute::build(&season_aliases, &[]);
+        let season = super::super::release_parse::infer_season_from_title(&season_canonical[0]);
+        assert!(matches_target(
+            "[DKB] Mushoku Tensei - Isekai Ittara Honki Dasu - S02E11 [1080p][HEVC x265 10bit][Multi-Subs][weekly]",
+            &franchise,
+            &season_precompute,
+            &SearchTarget::Episode(11),
+            season,
+            false,
+            0
+        ));
+        for part in ["Part 2", "Cour 2", "Part II", "Cour II"] {
+            let wrong =
+                format!("[Group] Mushoku Tensei: Isekai Ittara Honki Dasu {part} - 11 [1080p]");
+            assert!(
+                !matches_target(
+                    &wrong,
+                    &franchise,
+                    &season_precompute,
+                    &SearchTarget::Episode(11),
+                    season,
+                    false,
+                    0
+                ),
+                "true season must not acquire its earlier cour: {wrong}"
+            );
+        }
+    }
+
+    #[test]
+    fn compound_season_and_part_keep_both_markers_in_fallback() {
+        let aliases = vec!["Some Long Title Season 2 Part 2".to_string()];
+        assert!(sequel_variant_aliases(&aliases).is_empty());
+        let precompute = SiblingRejectPrecompute::build(&aliases, &[]);
+        let franchise = vec!["Some Long Title S02".to_string()];
+        assert!(!matches_target(
+            "[Group] Some Long Title S02E01 [1080p]",
+            &franchise,
+            &precompute,
+            &SearchTarget::Episode(1),
+            2,
+            false,
+            12
+        ));
+        assert!(matches_target(
+            "[Group] Some Long Title S02E13 [1080p]",
+            &franchise,
+            &precompute,
+            &SearchTarget::Episode(1),
+            2,
+            false,
+            12
+        ));
+        assert!(!matches_target(
+            "[Group] Some Long Title S03E13 [1080p]",
+            &franchise,
+            &precompute,
+            &SearchTarget::Episode(1),
+            2,
+            false,
+            12
+        ));
+        assert!(matches_target(
+            "[Group] Some Long Title S02 Part 2 - 01 [1080p]",
+            &franchise,
+            &precompute,
+            &SearchTarget::Episode(1),
+            2,
+            false,
+            12
+        ));
+    }
 
     #[test]
     fn normalize_title_folds_omitted_and_typographic_apostrophes() {
@@ -1847,12 +2105,11 @@ mod tests {
     }
 
     #[test]
-    fn sequel_variants_generate_short_s_forms_for_part_numbered() {
-        let input = vec!["Some Long Title Part 3".to_string()];
-        let variants = sequel_variant_aliases(&input);
-        assert!(variants.iter().any(|v| v == "Some Long Title - 03"));
-        assert!(variants.iter().any(|v| v == "Some Long Title S3"));
-        assert!(variants.iter().any(|v| v == "Some Long Title S03"));
+    fn sequel_variants_keep_numbered_parts_separate_from_seasons() {
+        for marker in ["Part 3", "Part III", "Cour 3", "Cour III"] {
+            let variants = sequel_variant_aliases(&[format!("Some Long Title {marker}")]);
+            assert_eq!(variants, ["Some Long Title - 03"]);
+        }
     }
 
     #[test]
@@ -1862,7 +2119,7 @@ mod tests {
         // - {NN}, and the Roman form when it's not already the alias'
         // own tail) so a future expansion of the variant list is a
         // conscious decision, not an accidental query-count multiplier.
-        let ordinal_input = vec!["Some Long Title Part 3".to_string()];
+        let ordinal_input = vec!["Some Long Title Season 3".to_string()];
         let ordinal_variants = sequel_variant_aliases(&ordinal_input);
         assert_eq!(
             ordinal_variants.len(),

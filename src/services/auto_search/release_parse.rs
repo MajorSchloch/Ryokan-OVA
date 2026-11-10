@@ -28,13 +28,6 @@ static RE_RANGE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:^|[\s._\-])(\d{1,3})\s*[-~]\s*(\d{1,3})(?:v\d+)?(?:\s|\.|\[|\(|$)").unwrap()
 });
 
-// ── Pre-compiled regexes for infer_season_from_title ───────────────────────
-static RE_NTH_SEASON: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(\d+)(?:st|nd|rd|th)\s+season").unwrap());
-static RE_SEASON_N: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"season\s+(\d+)").unwrap());
-static RE_PART_COUR: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?:part|cour)\s+(\d+)").unwrap());
-
 // ── Pre-compiled regexes for parse_release_season ──────────────────────────
 static RE_SXXEXX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"s(\d{1,2})e\d{1,4}").unwrap());
 static RE_STANDALONE_S: LazyLock<Regex> =
@@ -43,21 +36,19 @@ static RE_RELEASE_SEASON_N: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"season\s*(\d+)").unwrap());
 static RE_RELEASE_NTH_SEASON: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(\d+)(?:st|nd|rd|th)\s+season").unwrap());
-/// #27 additions: release titles also use `Part N` / `Cour N` as season
-/// synonyms (matches the same token `infer_season_from_title` already
-/// accepts on the AL side — the parsers were asymmetric before, which
-/// let a release titled "JJK Part 2" slip past the reject layer as
-/// season 0 because neither regex fired on `parse_release_season`).
-static RE_RELEASE_PART_COUR: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b(?:part|cour)\s+(\d+)").unwrap());
+/// A cour/part is a separate identity discriminator, never a TV season.
+/// Explicit Roman parts are unambiguous even when a bare V/X is not.
+static RE_RELEASE_PART_COUR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(?:part|cour)[\s._-]*(\d+|viii|vii|iii|vi|iv|ii|ix|i|v|x)\b").unwrap()
+});
 /// Roman numerals II–IX at a word boundary, terminated by space/dot/
 /// punctuation/closing-bracket/comma/end-of-string. Single-letter
 /// Romans (`I`, `V`, `X`) are deliberately excluded — matching bare
 /// `I` would fire on any title containing the English pronoun and
 /// silently reject every release whose filename has no other season
 /// indicator. The Roman-numeral arm is for *rejecting* a release
-/// whose title explicitly names cour II/III/IV when the target is
-/// cour 1, not for pinning cour 1.
+/// whose title names a bare season II/III/IV. A preceding Part/Cour
+/// qualifier is handled separately and never becomes a season number.
 ///
 /// `(?i)` is omitted because every caller (`parse_release_season` and
 /// `infer_season_from_title`) lowercases before matching.
@@ -152,48 +143,30 @@ pub fn infer_season_from_detail(detail: &AnimeDetail) -> i32 {
 }
 
 pub(super) fn infer_season_from_title(title: &str) -> i32 {
-    let lower = title.to_lowercase();
-
-    // "2nd Season", "3rd Season", etc.
-    if let Some(caps) = RE_NTH_SEASON.captures(&lower)
-        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
-    {
-        return n;
-    }
-
-    // "Season 2", "Season 3", etc.
-    if let Some(caps) = RE_SEASON_N.captures(&lower)
-        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
-    {
-        return n;
-    }
-
-    // " Part 2", " Cour 2" — sometimes used as season aliases
-    if let Some(caps) = RE_PART_COUR.captures(&lower)
-        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
-        && n >= 2
-    {
-        return n;
-    }
-
-    // #27 — Roman numeral II–IX at word boundary. Keeps AL-side inference
-    // in sync with the release-side parser so e.g. an AL entry titled
-    // "Made in Abyss: Retsujitsu no Ougonkyou" (no marker, season 1) and
-    // "Made in Abyss III" (season 3, Roman numeral) disambiguate against
-    // each other's releases instead of both reporting 0.
-    if let Some(caps) = RE_RELEASE_ROMAN.captures(&lower)
-        && let Some(m) = caps.get(1)
-    {
-        let n = roman_to_i32(m.as_str());
-        if n >= 2 {
-            return n;
-        }
-    }
-
-    0
+    parse_release_season(title)
 }
 
-/// Parse the season/cour number from a release title.
+/// Explicit Part/Cour markers are kept apart from season numbers on
+/// both provider and release titles. Callers retain the target's markers
+/// when broadening a search to a franchise alias.
+pub(crate) fn part_cour_numbers(title: &str) -> HashSet<i32> {
+    let lower = title.to_lowercase();
+    RE_RELEASE_PART_COUR
+        .captures_iter(&lower)
+        .filter_map(|caps| {
+            let raw = caps.get(1)?.as_str();
+            let n = raw.parse::<i32>().unwrap_or_else(|_| match raw {
+                "i" => 1,
+                "v" => 5,
+                "x" => 10,
+                _ => roman_to_i32(raw),
+            });
+            (n > 0).then_some(n)
+        })
+        .collect()
+}
+
+/// Parse an explicit TV season from a release or provider title.
 /// Returns 0 if no season indicator is found — callers treat 0 as
 /// "absolute numbering / single cour, don't reject."
 ///
@@ -202,9 +175,7 @@ pub(super) fn infer_season_from_title(title: &str) -> i32 {
 ///  2. Standalone `SN` (` s3 `, `.s3.`, `[s3]`)
 ///  3. `Season N`
 ///  4. `Nth Season`
-///  5. `Part N` / `Cour N` *(#27 — symmetric with [`infer_season_from_title`])*
-///  6. Roman numeral II–IX at a word boundary *(#27 — catches "JJK II",
-///     "Rebuild III", "Kizumonogatari Part II")*
+///  5. Bare Roman numeral II–IX, excluding a preceding Part/Cour marker.
 pub fn parse_release_season(title: &str) -> i32 {
     let lower = title.to_lowercase();
 
@@ -238,18 +209,16 @@ pub fn parse_release_season(title: &str) -> i32 {
         return n;
     }
 
-    // "Part 2", "Cour 2"
-    if let Some(caps) = RE_RELEASE_PART_COUR.captures(&lower)
-        && let Some(n) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
-        && n >= 2
-    {
-        return n;
-    }
-
-    // Roman numeral II–IX.
-    if let Some(caps) = RE_RELEASE_ROMAN.captures(&lower)
-        && let Some(m) = caps.get(1)
-    {
+    // A bare sequel numeral can name a season. "Part II" cannot.
+    for caps in RE_RELEASE_ROMAN.captures_iter(&lower) {
+        let Some(m) = caps.get(1) else { continue };
+        let preceding_word = lower[..m.start()]
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .rev()
+            .find(|word| !word.is_empty());
+        if matches!(preceding_word, Some("part" | "cour")) {
+            continue;
+        }
         let n = roman_to_i32(m.as_str());
         if n >= 2 {
             return n;
@@ -1039,27 +1008,50 @@ mod tests {
         assert!(!has_selective_discriminator(&d));
     }
 
-    // ── #27 — cour-aware reject parser coverage ────────────────────────────
-    //
-    // The existing `season_mismatch` reject is hard, but its parsers were
-    // missing `Part N`, `Cour N`, and Roman numerals on the release side,
-    // and Roman numerals on the AL side. These tests pin the JJK / Bleach
-    // TYBW / Demon Slayer / Made in Abyss corpus so a future change that
-    // weakens the parsers shows up as a red test, not as a wrong-cour
-    // grab reported by a user.
+    // A season and a part/cour are separate dimensions. Their markers
+    // must survive parsing without becoming aliases for one another.
 
     #[test]
-    fn parse_release_season_catches_part_n() {
+    fn part_numbers_do_not_become_season_numbers() {
         assert_eq!(
             parse_release_season("Jujutsu Kaisen Part 2 - 01 (1080p).mkv"),
-            2
+            0
         );
-        assert_eq!(parse_release_season("Chainsaw Man Part 3 - 07.mkv"), 3);
+        assert_eq!(parse_release_season("Chainsaw Man Part 3 - 07.mkv"), 0);
+        assert_eq!(
+            part_cour_numbers("Jujutsu Kaisen Part 2 - 01"),
+            HashSet::from([2])
+        );
     }
 
     #[test]
-    fn parse_release_season_catches_cour_n() {
-        assert_eq!(parse_release_season("Show Name Cour 2 - 01.mkv"), 2);
+    fn cour_numbers_do_not_become_season_numbers() {
+        assert_eq!(parse_release_season("Show Name Cour 2 - 01.mkv"), 0);
+        assert_eq!(
+            part_cour_numbers("Show Name Cour 2 - 01"),
+            HashSet::from([2])
+        );
+    }
+
+    #[test]
+    fn provider_and_release_seasons_preserve_explicit_part_dimensions() {
+        for marker in [
+            "Part 2", "Cour 2", "Part II", "Cour II", "Part.2", "Cour_2", "PartII",
+        ] {
+            let title = format!("Some Show {marker}");
+            assert_eq!(infer_season_from_title(&title), 0);
+            assert_eq!(parse_release_season(&title), 0);
+            assert_eq!(part_cour_numbers(&title), HashSet::from([2]));
+        }
+        for title in [
+            "Some Show Season 2 Part 2",
+            "Some Show II Cour II",
+            "Some Show S02 Part II",
+        ] {
+            assert_eq!(infer_season_from_title(title), 2);
+            assert_eq!(parse_release_season(title), 2);
+            assert_eq!(part_cour_numbers(title), HashSet::from([2]));
+        }
     }
 
     #[test]
@@ -1078,8 +1070,12 @@ mod tests {
         // missed these shapes because `]`, `)`, and `,` weren't in it.
         // Bracketed cour marker: `[II]` is the whole tag.
         assert_eq!(parse_release_season("[Group] Monogatari [II] - 01.mkv"), 2);
-        // Parenthesized cour marker: `(Part II)` is the whole qualifier.
-        assert_eq!(parse_release_season("Frieren (Part II).mkv"), 2);
+        // Parenthesized parts remain parts rather than TV seasons.
+        assert_eq!(parse_release_season("Frieren (Part II).mkv"), 0);
+        assert_eq!(
+            part_cour_numbers("Frieren (Part II).mkv"),
+            HashSet::from([2])
+        );
         // Comma-separated: `Name, II - 01` is an uncommon but legal shape.
         assert_eq!(parse_release_season("Title, II - 01.mkv"), 2);
     }
