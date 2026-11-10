@@ -1786,6 +1786,134 @@ async fn live_upgrade_keeps_old_file_when_placement_fails() {
 }
 
 #[tokio::test]
+async fn required_subtitles_use_each_source_folder_for_clientless_imports() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    let (root, downloads, media) = temp_dirs("subtitle-source-scope");
+    let db = in_memory_pool().await;
+    seed_config(&db, &media).await;
+    sqlx::query("UPDATE config SET required_subtitle_languages='en'")
+        .execute(&db)
+        .await
+        .unwrap();
+    let series_id = seed_series(&db, 9067, "Show").await;
+    for (folder, episode) in [("one", 1), ("two", 2)] {
+        let source = downloads.join(format!("{folder}/Show - {episode:02}.mkv"));
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "source video").unwrap();
+        std::fs::write(
+            source.parent().unwrap().join("English.srt"),
+            "1\n00:00:01,000 --> 00:00:02,000\nHello\n",
+        )
+        .unwrap();
+        let canonical = std::fs::canonicalize(&source).unwrap();
+        let identity = crate::services::source_ffprobe::FileIdentity::from_metadata(
+            &std::fs::metadata(&canonical).unwrap(),
+        )
+        .unwrap();
+        crate::models::media_probe_cache::upsert_identified(
+            &db,
+            canonical.to_str().unwrap(),
+            &identity.cache_key(),
+            identity.size as i64,
+            r#"{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc"}]}"#,
+        )
+        .await;
+    }
+    let grab_id = grabbed_torrents::record_grab(
+        &db,
+        "subtitle-source-scope",
+        "Show - 01-02 (1080p)",
+        series_id,
+        &[1, 2],
+        true,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let client = Arc::new(BatchClient::new(
+        complete_torrent("subtitle-source-scope", &downloads),
+        Vec::new(),
+    ));
+    let state = build_test_app_state(db.clone(), Some(client));
+    post_processing::run_once(&state).await;
+    assert_eq!(grab_state(&db, grab_id).await, "imported");
+    let files = crate::services::media::scan_series_folder(media.to_str().unwrap(), "Show").await;
+    assert_eq!(files.len(), 2);
+    for file in files {
+        assert!(
+            media
+                .join("Show")
+                .join(file.filename)
+                .with_extension("en.srt")
+                .is_file()
+        );
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn required_subtitle_rejection_keeps_old_video_subtitles_and_torrent() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    let (root, downloads, media) = temp_dirs("subtitle-rejection");
+    let db = in_memory_pool().await;
+    seed_config(&db, &media).await;
+    sqlx::query("UPDATE config SET required_subtitle_languages='en', post_processing_mode='move'")
+        .execute(&db)
+        .await
+        .unwrap();
+    let series_id = seed_series(&db, 9068, "Show").await;
+    let (dest, old_grab_id) = seed_imported_e05(&db, &media, series_id).await;
+    let old_subtitle = dest.with_extension("en.srt");
+    std::fs::write(&old_subtitle, "old dialogue subtitles").unwrap();
+    let source = downloads.join("Show - 05v2 (1080p).mkv");
+    std::fs::write(&source, "new bytes").unwrap();
+    let canonical = std::fs::canonicalize(&source).unwrap();
+    let identity = crate::services::source_ffprobe::FileIdentity::from_metadata(
+        &std::fs::metadata(&canonical).unwrap(),
+    )
+    .unwrap();
+    crate::models::media_probe_cache::upsert_identified(&db, canonical.to_str().unwrap(), &identity.cache_key(), identity.size as i64,
+        r#"{"streams":[{"index":0,"codec_type":"video","codec_name":"h264"},{"index":1,"codec_type":"audio","codec_name":"aac","tags":{"language":"jpn"}}]}"#).await;
+    let grab_id = grabbed_torrents::record_grab(
+        &db,
+        "subtitle-rejection",
+        "Show - 05v2 (1080p)",
+        series_id,
+        &[5],
+        false,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let client = Arc::new(BatchClient::new(
+        complete_torrent("subtitle-rejection", &downloads),
+        vec![complete_file("Show - 05v2 (1080p).mkv")],
+    ));
+    let state = build_test_app_state(db.clone(), Some(client.clone()));
+    post_processing::run_once(&state).await;
+    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "old bytes");
+    assert_eq!(
+        std::fs::read_to_string(&old_subtitle).unwrap(),
+        "old dialogue subtitles"
+    );
+    assert_eq!(std::fs::read_to_string(&source).unwrap(), "new bytes");
+    assert_eq!(grab_state(&db, old_grab_id).await, "imported");
+    assert_eq!(grab_state(&db, grab_id).await, "failed");
+    assert_eq!(client.deleted.load(Ordering::SeqCst), 0);
+    let detail: String = sqlx::query_scalar(
+        "SELECT detail FROM logs WHERE detail LIKE 'Subtitle requirement:%' ORDER BY id LIMIT 1",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert!(
+        detail.contains("Required full dialogue subtitles are missing"),
+        "{detail}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn live_upgrade_swaps_new_file_in_after_placement() {
     let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
     let (root, downloads, media) = temp_dirs("upgrade-ok");

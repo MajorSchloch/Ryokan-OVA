@@ -16,6 +16,7 @@ mod artwork_copy;
 pub mod client_cleanup;
 pub mod extras;
 mod state;
+pub(crate) mod subtitle_guard;
 pub mod temp_sweep;
 
 use artwork_copy::{copy_series_and_season_poster, copy_series_banner_and_backdrop};
@@ -972,9 +973,28 @@ async fn import_special_file(
         .await;
         return Ok(SpecialOutcome::Occupied);
     }
-    do_file_op(&cfg.post_processing_mode, src, &dest)
-        .await
-        .map_err(|e| e.to_string())?;
+    if subtitle_guard::required(cfg) {
+        let (candidates, videos_in_source) =
+            subtitle_guard::nearby_candidates(src, &cfg.extra_file_extensions).await;
+        subtitle_guard::import_required(
+            &state.db,
+            cfg,
+            &cfg.post_processing_mode,
+            src,
+            &dest,
+            &[],
+            ctx.series.id,
+            &ctx.series.title,
+            &candidates,
+            Some(span),
+            videos_in_source,
+        )
+        .await?;
+    } else {
+        do_file_op(&cfg.post_processing_mode, src, &dest)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
     taken.insert(dest.clone());
     logger::info(
         &state.db,
@@ -2474,7 +2494,111 @@ async fn import_torrent(
         } else {
             dest_video.clone()
         };
-        let placed = do_file_op_reporting(&cfg.post_processing_mode, &src, &landing).await;
+        let required_transaction = subtitle_guard::required(cfg);
+        let placed = if required_transaction {
+            let extensions = [cfg.extra_file_extensions.as_str(), "srt,ass,ssa"].join(",");
+            let extensions = extras::parse_extensions(&extensions);
+            let (candidates, videos_in_source) = if files_from_walk {
+                subtitle_guard::nearby_candidates(&src, &cfg.extra_file_extensions).await
+            } else {
+                let candidates = files
+                    .iter()
+                    .filter(|file| file.wanted)
+                    .filter(|file| {
+                        Path::new(&file.name)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .is_some_and(|ext| extensions.contains(&ext.to_ascii_lowercase()))
+                    })
+                    .filter(|file| validate_relative_path_fragment(&file.name).is_ok())
+                    .map(|file| Path::new(&source_base).join(&file.name))
+                    .filter(|path| resolves_to_file_inside(path, Path::new(&source_base)))
+                    .collect();
+                // The complete client list and its candidate paths share
+                // a download scope. Unwanted videos still prevent the
+                // generic single-video subtitle fallback.
+                let videos = files
+                    .iter()
+                    .filter(|file| is_video_file(&file.name))
+                    .count();
+                (candidates, videos)
+            };
+            let old_paths: Vec<PathBuf> = existing_for_ep
+                .iter()
+                .map(|(path, _)| path.clone())
+                .collect();
+            match subtitle_guard::import_required(
+                &state.db,
+                cfg,
+                &cfg.post_processing_mode,
+                &src,
+                &dest_video,
+                &old_paths,
+                target_series_id,
+                &ctx.series.title,
+                &candidates,
+                name_span,
+                videos_in_source,
+            )
+            .await
+            {
+                Ok(()) => Ok(None),
+                Err(reason) => {
+                    logger::warn(
+                        &state.db,
+                        LogCategory::PostProcess,
+                        &format!(
+                            "Import of {} for '{}' refused: required subtitles were not verified",
+                            slot, ctx.series.title
+                        ),
+                        &reason,
+                    )
+                    .await;
+                    crate::services::notifications::emit_import_failed(
+                        state,
+                        target_series_id,
+                        Some(ep_num),
+                        &src.display().to_string(),
+                        &reason,
+                    )
+                    .await;
+                    let refused: Vec<i32> = resolved.episodes().collect();
+                    let _ = episode_tags::mark_grab_failed_for_episodes(
+                        &state.db,
+                        target_series_id,
+                        &grab.torrent_name,
+                        &refused,
+                    )
+                    .await;
+                    if !existing_for_ep.is_empty() {
+                        for ep in &refused {
+                            if !ctx
+                                .existing_tags
+                                .get(ep)
+                                .is_some_and(|tag| tag.manual_override)
+                            {
+                                let _ = episode_tags::clear_episode_tag(
+                                    &state.db,
+                                    target_series_id,
+                                    *ep,
+                                )
+                                .await;
+                            }
+                        }
+                        let _ = crate::handlers::library::crud::reclassify_on_disk_episode(
+                            state,
+                            target_series_id,
+                            ep_num,
+                        )
+                        .await;
+                    }
+                    failed_episodes.extend(refused);
+                    continue;
+                }
+            }
+        } else {
+            do_file_op_reporting(&cfg.post_processing_mode, &src, &landing).await
+        };
 
         if placed.is_ok() && is_upgrade {
             // Check if this is an upgrade replacing a previously imported file.
@@ -2548,28 +2672,30 @@ async fn import_torrent(
             // it); with no bin configured this is the permanent unlink
             // the upgrade path always did.
             let mut retire_failed = false;
-            for (old_file, _) in &existing_for_ep {
-                if let Err(e) = recycle::recycle(
-                    &state.db,
-                    &cfg.recycle_bin_path,
-                    RecycleKind::Episode,
-                    Some(target_series_id),
-                    &ctx.series.title,
-                    old_file,
-                )
-                .await
-                {
-                    retire_failed = true;
-                    logger::error(
+            if !required_transaction {
+                for (old_file, _) in &existing_for_ep {
+                    if let Err(e) = recycle::recycle(
                         &state.db,
-                        LogCategory::PostProcess,
-                        &format!(
-                            "Failed to remove old file for upgrade: {}",
-                            old_file.display()
-                        ),
-                        &e,
+                        &cfg.recycle_bin_path,
+                        RecycleKind::Episode,
+                        Some(target_series_id),
+                        &ctx.series.title,
+                        old_file,
                     )
-                    .await;
+                    .await
+                    {
+                        retire_failed = true;
+                        logger::error(
+                            &state.db,
+                            LogCategory::PostProcess,
+                            &format!(
+                                "Failed to remove old file for upgrade: {}",
+                                old_file.display()
+                            ),
+                            &e,
+                        )
+                        .await;
+                    }
                 }
             }
             // A refused recycle (bin configured but not writable) must not
@@ -2608,7 +2734,8 @@ async fn import_torrent(
             // destination is free. A failure here is exotic (the
             // directory changed under us) and leaves the new file at
             // the staged path, named in the log.
-            if let Err(e) = tokio::fs::rename(&landing, &dest_video).await {
+            if !required_transaction && let Err(e) = tokio::fs::rename(&landing, &dest_video).await
+            {
                 logger::error(
                     &state.db,
                     LogCategory::PostProcess,

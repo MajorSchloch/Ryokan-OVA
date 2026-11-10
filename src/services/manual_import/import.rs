@@ -31,6 +31,7 @@ use crate::models::{
 };
 use crate::services::monitoring as monitoring_service;
 use crate::services::naming;
+use crate::services::post_processing::subtitle_guard;
 use crate::services::recycle::{self, RecycleKind};
 use crate::services::{library_link, logger, media, metadata_sync, nfo, post_processing, progress};
 
@@ -507,7 +508,32 @@ pub async fn run_import(
                         done_files += 1;
                         continue;
                     }
-                    match post_processing::do_file_op(mode, &file.path, &dest).await {
+                    let outcome = if subtitle_guard::required(&cfg) {
+                        let (candidates, videos_in_source) = subtitle_guard::nearby_candidates(
+                            &file.path,
+                            &cfg.extra_file_extensions,
+                        )
+                        .await;
+                        subtitle_guard::import_required(
+                            &state.db,
+                            &cfg,
+                            mode,
+                            &file.path,
+                            &dest,
+                            &[],
+                            row.id,
+                            &series_title,
+                            &candidates,
+                            media::parse_episode_span(&file.file_name.to_ascii_lowercase()),
+                            videos_in_source,
+                        )
+                        .await
+                    } else {
+                        post_processing::do_file_op(mode, &file.path, &dest)
+                            .await
+                            .map_err(|e| e.to_string())
+                    };
+                    match outcome {
                         Ok(()) => {
                             gr.written += 1;
                             report.files_written += 1;
@@ -541,17 +567,23 @@ pub async fn run_import(
             )
             .await;
 
+            let dest = season_dir.join(preview::import_file_name(
+                file,
+                &naming::SeriesNames::from_series(&row),
+                &cfg.title_language,
+                &cfg.episode_file_format,
+            ));
+            let required_transaction = subtitle_guard::required(&cfg);
+            let old = if replacing {
+                existing_files_for_episode(&media_root, &row.folder_name, ep, file.episode_count)
+                    .await
+            } else {
+                Vec::new()
+            };
             if replacing {
                 // Retire the old file(s) first, through the recycle bin
                 // when one is configured. A refused recycle must not
                 // become an overwrite: skip the file, keep the reason.
-                let old = existing_files_for_episode(
-                    &media_root,
-                    &row.folder_name,
-                    ep,
-                    file.episode_count,
-                )
-                .await;
                 // The same rule post-processing applies (issue #246): a
                 // file that covers fewer episodes than one it would
                 // replace is left alone, or the other episodes would go
@@ -567,53 +599,50 @@ pub async fn run_import(
                     done_files += 1;
                     continue;
                 }
-                let mut retire_failed = None;
-                for (old_path, _) in &old {
-                    if let Err(e) = recycle::recycle(
-                        &state.db,
-                        &cfg.recycle_bin_path,
-                        RecycleKind::Episode,
-                        Some(row.id),
-                        &series_title,
-                        old_path,
-                    )
-                    .await
-                    {
-                        retire_failed = Some(format!("{}: {e}", old_path.display()));
-                        break;
+                if !required_transaction {
+                    let mut retire_failed = None;
+                    for (old_path, _) in &old {
+                        if let Err(e) = recycle::recycle(
+                            &state.db,
+                            &cfg.recycle_bin_path,
+                            RecycleKind::Episode,
+                            Some(row.id),
+                            &series_title,
+                            old_path,
+                        )
+                        .await
+                        {
+                            retire_failed = Some(format!("{}: {e}", old_path.display()));
+                            break;
+                        }
                     }
-                }
-                if let Some(e) = retire_failed {
-                    gr.errors
-                        .push(format!("{}: could not replace, {e}", file.rel_path));
-                    report.files_failed += 1;
-                    done_files += 1;
-                    continue;
-                }
-                for held in ep..ep + file.episode_count.max(1) {
-                    let _ = episode_tags::mark_grab_history_replaced(&state.db, row.id, held).await;
-                    // A pinned episode keeps its override (`clear_episode_tag`
-                    // blanks a pinned row's state, which the preview never
-                    // offered to do for a second episode).
-                    let pinned = group
-                        .existing
-                        .as_ref()
-                        .and_then(|e| e.tags.get(&held))
-                        .is_some_and(|t| t.manual_override);
-                    if !pinned {
-                        let _ = episode_tags::clear_episode_tag(&state.db, row.id, held).await;
+                    if let Some(e) = retire_failed {
+                        gr.errors
+                            .push(format!("{}: could not replace, {e}", file.rel_path));
+                        report.files_failed += 1;
+                        done_files += 1;
+                        continue;
+                    }
+                    for held in ep..ep + file.episode_count.max(1) {
+                        let _ =
+                            episode_tags::mark_grab_history_replaced(&state.db, row.id, held).await;
+                        // A pinned episode keeps its override (`clear_episode_tag`
+                        // blanks a pinned row's state, which the preview never
+                        // offered to do for a second episode).
+                        let pinned = group
+                            .existing
+                            .as_ref()
+                            .and_then(|e| e.tags.get(&held))
+                            .is_some_and(|t| t.manual_override);
+                        if !pinned {
+                            let _ = episode_tags::clear_episode_tag(&state.db, row.id, held).await;
+                        }
                     }
                 }
             }
 
             // The preview's name for it (`import_file_name`): a renumbered
             // file is renamed so later disk checks read the right episode.
-            let dest = season_dir.join(preview::import_file_name(
-                file,
-                &naming::SeriesNames::from_series(&row),
-                &cfg.title_language,
-                &cfg.episode_file_format,
-            ));
             // Backstop for the preview's "Already on disk": a stranger
             // at the destination is never overwritten (do_file_op
             // would unlink it outside the recycle bin). The same-inode
@@ -629,9 +658,50 @@ pub async fn run_import(
                 done_files += 1;
                 continue;
             }
-            match post_processing::do_file_op(mode, &file.path, &dest).await {
+            let outcome = if required_transaction {
+                let (candidates, videos_in_source) =
+                    subtitle_guard::nearby_candidates(&file.path, &cfg.extra_file_extensions).await;
+                let old_paths: Vec<PathBuf> = old.iter().map(|(path, _)| path.clone()).collect();
+                subtitle_guard::import_required(
+                    &state.db,
+                    &cfg,
+                    mode,
+                    &file.path,
+                    &dest,
+                    &old_paths,
+                    row.id,
+                    &series_title,
+                    &candidates,
+                    media::parse_episode_span(&file.file_name.to_ascii_lowercase()),
+                    videos_in_source,
+                )
+                .await
+            } else {
+                post_processing::do_file_op(mode, &file.path, &dest)
+                    .await
+                    .map_err(|e| e.to_string())
+            };
+            match outcome {
                 Ok(()) => {
                     if replacing {
+                        if required_transaction {
+                            for held in ep..ep + file.episode_count.max(1) {
+                                let _ = episode_tags::mark_grab_history_replaced(
+                                    &state.db, row.id, held,
+                                )
+                                .await;
+                                let pinned = group
+                                    .existing
+                                    .as_ref()
+                                    .and_then(|existing| existing.tags.get(&held))
+                                    .is_some_and(|tag| tag.manual_override);
+                                if !pinned {
+                                    let _ =
+                                        episode_tags::clear_episode_tag(&state.db, row.id, held)
+                                            .await;
+                                }
+                            }
+                        }
                         gr.replaced += 1;
                         report.files_replaced += 1;
                     } else {
@@ -1008,6 +1078,103 @@ mod tests {
         hydrate_metadata: false,
     };
 
+    async fn seed_subtitle_free_probe(db: &sqlx::SqlitePool, path: &Path) {
+        let canonical = fs::canonicalize(path).unwrap();
+        let identity = crate::services::source_ffprobe::FileIdentity::from_metadata(
+            &fs::metadata(&canonical).unwrap(),
+        )
+        .unwrap();
+        crate::models::media_probe_cache::upsert_identified(
+            db,
+            canonical.to_str().unwrap(),
+            &identity.cache_key(),
+            identity.size as i64,
+            r#"{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc"}]}"#,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn required_subtitles_use_each_source_folder_in_bulk_manual_import() {
+        let f = fixture("copy", false).await;
+        let mut cfg = config::get_config(&f.state.db).await.unwrap().unwrap();
+        cfg.required_subtitle_languages = "en".into();
+        config::save_config(&f.state.db, &cfg).await.unwrap();
+        let mut groups = Vec::new();
+        for (folder, provider_id) in [("one", 100), ("two", 101)] {
+            let file = candidate(&f.src, &format!("{folder}/Show - 01.mkv"), Some(1));
+            fs::write(
+                file.path.parent().unwrap().join("English.srt"),
+                "1\n00:00:01,000 --> 00:00:02,000\nHello\n",
+            )
+            .unwrap();
+            seed_subtitle_free_probe(&f.state.db, &file.path).await;
+            groups.push(group(vec![file], entry(provider_id, "Show")));
+        }
+        let id = ready_session(&f.state, &f.src, ImportMode::Copy, groups);
+        let report = run_import(f.state.clone(), id, OPTS).await.unwrap();
+        assert_eq!(
+            (report.files_written, report.files_failed),
+            (2, 0),
+            "{report:?}"
+        );
+        for provider_id in [100, 101] {
+            let row = series::get_by_anilist_id(&f.state.db, provider_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let files =
+                media::scan_series_folder(f.media.to_str().unwrap(), &row.folder_name).await;
+            assert_eq!(files.len(), 1);
+            assert!(
+                f.media
+                    .join(&row.folder_name)
+                    .join(&files[0].filename)
+                    .with_extension("en.srt")
+                    .is_file()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn required_subtitles_do_not_borrow_unmatched_videos_sidecars() {
+        let f = fixture("move", false).await;
+        let mut cfg = config::get_config(&f.state.db).await.unwrap().unwrap();
+        cfg.required_subtitle_languages = "en".into();
+        config::save_config(&f.state.db, &cfg).await.unwrap();
+        let file = candidate(&f.src, "pack/Show - 01.mkv", Some(1));
+        let source = file.path.clone();
+        seed_subtitle_free_probe(&f.state.db, &source).await;
+        // This physical video is absent from the preview's matched groups.
+        let unmatched = source.parent().unwrap().join("unmatched.mkv");
+        let subtitle = source.parent().unwrap().join("English.srt");
+        fs::write(&unmatched, "another video").unwrap();
+        fs::write(
+            &subtitle,
+            "1\n00:00:01,000 --> 00:00:02,000\nOther dialogue\n",
+        )
+        .unwrap();
+        let id = ready_session(
+            &f.state,
+            &f.src,
+            ImportMode::Move,
+            vec![group(vec![file], entry(100, "Show"))],
+        );
+        let report = run_import(f.state.clone(), id, OPTS).await.unwrap();
+        assert_eq!(
+            (report.files_written, report.files_failed),
+            (0, 1),
+            "{report:?}"
+        );
+        assert!(
+            report.groups[0]
+                .errors
+                .iter()
+                .any(|error| error.contains("Subtitle requirement:"))
+        );
+        assert!(source.is_file() && unmatched.is_file() && subtitle.is_file());
+    }
+
     #[tokio::test]
     async fn franchise_preview_and_import_agree_for_a_batch_with_a_skipped_collision() {
         let f = fixture("hardlink", false).await;
@@ -1357,6 +1524,73 @@ mod tests {
         assert_eq!(
             states,
             vec!["replaced".to_string(), "completed".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn required_subtitle_rejection_keeps_manual_replacement_and_sidecars() {
+        let f = fixture("move", false).await;
+        let sid = seed_series(&f.state.db, 100, "Show").await;
+        let mut cfg = config::get_config(&f.state.db).await.unwrap().unwrap();
+        cfg.required_subtitle_languages = "en".to_string();
+        config::save_config(&f.state.db, &cfg).await.unwrap();
+        let old = f.media.join("Show/Season 01/Show - 01 [WEB 720p].mkv");
+        touch(&old);
+        fs::write(&old, "old video").unwrap();
+        let old_subtitle = old.with_extension("en.srt");
+        fs::write(&old_subtitle, "old subtitles").unwrap();
+        let class = source::classify_release_sync("Show - 01 [WEB 720p].mkv", None);
+        episode_tags::record_grab(
+            &f.state.db,
+            sid,
+            1,
+            &class,
+            "Show - 01 [WEB 720p].mkv",
+            "",
+            1,
+            false,
+        )
+        .await
+        .unwrap();
+        episode_tags::mark_completed(&f.state.db, sid, &[1])
+            .await
+            .unwrap();
+        let file = candidate(&f.src, "Show/[G] Show - 01 [BD 1080p].mkv", Some(1));
+        let source_path = file.path.clone();
+        let canonical = std::fs::canonicalize(&source_path).unwrap();
+        let identity = crate::services::source_ffprobe::FileIdentity::from_metadata(
+            &fs::metadata(&canonical).unwrap(),
+        )
+        .unwrap();
+        crate::models::media_probe_cache::upsert_identified(
+            &f.state.db,
+            canonical.to_str().unwrap(),
+            &identity.cache_key(),
+            identity.size as i64,
+            r#"{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc"}]}"#,
+        )
+        .await;
+        let mut g = group(vec![file], entry(100, "Show"));
+        crate::services::manual_import::resolve_existing(&f.state.db, &mut g).await;
+        let id = ready_session(&f.state, &f.src, ImportMode::Move, vec![g]);
+        let report = run_import(f.state.clone(), id, OPTS).await.unwrap();
+        assert_eq!(report.files_failed, 1, "{:?}", report.groups);
+        assert_eq!(report.files_replaced, 0);
+        assert!(
+            report.groups[0]
+                .errors
+                .iter()
+                .any(|error| error.contains("Subtitle requirement:"))
+        );
+        assert_eq!(fs::read_to_string(&old).unwrap(), "old video");
+        assert_eq!(fs::read_to_string(&old_subtitle).unwrap(), "old subtitles");
+        assert!(source_path.exists());
+        assert_eq!(
+            episode_tags::get_for_series(&f.state.db, sid)
+                .await
+                .unwrap()[&1]
+                .state,
+            "completed"
         );
     }
 

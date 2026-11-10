@@ -143,37 +143,72 @@ fn language_and_tags(subtitle_stem: &str, video_stem: &str) -> (Option<&'static 
 /// for a download whose client gave no file list. Symlinks are not
 /// followed: the walk stays inside the download.
 pub fn walk_extras(dir: &Path, extensions: &[String]) -> Vec<PathBuf> {
-    fn recurse(cur: &Path, depth: u32, extensions: &[String], out: &mut Vec<PathBuf>) {
+    walk_extras_with_video_count(dir, extensions).0
+}
+
+/// Count every video in the same source scope as the subtitle candidates,
+/// including files absent from an import preview. An incomplete walk must
+/// never enable the otherwise unowned single-video subtitle fallback.
+pub fn walk_extras_with_video_count(dir: &Path, extensions: &[String]) -> (Vec<PathBuf>, usize) {
+    fn recurse(
+        cur: &Path,
+        depth: u32,
+        extensions: &[String],
+        out: &mut Vec<PathBuf>,
+        videos: &mut usize,
+    ) {
         if depth > MAX_DEPTH {
+            *videos = usize::MAX;
             return;
         }
         let Ok(entries) = std::fs::read_dir(cur) else {
+            *videos = usize::MAX;
             return;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+        for entry in entries {
+            let Ok(entry) = entry else {
+                *videos = usize::MAX;
                 continue;
             };
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                *videos = usize::MAX;
+                continue;
+            };
+            let is_video = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| super::is_video_file(name) || media::is_stream_stub(name));
             if meta.file_type().is_symlink() {
+                // A video link can still make the source ambiguous, but
+                // neither it nor a linked directory may widen the walk.
+                if is_video {
+                    *videos = videos.saturating_add(1);
+                }
                 continue;
             }
             if meta.is_dir() {
-                recurse(&path, depth + 1, extensions, out);
-            } else if path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.to_ascii_lowercase())
-                .is_some_and(|e| extensions.contains(&e))
-            {
-                out.push(path);
+                recurse(&path, depth + 1, extensions, out, videos);
+            } else if meta.is_file() {
+                if is_video {
+                    *videos = videos.saturating_add(1);
+                }
+                if path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase())
+                    .is_some_and(|e| extensions.contains(&e))
+                {
+                    out.push(path);
+                }
             }
         }
     }
     let mut out = Vec::new();
-    recurse(dir, 0, extensions, &mut out);
+    let mut videos = 0;
+    recurse(dir, 0, extensions, &mut out, &mut videos);
     out.sort();
-    out
+    (out, videos)
 }
 
 /// True when `name` (a file stem or a folder name) names the video:
@@ -481,5 +516,24 @@ mod tests {
         let again = import_subtitles("copy", &video, &dest, span, &candidates, 1).await;
         assert!(again.imported.is_empty());
         assert_eq!(again.skipped, 4);
+    }
+}
+
+#[cfg(test)]
+mod subtitle_scope_depth_tests {
+    use super::*;
+    #[test]
+    fn an_incomplete_depth_limited_walk_cannot_enable_single_video_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Episode 01.mkv"), b"video").unwrap();
+        std::fs::write(root.path().join("English.srt"), b"subtitle").unwrap();
+        let mut nested = root.path().to_path_buf();
+        for _ in 0..=MAX_DEPTH {
+            nested = nested.join("deeper");
+            std::fs::create_dir(&nested).unwrap();
+        }
+        std::fs::write(nested.join("Episode 02.mkv"), b"video").unwrap();
+        let (_, count) = walk_extras_with_video_count(root.path(), &["srt".to_string()]);
+        assert_ne!(count, 1);
     }
 }
