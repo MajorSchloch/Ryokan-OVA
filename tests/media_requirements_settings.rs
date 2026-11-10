@@ -79,7 +79,7 @@ async fn invalid_requirements_preserve_the_draft_and_do_not_save() {
         .unwrap();
     let text = String::from_utf8(bytes.to_vec()).unwrap();
     assert!(text.contains("value=\"en\""));
-    assert!(!text.contains("must be at least the minimum"));
+    assert!(!text.contains("data-ryokan-toast=\"error\""));
 }
 #[tokio::test]
 #[ignore = "requires Node, Playwright and headless Chrome"]
