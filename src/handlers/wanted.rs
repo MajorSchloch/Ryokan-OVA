@@ -272,21 +272,32 @@ async fn observe_library(
         return HashMap::new();
     }
     use futures_util::{StreamExt, stream};
-    stream::iter(library.iter().filter(|series| series.allow_upgrades))
-        .map(|series| async move {
-            let observations = match disk.get(&series.id) {
-                Some(files) => {
-                    crate::services::media_requirements::observe_files(
-                        &state.db,
-                        cfg,
-                        &series.folder_name,
-                        files,
-                    )
-                    .await
-                }
-                None => HashMap::new(),
-            };
-            (series.id, observations)
+    // Own each job's inputs so the buffered futures also satisfy the
+    // HTTP handlers' Send requirement across their entire lifetime.
+    let jobs: Vec<_> = library
+        .iter()
+        .filter(|series| series.allow_upgrades)
+        .filter_map(|series| {
+            disk.get(&series.id)
+                .map(|files| (series.id, series.folder_name.clone(), files.clone()))
+        })
+        .collect();
+    let db = state.db.clone();
+    let cfg = cfg.clone();
+    stream::iter(jobs)
+        .map(move |(series_id, folder_name, files)| {
+            let db = db.clone();
+            let cfg = cfg.clone();
+            async move {
+                let observations = crate::services::media_requirements::observe_files(
+                    &db,
+                    &cfg,
+                    &folder_name,
+                    &files,
+                )
+                .await;
+                (series_id, observations)
+            }
         })
         .buffer_unordered(4)
         .collect()
@@ -730,6 +741,28 @@ pub async fn search(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn wanted_http_handlers_keep_send_futures() {
+        fn assert_send<T: Send>(_: T) {}
+        let state = crate::test_support::build_test_app_state(
+            crate::test_support::in_memory_pool().await,
+            None,
+        );
+        assert_send(page(
+            State(state.clone()),
+            HxRequest(false),
+            HxBoosted(false),
+            Query(WantedQuery::default()),
+        ));
+        assert_send(search_menu(
+            State(state),
+            Query(SearchMenuQuery {
+                series_id: 1,
+                tab: Some("cutoff".into()),
+            }),
+        ));
+    }
 
     fn show(id: i64, monitor_mode: &str, episodes: Option<i32>, status: &str) -> series::Series {
         series::Series {
