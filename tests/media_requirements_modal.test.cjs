@@ -63,11 +63,33 @@ test('file facts remain the source of track claims and burned-in captions stay u
         subtitle_requirements: { ...languages, required_languages: ['de'] },
         media_requirements: status({ resolution: '720p' }), upgrades_allowed: true,
     });
-    assert.match(section.innerHTML, /No selectable subtitles found/);
+    assert.match(section.innerHTML, /Preferred selectable subtitles not verified/);
     assert.match(section.innerHTML, /No selectable subtitle tracks or matching files found/);
     assert.match(section.innerHTML, /Japanese · aac · Embedded/);
     assert.match(section.innerHTML, /Burned-in captions: unverified/);
     assert.doesNotMatch(section.innerHTML, /German · .*Embedded|English/);
+});
+
+test('subtitle headline follows minimum, preferred target, and disabled checks', () => {
+    const render = (requirements) => {
+        const section = {};
+        context.renderEpisodeMediaInfo(section, {
+            media: { video: [], audio: [], subtitles: [], warnings: [] },
+            subtitle_requirements: languages, media_requirements: requirements,
+        });
+        return section.innerHTML;
+    };
+    const preferred = render(status());
+    assert.match(preferred, /ep-media-verdict-preferred">Preferred selectable subtitles not verified/);
+    assert.doesNotMatch(preferred, /ep-media-verdict-missing|Required selectable subtitles missing|Requires any/);
+    const strict = render(status({ minimum_subtitle_check: true }));
+    assert.match(strict, /ep-media-verdict-missing">Required selectable subtitles missing/);
+    const disabled = render(status({ minimum_subtitle_check: false, target_subtitle_check: false }));
+    assert.match(disabled, /ep-media-verdict-neutral">No selectable subtitles found/);
+    assert.match(disabled, /Not required at minimum or target/);
+    assert.doesNotMatch(disabled, /ep-media-verdict-missing|ep-media-verdict-preferred|Required selectable|Preferred selectable|Requires any/);
+    const legacy = render(status({ enabled: false }));
+    assert.match(legacy, /ep-media-verdict-missing">Required selectable subtitles missing/);
 });
 
 test('met target reports completion without promising an upgrade', () => {
