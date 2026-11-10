@@ -1692,6 +1692,8 @@ const RIGHT_HASH: &str = "cccccccccccccccccccccccccccccccccccccccc";
 
 #[path = "auto_search_e2e/requirements_retry.rs"]
 mod requirements_retry;
+#[path = "auto_search_e2e/upgrade_sweep.rs"]
+mod upgrade_sweep;
 
 fn research_results_page() -> String {
     nyaa_results_page(&format!(
