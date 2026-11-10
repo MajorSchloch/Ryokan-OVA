@@ -397,6 +397,34 @@
     }
 }
 
+/* Disjoint episode states. Red is reserved for aired, monitored gaps. */
+.availability-bar { display: flex; width: 100%; height: 7px; overflow: hidden; background-color: var(--dim-bg); }
+.availability-segment { display: block; height: 100%; flex-shrink: 0; }
+.availability-available { background-color: var(--signal-green); }
+.availability-downloading { background-color: var(--signal-accent); }
+.availability-missing { background-color: var(--signal-red); }
+.availability-future { background-color: var(--blue); }
+.availability-unmonitored { background-color: rgba(var(--text-dim-rgb), 0.45); }
+.availability-unknown { background-color: var(--dim-bg); background-image: repeating-linear-gradient(135deg, transparent, transparent 4px, rgba(var(--text-dim-rgb), 0.6) 4px, rgba(var(--text-dim-rgb), 0.6) 8px); }
+.availability-legend { display: flex; flex-wrap: wrap; gap: 5px 10px; padding: 0; margin: 8px 0; list-style: none; font-size: 11px; line-height: 1.4; color: var(--text-dim); }
+.availability-legend li { display: inline-flex; align-items: center; gap: 5px; }
+.availability-dot { display: inline-block; flex: 0 0 7px; width: 7px; height: 7px; border-radius: var(--radius-sm); }
+.release-monitoring-badges { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0; }
+.release-monitoring-badges .chip { display: inline-block; padding: 2px 8px; border: 1px solid var(--border); border-radius: var(--radius-pill); color: var(--text); font-size: 11px; font-weight: 500; white-space: normal; line-height: 16px; overflow-wrap: anywhere; }
+.release-monitoring-badges .chip-dim { color: var(--text-dim); }
+.card-date { margin: 7px 0 0; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.card-date > span { color: var(--text-dim); margin-right: 4px; }
+.franchise-card .series-info, .series-card .series-info { display: block; height: auto; min-height: 180px; }
+.series-card .series-title { margin: 0 0 8px; }
+.franchise-heading .availability-bar { max-width: 600px; border-radius: var(--radius-pill); }
+.franchise-heading .availability-legend { font-size: 12px; }
+.franchise-heading .detail-actions { margin-top: 12px; }
+.franchise-back { margin-bottom: 12px; }
+.franchise-next-airing { font-size: 14px; line-height: 1.5; }
+.franchise-release-info .release-availability-summary { font-weight: 600; margin-bottom: 8px; }
+.franchise-release-info .availability-bar { border-radius: var(--radius-sm); }
+.franchise-release-info .availability-legend { margin-top: 8px; }
+
 /* Numeric have/aired readout, rendered only in the missing state.
    Same tag shape as its FINISHED/eps neighbors, tinted with the
    bar's red so the two surfaces read as one signal. */
@@ -1325,3 +1353,66 @@
 .library-scope-tools { flex-wrap: wrap; flex-shrink: 1; max-width: 100%; }
 .franchise-card .series-info { display: block; height: auto; min-height: 150px; }
 .franchise-card .series-title { margin: 0; }
+
+/* Release selection and future-release preferences. */
+.follow-editor, .follow-editor-heading { max-width: 1040px; }
+.follow-editor-heading { gap: 16px; }
+.follow-editor-heading > div { min-width: 0; }
+.follow-editor-heading h2 { overflow-wrap: anywhere; }
+.follow-editor-heading > .btn { flex-shrink: 0; }
+.follow-editor-eyebrow { margin: 0 0 4px; color: var(--text-dim); font-size: 13px; }
+.follow-editor-section { min-width: 0; margin: 0 0 24px; padding: 24px; border: 1px solid var(--border); border-radius: var(--radius-lg); background-color: var(--bg-card); }
+.follow-editor-section > legend { padding: 0 8px; color: var(--text); font-size: 19px; font-weight: 650; }
+.follow-step { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; margin-right: 6px; border-radius: 50%; background-color: var(--bg-elevated); color: var(--text-dim); font-size: 13px; }
+.follow-editor-section > .form-hint:first-of-type { margin-top: 0; margin-bottom: 16px; }
+.follow-editor-releases { display: grid; gap: 10px; }
+.follow-editor .follow-editor-release { gap: 16px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background-color: var(--bg); }
+.follow-editor-release:has(input:checked), .follow-editor-format:has(input:checked) { border-color: var(--accent); }
+.follow-editor-release-choice { display: flex; flex: 1; align-items: center; gap: 14px; min-width: 0; cursor: pointer; }
+.follow-editor-release-choice > input, .follow-editor-format > input { width: 18px; height: 18px; flex: 0 0 18px; margin: 0; accent-color: var(--accent); }
+.follow-editor-cover { display: flex; align-items: center; justify-content: center; flex: 0 0 56px; width: 56px; height: 84px; overflow: hidden; border-radius: var(--radius-sm); background-color: var(--bg-elevated); }
+.follow-editor-cover img { width: 100%; height: 100%; object-fit: cover; }
+.follow-editor-cover-empty { padding: 4px; color: var(--text-dim); font-size: 10px; text-align: center; }
+.follow-editor-release-copy { min-width: 0; }
+.follow-editor-release-copy > strong { font-size: 15px; line-height: 1.45; overflow-wrap: anywhere; }
+.follow-editor-release-meta, .follow-editor-membership, .follow-editor-monitoring { display: block; margin-top: 4px; color: var(--text-dim); font-size: 12px; line-height: 1.5; }
+.follow-editor-membership { color: var(--text); }
+.follow-editor-release-excluded { opacity: .7; }
+.follow-editor-release-excluded .follow-editor-release-choice { cursor: default; }
+.follow-editor-selection-hint { margin-bottom: 0; }
+.follow-editor-formats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.follow-editor-format { display: flex; align-items: flex-start; gap: 12px; min-width: 0; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius-md); cursor: pointer; }
+.follow-editor-format > input { margin-top: 3px; }
+.follow-editor-format strong { display: block; font-size: 14px; }
+.follow-editor-format small { display: block; margin-top: 4px; color: var(--text-dim); font-size: 12px; line-height: 1.5; }
+.follow-editor-follow-status { margin-bottom: 0; }
+.follow-editor-merge-note { color: var(--text); font-size: 13px; line-height: 1.5; }
+.follow-editor-advanced { margin-bottom: 24px; border: 1px solid var(--border); border-radius: var(--radius-lg); background-color: var(--bg-card); }
+.follow-editor-advanced > summary { padding: 18px 24px; cursor: pointer; font-weight: 600; }
+.follow-editor-advanced-body { padding: 0 24px 24px; }
+.follow-editor-organization-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.follow-editor-organization-fields select { width: 100%; background-color: var(--bg); }
+.follow-editor-preview-actions, .follow-editor-submit { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.follow-editor-submit > .btn, .follow-editor-preview-actions > .btn, .follow-editor-release > .btn { min-height: 42px; }
+.follow-editor-folder-preview { margin: 24px 0; padding-top: 20px; border-top: 1px solid var(--border); }
+.follow-editor-folder-preview code { display: block; margin-top: 4px; white-space: normal; overflow-wrap: anywhere; }
+.follow-editor-folder-preview ol { padding-left: 20px; }
+.follow-editor-folder-preview li { margin: 16px 0; }
+.follow-editor-folder-preview small { color: var(--text-dim); }
+.follow-editor-identifiers { margin-top: 16px; }
+.follow-editor-identifiers > summary { cursor: pointer; font-size: 13px; }
+.follow-editor-identifiers dl > div { margin: 12px 0; }
+.follow-editor-identifiers dd { margin: 4px 0 0; color: var(--text-dim); font-size: 12px; }
+@media (max-width: 600px) {
+    .follow-editor-heading { align-items: flex-start; flex-direction: column; }
+    .follow-editor-section { padding: 16px 12px; }
+    .follow-editor-section > legend { font-size: 17px; }
+    .follow-editor .follow-editor-release { flex-wrap: wrap; gap: 8px; padding: 12px 10px; }
+    .follow-editor-release-choice { flex-basis: 100%; gap: 10px; }
+    .follow-editor-cover { flex-basis: 44px; width: 44px; height: 66px; }
+    .follow-editor-release > .btn { margin-left: 82px; }
+    .follow-editor-formats, .follow-editor-organization-fields { grid-template-columns: minmax(0, 1fr); }
+    .follow-editor-advanced > summary { padding: 16px; }
+    .follow-editor-advanced-body { padding: 0 16px 16px; }
+    .follow-editor-submit > .btn-primary { width: 100%; }
+}

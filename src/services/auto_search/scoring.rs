@@ -404,6 +404,16 @@ pub(super) fn rescore_for_auto_search_with_breakdown(
     add(&mut parts, "Preferred Group (auto)", group_bonus, None);
 
     // Classification-aware quality scoring.
+    let preferred_resolution = if config.media_requirements_enabled {
+        Resolution::from_str(&config.target_resolution)
+    } else {
+        preferred_resolution
+    };
+    let cutoff_resolution = if config.media_requirements_enabled {
+        preferred_resolution
+    } else {
+        cutoff_resolution
+    };
     let classification_delta = source::score_classification(
         classification,
         preferred_source,

@@ -176,12 +176,16 @@
             {% if !franchise.cover_url.is_empty() %}<img src="{{ franchise.cover_url }}" alt="" loading="lazy">{% else %}<div class="series-cover-placeholder">No Image</div>{% endif %}
             {% if franchise.following %}<span class="franchise-follow-badge">Following</span>{% endif %}
         </div>
-        <div class="card-progress card-progress-{{ franchise.progress.state }}{% if !franchise.progress.monitored %} card-progress-unmonitored{% endif %}" title="{{ franchise.progress.label }}"><div class="card-progress-fill" style="width: {{ franchise.progress.pct }}%"></div></div>
+        {% let availability = &franchise.progress %}
+        {% include "partials/library/availability_bar.html" %}
         <div class="series-info">
             <p class="series-title" title="{{ franchise.title }}">{{ franchise.title }}</p>
             <p class="franchise-card-summary">{{ franchise.tracked }} release{% if franchise.tracked != 1 %}s{% endif %} in library{% if franchise.available > 0 %} &middot; {{ franchise.available }} more{% endif %}</p>
             {% if !franchise.formats.is_empty() %}<p class="franchise-card-formats">{{ franchise.formats }}</p>{% endif %}
             <p class="franchise-card-progress">{{ franchise.progress.label }}</p>
+            {% include "partials/library/availability_legend.html" %}
+            {% if !franchise.next_airing.is_empty() %}<p class="card-date"><span>Next airing</span> {{ franchise.next_airing }}</p>{% endif %}
+            {% if !franchise.added_date.is_empty() %}<p class="card-date"><span>Added</span> {{ franchise.added_date }}</p>{% endif %}
         </div>
     </a>
     {% endfor %}
@@ -212,32 +216,18 @@
             <div class="series-cover-placeholder">No Image</div>
             {% endif %}
         </div>
-        {# Completeness bar: its own strip between poster and card
-           body (not overlaid on the artwork, which buried the color
-           against busy posters). One question — "do I have what's
-           aired?" — in three states that reuse the episode table's
-           vocabulary: green = every aired episode on disk, green
-           fill with red remainder = missing aired episodes, accent
-           pulse = download in flight. Airing status is NOT encoded
-           here; the RELEASING/FINISHED chip below already carries
-           it. Unmonitored series render the bar dimmed. #}
-        <div class="card-progress card-progress-{{ prog.state }}{% if !prog.monitored %} card-progress-unmonitored{% endif %}" title="{{ prog.label }}">
-            <div class="card-progress-fill" style="width: {{ prog.pct }}%"></div>
-        </div>
+        {% let availability = prog %}
+        {% include "partials/library/availability_bar.html" %}
         <div class="series-info">
             <p class="series-title title-switcher" title="{{ s.title }}">
                 <span class="title-option" data-title-lang="english">{% if !s.title_english.is_empty() %}{{ s.title_english }}{% else if !s.title_romaji.is_empty() %}{{ s.title_romaji }}{% else if !s.title_native.is_empty() %}{{ s.title_native }}{% else %}{{ s.title }}{% endif %}</span>
                 <span class="title-option" data-title-lang="romaji">{% if !s.title_romaji.is_empty() %}{{ s.title_romaji }}{% else if !s.title_english.is_empty() %}{{ s.title_english }}{% else if !s.title_native.is_empty() %}{{ s.title_native }}{% else %}{{ s.title }}{% endif %}</span>
                 <span class="title-option" data-title-lang="native">{% if !s.title_native.is_empty() %}{{ s.title_native }}{% else if !s.title_romaji.is_empty() %}{{ s.title_romaji }}{% else if !s.title_english.is_empty() %}{{ s.title_english }}{% else %}{{ s.title }}{% endif %}</span>
             </p>
+            <div class="release-monitoring-badges"><span class="chip">{{ prog.monitoring_label }}</span>{% if prog.following %}<span class="chip">Franchise follow</span>{% else %}<span class="chip chip-dim">Not selected for follow</span>{% endif %}</div>
             <div class="series-meta">
                 <span class="tag tag-res">{% if !s.format.is_empty() %}{{ s.format.replace("_", " ") }}{% else %}TBA{% endif %}</span>
                 {% if let Some(eps) = s.episodes %}<span class="tag tag-res series-eps">{{ eps }} eps</span>{% endif %}
-                {# Numeric readout for the bar's missing state — the
-                   colorblind-safe fallback and the "how bad" answer.
-                   Complete/idle cards skip it; absence means nothing
-                   to act on. #}
-                {% if prog.state.as_str() == "missing" %}<span class="tag tag-progress-missing" title="{{ prog.label }}">{{ prog.downloaded }}/{{ prog.aired }}</span>{% endif %}
                 <span class="tag tag-status-{{ s.status|lowercase }}">{{ s.status.replace("_", " ") }}</span>
                 {# #62 — user's personal score from their linked
                    AL/MAL account. Hidden when no account is linked or
@@ -246,6 +236,10 @@
                 <span class="tag tag-user-score" title="Your score on AL/MAL">You: {{ you_score.render_html()|safe }}</span>
                 {% endif %}
             </div>
+            <p class="franchise-card-progress">{{ prog.label }}</p>
+            {% include "partials/library/availability_legend.html" %}
+            {% if prog.next_airing.as_str() != "Finished" %}<p class="card-date"><span>Next airing</span> {{ prog.next_airing }}</p>{% endif %}
+            {% if !prog.added_date.is_empty() %}<p class="card-date"><span>Added</span> {{ prog.added_date }}</p>{% endif %}
         </div>
     </a>
     {% endfor %}

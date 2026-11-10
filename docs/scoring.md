@@ -51,7 +51,9 @@ Releases on the blocklist (Downloads → Blocklist) are skipped before any of th
 
 ## Replacing a file you already have
 
-An episode on disk is replaced when a release is better in one of three ways, checked in this order:
+With **Minimum + good enough**, actual resolution and selectable subtitle languages determine whether an automatic upgrade is needed. Once the target is met, a newer revision, remux or higher score does not replace the file. A file below target can improve only without losing known resolution or required selectable subtitles. Import checks the actual replacement before retiring the old file. See [Quality & Releases](configuration.md#quality--releases).
+
+With **Advanced source and score cutoffs**, an episode on disk is replaced when a release is better in one of three ways, checked in this order:
 
 - **Quality**: a higher source or resolution, as long as the file is still below your cutoff. Once a file meets the cutoff, quality alone no longer replaces it.
 - **Revision**: a v2, PROPER or REPACK of the same release, from the same group that made the file. Groups put out a v2 to fix a mistake, so it replaces the file even when the cutoff is already met. Through RSS this only happens while the file is under a week old. The daily upgrade search only looks at files below your quality cutoff, so a fix for a file that already meets it comes through RSS or not at all. A v2 from a different group is not a fix of your file and is left alone.

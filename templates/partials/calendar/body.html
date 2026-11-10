@@ -1,0 +1,29 @@
+<div class="calendar-period" data-range="{{ navigation.range }}" data-date="{{ navigation.date }}">
+    <nav class="calendar-period-controls" aria-label="Calendar dates">
+        {% if let Some(url) = navigation.previous %}
+        <a class="btn btn-secondary calendar-period-link" href="{{ url }}" hx-get="{{ url }}" hx-target="#calendar-list" hx-swap="innerHTML" hx-push-url="true">Previous</a>
+        {% else %}<span class="btn btn-secondary" aria-disabled="true">Previous</span>{% endif %}
+        <a class="btn btn-secondary calendar-period-link" href="{{ navigation.today }}" hx-get="{{ navigation.today }}" hx-target="#calendar-list" hx-swap="innerHTML" hx-push-url="true">Today</a>
+        {% if let Some(url) = navigation.next %}
+        <a class="btn btn-secondary calendar-period-link" href="{{ url }}" hx-get="{{ url }}" hx-target="#calendar-list" hx-swap="innerHTML" hx-push-url="true">Next</a>
+        {% else %}<span class="btn btn-secondary" aria-disabled="true">Next</span>{% endif %}
+    </nav>
+    <div class="calendar-period-heading">
+        <h3 class="calendar-period-label" aria-live="polite">{{ navigation.label }}</h3>
+        <small class="form-hint">Dates in UTC · episode times in your local timezone</small>
+    </div>
+    <form class="calendar-date-form" action="/calendar" method="get" hx-get="/calendar" hx-target="#calendar-list" hx-swap="innerHTML" hx-push-url="true">
+        <input type="hidden" name="range" value="{{ navigation.range }}">
+        {% for parameter in navigation.parameters %}<input type="hidden" name="{{ parameter.name }}" value="{{ parameter.value }}">{% endfor %}
+        <label for="calendar-date">Go to date</label>
+        <input id="calendar-date" type="date" name="date" value="{{ navigation.date }}" min="1970-01-01" max="2100-12-31" required>
+        <button class="btn btn-secondary" type="submit">Go</button>
+    </form>
+</div>
+{% if let Some(notice) = navigation.notice %}<p class="form-hint" role="status">{{ notice }}</p>{% endif %}
+{% if load_failed %}
+<p class="calendar-empty" role="status">Could not load saved episode schedules. Try again.</p>
+{% else %}
+{% if view_mode == "grid" %}{% include "partials/calendar/grid.html" %}{% else %}{% include "partials/calendar/list.html" %}{% endif %}
+<p class="calendar-filter-empty form-hint" role="status" hidden>No saved episodes match this series filter in this date range.</p>
+{% endif %}

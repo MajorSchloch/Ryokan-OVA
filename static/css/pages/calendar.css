@@ -102,6 +102,42 @@
     gap: 24px;
 }
 
+.calendar-period,
+.calendar-period-controls,
+.calendar-date-form {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.calendar-period { justify-content: space-between; gap: 16px; }
+.calendar-period-heading { flex: 1; min-width: 180px; text-align: center; }
+.calendar-period-label { margin: 0 0 4px; font-size: 16px; }
+.calendar-period-heading small { display: block; margin: 0; }
+.calendar-date-form label { font-size: 12px; color: var(--text-dim); }
+.calendar-date-form input[type="date"] {
+    max-width: 160px;
+    min-width: 0;
+    height: 40px;
+    padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background-color: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+    color-scheme: dark;
+}
+.calendar-period [aria-disabled="true"] { opacity: .45; cursor: default; }
+.calendar-filter-empty[hidden] { display: none; }
+
+@media (max-width: 700px) {
+    .calendar-period { justify-content: center; }
+    .calendar-period-heading { order: -1; flex-basis: 100%; }
+    .calendar-date-form { justify-content: center; }
+}
+
 .calendar-day {
     /* Soft-card shape so each day reads as a chunk; no heavy
        border, just a faint surface tint. */

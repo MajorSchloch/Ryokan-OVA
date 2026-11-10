@@ -6,7 +6,7 @@
     <p>You don't have any series in your library yet.</p>
     <p><a class="link-accent" href="/">Go to the library</a> to add some.</p>
     {% else if tab == "cutoff" %}
-    <p>Nothing is below the cutoff.</p>
+    <p>{% if requirements_enabled %}No files with verified capabilities are below the good enough target. Unreadable files cannot be assessed.{% else %}Nothing is below the cutoff.{% endif %}</p>
     <p class="form-hint">Every file on disk meets the quality cutoff, or its series does not allow upgrades.</p>
     {% else %}
     <p>Nothing is missing.</p>

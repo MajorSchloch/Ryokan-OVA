@@ -988,6 +988,7 @@ async fn import_special_file(
             &candidates,
             Some(span),
             videos_in_source,
+            true,
         )
         .await?;
     } else {
@@ -2539,6 +2540,12 @@ async fn import_torrent(
                 &candidates,
                 name_span,
                 videos_in_source,
+                !(target_series_id == grab.series_id
+                    && replacement_episode == Some(ep_num)
+                    && ep_num == ep_last
+                    && existing_for_ep
+                        .iter()
+                        .all(|(_, span)| span.first == ep_num && span.last == ep_num)),
             )
             .await
             {

@@ -135,6 +135,7 @@ pub struct UpgradeCandidate<'a> {
 /// Why a candidate is an upgrade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpgradeKind {
+    Requirements,
     /// Better rank tuple while the file on disk is below the cutoff.
     Quality,
     /// Same quality, newer revision from the same group.
@@ -146,6 +147,7 @@ pub enum UpgradeKind {
 impl UpgradeKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Requirements => "requirements",
             Self::Quality => "quality",
             Self::Revision => "revision",
             Self::FormatScore => "custom format score",
@@ -157,6 +159,11 @@ impl UpgradeKind {
 /// reason, written into RSS decisions and upgrade-sweep debug lines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpgradeRejection {
+    RequirementsUnverified,
+    RequirementsMinimum,
+    RequirementsTargetMet,
+    RequirementsNoImprovement,
+    RequirementsDowngrade,
     /// The series' Upgrades switch is off: nothing automatic replaces
     /// a file it already has.
     SeriesUpgradesOff,
@@ -185,6 +192,17 @@ impl UpgradeRejection {
     /// The user-facing reason.
     pub fn message(self) -> String {
         match self {
+            Self::RequirementsUnverified => {
+                "Existing file requirements could not be verified".to_string()
+            }
+            Self::RequirementsMinimum => "Release is below the minimum requirements".to_string(),
+            Self::RequirementsTargetMet => "Existing file meets the good enough target".to_string(),
+            Self::RequirementsNoImprovement => {
+                "Release does not improve an unmet requirement".to_string()
+            }
+            Self::RequirementsDowngrade => {
+                "Release would reduce an existing requirement".to_string()
+            }
             Self::SeriesUpgradesOff => "Upgrades are turned off for this series".to_string(),
             Self::ExistingUnclassified => "Existing file quality is unknown".to_string(),
             Self::Pinned => "Existing file is pinned".to_string(),

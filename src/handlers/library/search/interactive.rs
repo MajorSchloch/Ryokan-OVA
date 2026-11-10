@@ -386,6 +386,25 @@ pub async fn search_batch_releases(
 
     let cfs = state.custom_formats.read().await.clone();
 
+    // This button selects the release automatically. Explicitly choosing a
+    // release in the picker remains available for a deliberate replacement.
+    if cfg.media_requirements_enabled
+        && let Some(tracked) = &tracked_row
+    {
+        let files =
+            crate::services::media::scan_series_folder(&cfg.media_root, &tracked.folder_name).await;
+        if files
+            .iter()
+            .any(|file| file.is_own_season() && !file.is_special)
+        {
+            let message = "Automatic batch search cannot replace existing files in requirements mode. Choose a release in interactive search to review a replacement.";
+            if let Some(handle) = &progress_handle {
+                handle.emit("done", "warn", message, None, true).await;
+            }
+            return Err((axum::http::StatusCode::CONFLICT, message.to_string()));
+        }
+    }
+
     if let Some(h) = &progress_handle {
         h.emit(
             "search",

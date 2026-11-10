@@ -33,33 +33,33 @@
        work. The bare `href` is the no-JS fallback; same URL,
        triggers a full-page nav. #}
     <div class="calendar-range-tabs" role="tablist" aria-label="Calendar range">
-        <a href="/calendar?range=this_week{% if monitored_only %}&monitored=true{% endif %}"
-           hx-get="/calendar?range=this_week{% if monitored_only %}&monitored=true{% endif %}"
+        <a href="{{ navigation.day }}"
+           hx-get="{{ navigation.day }}"
+           hx-target="#calendar-list"
+           hx-swap="innerHTML"
+           hx-push-url="true"
+           class="calendar-range-tab {% if range == "day" %}active{% endif %}"
+           role="tab"
+           data-range="day"
+           aria-selected="{% if range == "day" %}true{% else %}false{% endif %}">Day</a>
+        <a href="{{ navigation.week }}"
+           hx-get="{{ navigation.week }}"
            hx-target="#calendar-list"
            hx-swap="innerHTML"
            hx-push-url="true"
            class="calendar-range-tab {% if range == "this_week" %}active{% endif %}"
            role="tab"
            data-range="this_week"
-           aria-selected="{% if range == "this_week" %}true{% else %}false{% endif %}">This week</a>
-        <a href="/calendar?range=next_week{% if monitored_only %}&monitored=true{% endif %}"
-           hx-get="/calendar?range=next_week{% if monitored_only %}&monitored=true{% endif %}"
-           hx-target="#calendar-list"
-           hx-swap="innerHTML"
-           hx-push-url="true"
-           class="calendar-range-tab {% if range == "next_week" %}active{% endif %}"
-           role="tab"
-           data-range="next_week"
-           aria-selected="{% if range == "next_week" %}true{% else %}false{% endif %}">Next week</a>
-        <a href="/calendar?range=month{% if monitored_only %}&monitored=true{% endif %}"
-           hx-get="/calendar?range=month{% if monitored_only %}&monitored=true{% endif %}"
+           aria-selected="{% if range == "this_week" %}true{% else %}false{% endif %}">Week</a>
+        <a href="{{ navigation.month }}"
+           hx-get="{{ navigation.month }}"
            hx-target="#calendar-list"
            hx-swap="innerHTML"
            hx-push-url="true"
            class="calendar-range-tab {% if range == "month" %}active{% endif %}"
            role="tab"
            data-range="month"
-           aria-selected="{% if range == "month" %}true{% else %}false{% endif %}">This month</a>
+           aria-selected="{% if range == "month" %}true{% else %}false{% endif %}">Month</a>
     </div>
 
     <div class="calendar-filters">
@@ -71,6 +71,7 @@
                id="calendar-series-search"
                class="calendar-series-search"
                placeholder="Filter by series…"
+               value="{{ search }}"
                aria-label="Filter by series name"
                autocomplete="off">
 
@@ -90,11 +91,7 @@
    Keeping both paths anchored at the same target means the JS
    afterSwap hook hydrates whichever shape just landed. #}
 <div class="calendar-list" id="calendar-list" data-view-mode="{{ view_mode }}">
-{% if view_mode == "grid" %}
-{%~ include "partials/calendar/grid.html" ~%}
-{% else %}
-{%~ include "partials/calendar/list.html" ~%}
-{% endif %}
+{% include "partials/calendar/body.html" %}
 </div>
 
 {# Subscribe modal — opened by the "iCal Link" button in the
