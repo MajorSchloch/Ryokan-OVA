@@ -25,7 +25,7 @@
 //!
 //! The module exposes a pure `scan_ffprobe_json` for unit testability and
 //! an async `classify_ffprobe` wrapper that owns the ffprobe shell-out
-//! plus `(path, mtime, size)`-keyed caching. Missing `ffprobe` binary,
+//! plus file-identity-keyed caching. Missing `ffprobe` binary,
 //! malformed JSON, or probe failures return an empty evidence vec — the
 //! aggregator will simply fall back on the other layers.
 //!
@@ -37,6 +37,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::SystemTime;
 
+use serde::Serialize;
 use serde_json::Value;
 use sqlx::SqlitePool;
 use tokio::process::Command;
@@ -55,6 +56,159 @@ pub struct FfprobeClassification {
     /// stream with usable dimensions. Takes precedence over filename-parsed
     /// resolution at the orchestrator level since it's a direct observation.
     pub resolution: Option<Resolution>,
+}
+
+/// Observed identity, not a content hash. Nanosecond timestamps avoid
+/// reusing a probe after an in-place rewrite in the same second; Unix
+/// device/inode also detects replacement with preserved timestamps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FileIdentity {
+    pub size: u64,
+    /// A decimal string preserves nanoseconds in JavaScript clients.
+    pub mtime_ns: String,
+    pub device: Option<u64>,
+    pub inode: Option<u64>,
+}
+
+impl FileIdentity {
+    pub fn from_metadata(meta: &std::fs::Metadata) -> Result<Self, ProbeError> {
+        let modified = meta
+            .modified()
+            .map_err(|e| ProbeError::new("stat_failed", e.to_string()))?;
+        let mtime_ns = match modified.duration_since(SystemTime::UNIX_EPOCH) {
+            Ok(delta) => delta.as_nanos().to_string(),
+            Err(before) => format!("-{}", before.duration().as_nanos()),
+        };
+        #[cfg(unix)]
+        let (device, inode) = {
+            use std::os::unix::fs::MetadataExt;
+            (Some(meta.dev()), Some(meta.ino()))
+        };
+        #[cfg(not(unix))]
+        let (device, inode) = (None, None);
+        Ok(Self {
+            size: meta.len(),
+            mtime_ns,
+            device,
+            inode,
+        })
+    }
+
+    /// Versioned so old second-resolution cache entries cannot match.
+    pub fn cache_key(&self) -> String {
+        format!(
+            "v2:{}:{}:{:?}:{:?}",
+            self.size, self.mtime_ns, self.device, self.inode
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProbeError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl ProbeError {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ProbeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Media probe unavailable: {}", self.message)
+    }
+}
+
+impl std::error::Error for ProbeError {}
+
+#[derive(Debug, Clone)]
+pub struct CachedProbe {
+    pub json: String,
+    pub identity: FileIdentity,
+    pub cache_hit: bool,
+}
+
+/// Probe one regular local file. Failure is distinct from a successful
+/// probe with no subtitle tracks. Only raw container facts are cached;
+/// callers must inspect current external subtitles separately.
+pub async fn probe_cached(db: &SqlitePool, path: &Path) -> Result<CachedProbe, ProbeError> {
+    let is_stub = |path: &Path| {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(crate::services::media::is_stream_stub)
+    };
+    if is_stub(path) {
+        return Err(ProbeError::new(
+            "stream_stub",
+            "Stream links cannot be inspected locally",
+        ));
+    }
+    let canonical = tokio::fs::canonicalize(path).await.map_err(|e| {
+        ProbeError::new("stat_failed", format!("Cannot open local media file: {e}"))
+    })?;
+    if is_stub(&canonical) {
+        return Err(ProbeError::new(
+            "stream_stub",
+            "Stream links cannot be inspected locally",
+        ));
+    }
+    let path_str = canonical
+        .to_str()
+        .ok_or_else(|| ProbeError::new("invalid_path", "Media path is not valid UTF-8"))?;
+    let meta = tokio::fs::metadata(&canonical)
+        .await
+        .map_err(|e| ProbeError::new("stat_failed", e.to_string()))?;
+    if !meta.is_file() {
+        return Err(ProbeError::new(
+            "not_regular_file",
+            "Media path is not a regular file",
+        ));
+    }
+    let identity = FileIdentity::from_metadata(&meta)?;
+    let key = identity.cache_key();
+    let cached = media_probe_cache::get_identified(db, path_str, &key).await;
+    let cache_hit = cached.is_some();
+    let json = match cached {
+        Some(json) => json,
+        None => run_ffprobe(&canonical).await?,
+    };
+    let value: Value = serde_json::from_str(&json)
+        .map_err(|e| ProbeError::new("invalid_output", format!("Invalid ffprobe output: {e}")))?;
+    if !value.get("streams").is_some_and(Value::is_array) {
+        return Err(ProbeError::new(
+            "invalid_output",
+            "ffprobe output has no stream list",
+        ));
+    }
+    let after = tokio::fs::metadata(&canonical)
+        .await
+        .map_err(|e| ProbeError::new("stat_failed", e.to_string()))?;
+    if FileIdentity::from_metadata(&after)? != identity {
+        return Err(ProbeError::new(
+            "file_changed",
+            "Media file changed during inspection; retry after processing finishes",
+        ));
+    }
+    if !cache_hit {
+        media_probe_cache::upsert_identified(
+            db,
+            path_str,
+            &key,
+            identity.size.min(i64::MAX as u64) as i64,
+            &json,
+        )
+        .await;
+    }
+    Ok(CachedProbe {
+        json,
+        identity,
+        cache_hit,
+    })
 }
 
 /// Run ffprobe against `path` (or return a cached result), parse the JSON,
@@ -79,60 +233,22 @@ pub async fn classify_ffprobe(db: &SqlitePool, path: &Path) -> FfprobeClassifica
     {
         return FfprobeClassification::default();
     }
-    let Some(path_str) = path.to_str() else {
-        tracing::warn!(
-            target: "ryokan::source::ffprobe",
-            ?path,
-            "ffprobe: path contains non-UTF8 bytes; skipping probe"
-        );
-        return FfprobeClassification::default();
-    };
-
-    // Snapshot mtime + size to key the cache. An rmdir-then-recreate (same
-    // path, new file) invalidates on either mtime or size. If stat fails,
-    // treat it as "can't probe" rather than blindly going to the network.
-    let meta = match tokio::fs::metadata(path).await {
-        Ok(m) => m,
-        Err(err) => {
-            tracing::warn!(
-                target: "ryokan::source::ffprobe",
-                path = path_str,
-                %err,
-                "ffprobe: stat failed; skipping probe"
-            );
+    let probe = match probe_cached(db, path).await {
+        Ok(probe) => probe,
+        Err(error) => {
+            tracing::warn!(target: "ryokan::source::ffprobe", path = %path.display(), %error, "ffprobe inspection failed");
             return FfprobeClassification::default();
         }
     };
-    let size = meta.len() as i64;
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|m| m.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    let cached = media_probe_cache::get(db, path_str, mtime, size).await;
-    let cache_hit = cached.is_some();
-    let probe_json = match cached {
-        Some(j) => j,
-        None => match run_ffprobe(path).await {
-            Some(j) => {
-                media_probe_cache::upsert(db, path_str, mtime, size, &j).await;
-                j
-            }
-            None => return FfprobeClassification::default(),
-        },
-    };
     tracing::debug!(
         target: "ryokan::source::ffprobe",
-        path = path_str,
-        cache_hit,
-        size,
-        mtime,
+        path = %path.display(),
+        cache_hit = probe.cache_hit,
+        size = probe.identity.size,
         "ffprobe probe ready"
     );
 
-    scan_ffprobe_json_logged(path_str, &probe_json)
+    scan_ffprobe_json_logged(&path.to_string_lossy(), &probe.json)
 }
 
 /// Largest ffprobe stdout Ryokan keeps. A real episode's probe (streams,
@@ -143,15 +259,15 @@ const FFPROBE_STDOUT_CAP: usize = 4 << 20;
 /// stderr only feeds the non-zero-exit warn line.
 const FFPROBE_STDERR_CAP: usize = 64 << 10;
 
-/// Spawn `ffprobe` and capture its JSON output. Returns `None` on any
-/// failure including a missing binary. We pass `-v error` to suppress
+/// Spawn `ffprobe` and capture its JSON output. Returns an explicit error
+/// on any failure including a missing binary. We pass `-v error` to suppress
 /// ffprobe's banner so cache hits compare byte-for-byte.
 ///
 /// Each failure branch emits a targeted `warn!` so the user can see
 /// *why* ffprobe didn't contribute evidence: missing binary vs. probe
 /// refusal vs. oversized or non-UTF8 output are distinct failure modes
 /// with different remediation.
-async fn run_ffprobe(path: &Path) -> Option<String> {
+async fn run_ffprobe(path: &Path) -> Result<String, ProbeError> {
     // Capture stderr so the non-zero-exit branch can surface the reason.
     // kill_on_drop ensures the child is reaped if the surrounding
     // timeout fires (and would otherwise leave an orphan ffprobe
@@ -159,6 +275,9 @@ async fn run_ffprobe(path: &Path) -> Option<String> {
     let spawned = Command::new("ffprobe")
         .arg("-v")
         .arg("error")
+        // Containers must never cause ffprobe to follow network URLs.
+        .arg("-protocol_whitelist")
+        .arg("file")
         .arg("-show_streams")
         .arg("-show_format")
         .arg("-show_chapters")
@@ -179,7 +298,10 @@ async fn run_ffprobe(path: &Path) -> Option<String> {
                 %err,
                 "ffprobe spawn failed — is the `ffprobe` binary installed and on PATH?"
             );
-            return None;
+            return Err(ProbeError::new(
+                "spawn_failed",
+                format!("Cannot start ffprobe: {err}"),
+            ));
         }
     };
     let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
@@ -214,7 +336,10 @@ async fn run_ffprobe(path: &Path) -> Option<String> {
                 %err,
                 "ffprobe output read failed"
             );
-            return None;
+            return Err(ProbeError::new(
+                "read_failed",
+                format!("Cannot read ffprobe output: {err}"),
+            ));
         }
         Err(_) => {
             tracing::warn!(
@@ -223,7 +348,10 @@ async fn run_ffprobe(path: &Path) -> Option<String> {
                 timeout_secs = FFPROBE_TIMEOUT.as_secs(),
                 "ffprobe timed out — file likely has a corrupt container or partial download"
             );
-            return None;
+            return Err(ProbeError::new(
+                "timeout",
+                "ffprobe exceeded the 60 second time limit",
+            ));
         }
     };
     if !status.success() {
@@ -235,7 +363,10 @@ async fn run_ffprobe(path: &Path) -> Option<String> {
             stderr = stderr.trim(),
             "ffprobe exited non-zero"
         );
-        return None;
+        return Err(ProbeError::new(
+            "probe_failed",
+            "ffprobe could not read the media file",
+        ));
     }
     if stdout.truncated {
         tracing::warn!(
@@ -244,10 +375,13 @@ async fn run_ffprobe(path: &Path) -> Option<String> {
             cap_mb = FFPROBE_STDOUT_CAP >> 20,
             "ffprobe output exceeded the size cap; skipping probe"
         );
-        return None;
+        return Err(ProbeError::new(
+            "output_too_large",
+            "ffprobe output exceeded its size limit",
+        ));
     }
     match String::from_utf8(stdout.kept) {
-        Ok(s) => Some(s),
+        Ok(s) => Ok(s),
         Err(err) => {
             tracing::warn!(
                 target: "ryokan::source::ffprobe",
@@ -255,7 +389,10 @@ async fn run_ffprobe(path: &Path) -> Option<String> {
                 %err,
                 "ffprobe stdout was not valid UTF-8"
             );
-            None
+            Err(ProbeError::new(
+                "invalid_output",
+                "ffprobe output is not valid UTF-8",
+            ))
         }
     }
 }
@@ -970,14 +1107,16 @@ mod tests {
             let path = tmp.path().join(name);
             std::fs::write(&path, b"https://example.com/6").unwrap();
             let meta = std::fs::metadata(&path).unwrap();
-            let mtime = meta
-                .modified()
-                .unwrap()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64;
-            media_probe_cache::upsert(&db, path.to_str().unwrap(), mtime, meta.len() as i64, &json)
-                .await;
+            let identity = FileIdentity::from_metadata(&meta).unwrap();
+            let canonical = std::fs::canonicalize(&path).unwrap();
+            media_probe_cache::upsert_identified(
+                &db,
+                canonical.to_str().unwrap(),
+                &identity.cache_key(),
+                meta.len() as i64,
+                &json,
+            )
+            .await;
             results.push(classify_ffprobe(&db, &path).await);
         }
         assert_eq!(results[0].resolution, Some(Resolution::R1080p));

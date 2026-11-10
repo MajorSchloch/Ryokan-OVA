@@ -970,6 +970,10 @@ async fn main() {
             post(handlers::library::search::grab_batch_result),
         )
         .route(
+            "/api/library/series/{series_id}/file-info/{episode_number}",
+            get(handlers::library::file_info::episode_file_info),
+        )
+        .route(
             "/api/series/{anilist_id}/delete-file/{episode_number}",
             post(handlers::library::episodes::delete_episode_file),
         )

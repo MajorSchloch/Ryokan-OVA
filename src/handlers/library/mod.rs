@@ -9,6 +9,7 @@ pub mod cleanup;
 pub mod crud;
 pub mod detail;
 pub mod episodes;
+pub mod file_info;
 pub mod groups;
 mod inventory;
 pub mod misgrabs;

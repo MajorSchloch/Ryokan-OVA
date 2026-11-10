@@ -3011,6 +3011,18 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db)
         .await
         .ok();
+        for (name, declaration) in [
+            ("required_subtitle_languages", "TEXT NOT NULL DEFAULT ''"),
+            ("subtitle_language_match", "TEXT NOT NULL DEFAULT 'all'"),
+        ] {
+            if !column_exists(db, "config", name).await {
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "ALTER TABLE config ADD COLUMN {name} {declaration}"
+                )))
+                .execute(db)
+                .await?;
+            }
+        }
         // Sonarr's "Import Extra Files": subtitles next to the video.
         // Off by default, like Sonarr.
         sqlx::query("ALTER TABLE config ADD COLUMN import_extra_files INTEGER NOT NULL DEFAULT 0")

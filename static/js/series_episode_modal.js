@@ -70,6 +70,16 @@ function showEpisodeDetail(epNum, btn) {
         '<div class="ep-detail-row"><span class="ep-detail-label">Size</span><span class="ep-detail-value ep-detail-size-value">' + escHtml(size || '—') + '</span></div>' +
         '</div>' +
         '<div class="ep-detail-row" id="grab-history-section" style="margin-top:16px"><span class="ep-detail-label">Grab History</span><div id="grab-history-body" style="margin-top:6px;color:var(--text-dim);font-size:12px">Loading…</div></div>';
+    if (onDisk && SD.dbId) {
+        const section = document.createElement('section');
+        section.id = 'ep-media-info';
+        section.className = 'ep-media-info';
+        section.setAttribute('aria-label', 'File information');
+        section.setAttribute('aria-live', 'polite');
+        section.textContent = 'Inspecting file tracks…';
+        body.insertBefore(section, document.getElementById('grab-history-section'));
+        loadEpisodeMediaInfo(epNum, section);
+    }
     modal.style.display = 'flex';
     // Now that the modal is open, sync the footer Delete File and
     // Cancel-Pending button visibilities. Both helpers gate on
@@ -472,4 +482,60 @@ function closeEpisodeDetail(e) {
     const modal = document.getElementById('ep-detail-modal');
     if (e && e.target !== modal) return;
     modal.style.display = 'none';
+}
+
+// The response belongs to this modal instance. A slow previous request cannot
+// replace another episode's tracks after the user changes episodes.
+function loadEpisodeMediaInfo(epNum, section) {
+    fetch(`/api/library/series/${SD.dbId}/file-info/${epNum}`)
+        .then(async response => {
+            const data = await response.json();
+            if (!section.isConnected || _currentEpNum !== epNum) return;
+            if (!response.ok || !data.ok) {
+                section.textContent = data.message || 'File inspection is unavailable. Subtitle status is unknown.';
+                return;
+            }
+            renderEpisodeMediaInfo(section, data);
+        }).catch(() => {
+            if (section.isConnected && _currentEpNum === epNum) {
+                section.textContent = 'File inspection failed. Subtitle status is unknown.';
+            }
+        });
+}
+
+function mediaLanguageLabel(code) {
+    if (!code) return 'Unknown language';
+    try { return new Intl.DisplayNames(['en'], {type: 'language'}).of(code) || code; }
+    catch (_) { return code; }
+}
+
+function renderEpisodeMediaInfo(section, data) {
+    const info = data.media;
+    const policy = data.subtitle_requirements;
+    const row = (label, value) => '<div class="ep-detail-row"><span class="ep-detail-label">'
+        + escHtml(label) + '</span><span class="ep-detail-value">' + escHtml(value) + '</span></div>';
+    const trackLabel = track => [mediaLanguageLabel(track.language), track.codec,
+        track.title, track.channels ? track.channels + ' channels' : '',
+        track.external ? 'External file' : 'Embedded', track.default ? 'Default' : '',
+        track.forced ? 'Forced' : '', track.signs_only ? 'Signs / songs only' : '',
+        track.valid === false ? 'Invalid or unreadable' : ''].filter(Boolean).join(' · ');
+    let html = '<h4>File information</h4>';
+    if (!info.subtitles.length) html += '<p class="ep-media-verdict ep-media-verdict-missing">No subtitles found</p>';
+    else if (policy.enabled) html += '<p class="ep-media-verdict ' + (policy.satisfied ? 'ep-media-verdict-present' : 'ep-media-verdict-missing') + '">' + (policy.satisfied ? 'Required subtitles present' : 'Required subtitles missing') + '</p>';
+    html += row('Container', info.container || 'Unknown');
+    if (info.duration_seconds != null) html += row('Duration', Math.round(info.duration_seconds / 60) + ' min');
+    info.video.forEach(track => {
+        html += row('Video', [track.codec, track.width && track.height ? track.width + ' × ' + track.height : '',
+            track.bit_depth ? track.bit_depth + '-bit' : ''].filter(Boolean).join(' · '));
+    });
+    html += row('Audio', info.audio.length ? info.audio.map(trackLabel).join(' / ') : 'No audio tracks found');
+    html += row('Subtitles', info.subtitles.length ? info.subtitles.map(trackLabel).join(' / ') : 'No subtitle tracks or matching files found');
+    if (policy.enabled) {
+        html += row('Subtitle check', policy.satisfied ? 'Required languages present' : 'Does not meet subtitle requirements');
+        html += row(policy.match_mode === 'any' ? 'Requires any' : 'Requires all', policy.required_languages.map(mediaLanguageLabel).join(', '));
+        if (policy.reasons.length) html += row('Details', policy.reasons.join(' '));
+    } else html += row('Subtitle check', 'No required languages configured');
+    html += '<p class="form-hint">Track languages come from file labels. These labels cannot prove translation quality or detect burned-in subtitles.</p>';
+    if (info.warnings.length) html += row('Notes', info.warnings.join(' '));
+    section.innerHTML = html;
 }
