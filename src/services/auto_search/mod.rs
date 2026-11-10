@@ -3319,7 +3319,7 @@ mod tests {
         assert!(
             !extended
                 .iter()
-                .any(|a| normalize_title(a) == "frieren beyond journey s end"),
+                .any(|a| normalize_title(a) == "frieren beyond journeys end"),
             "{extended:?}"
         );
     }
@@ -3735,6 +3735,78 @@ mod episode_set_tests {
     }
 
     #[test]
+    fn automatic_strict_title_gate_keeps_the_target_release_despite_omitted_apostrophe() {
+        use crate::services::media_requirements::{Observed, Policy};
+
+        let cfg = Config {
+            media_requirements_enabled: true,
+            target_resolution: "1080".into(),
+            required_subtitle_languages: "en".into(),
+            ..Config::default()
+        };
+        let policy = Policy::from_config(&cfg);
+        let old = Observed {
+            resolution: Resolution::R720p,
+            subtitles_satisfied: false,
+            duration_seconds: Some(1364.676),
+        };
+        let aliases = vec![
+            "My Girlfriend's Friend".into(),
+            "Kanojo no Tomodachi".into(),
+        ];
+        let siblings = SiblingRejectPrecompute::build(&aliases, &[]);
+        let mut hits = vec![
+            hit(
+                "[Doomdos] - Kanojo no Tomodachi - S01E05 [Uncensored] [720p OV WEB-DL] [My Girlfriend's Friend]",
+                10_000,
+                false,
+            ),
+            hit(
+                "[ToonsHub] My Girlfriends Friend S01E05 REPACK 1080p UNCENSORED ADN WEB-DL AAC2.0 H.264 (Kanojo no Tomodachi, Multi-Subs)",
+                1,
+                false,
+            ),
+            hit(
+                "[Group] My Girlfriends Friend S02E05 [1080p]",
+                50_000,
+                false,
+            ),
+        ];
+        hits[0].resolution = "720".into();
+        let eligible = |candidate: &SearchResult, classification: &ClassificationResult| {
+            policy
+                .judge_candidate(&old, classification, &candidate.title)
+                .is_ok()
+        };
+        hits.retain(|candidate| {
+            classify_match(
+                &candidate.title,
+                &aliases,
+                &siblings,
+                &SearchTarget::Episode(5),
+                1,
+                false,
+                0,
+            )
+            .is_some_and(|matched| matched.kind == MatchKind::Verbatim)
+                && !names_more_than_the_series(&candidate.title, &aliases)
+                && passes_presearch_requirements(
+                    candidate,
+                    Some(Resolution::R720p),
+                    Some(&eligible),
+                )
+        });
+        assert_eq!(
+            hits.len(),
+            2,
+            "both correct-episode editions must reach ranking"
+        );
+        sort_automatic_candidates(&mut hits, &cfg);
+        assert!(hits[0].title.starts_with("[ToonsHub]"));
+        assert_eq!(hits[0].resolution, "1080");
+    }
+
+    #[test]
     fn requirements_floor_and_upgrade_filter_leave_eligible_alternative() {
         let mut candidates = vec![
             hit("[BD] Show - 01 (720p)", 10_000, false),
@@ -3793,6 +3865,7 @@ mod episode_set_tests {
         let observed = Observed {
             resolution: Resolution::R1080p,
             subtitles_satisfied: false,
+            duration_seconds: None,
         };
         let judge = |result: &SearchResult| {
             judge_release_with_requirements(

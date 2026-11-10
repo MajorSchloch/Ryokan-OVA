@@ -958,12 +958,21 @@ use std::sync::Mutex as StdMutex;
 /// and reports them via `add_calls()`. Other trait methods no-op.
 struct AutoSearchRecordingClient {
     add_calls: StdMutex<Vec<(String, String)>>, // (url, info_hash)
+    completed_for_import: StdMutex<Vec<(DownloadItem, Vec<DownloadFile>)>>,
+    import_file_gate: StdMutex<Option<std::sync::Arc<ImportFileGate>>>,
+}
+
+struct ImportFileGate {
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
 }
 
 impl AutoSearchRecordingClient {
     fn new() -> Self {
         Self {
             add_calls: StdMutex::new(Vec::new()),
+            completed_for_import: StdMutex::new(Vec::new()),
+            import_file_gate: StdMutex::new(None),
         }
     }
     fn add_calls(&self) -> Vec<(String, String)> {
@@ -992,10 +1001,28 @@ impl DownloadClient for AutoSearchRecordingClient {
         Ok(SelectiveOutcome::FullDownload)
     }
     async fn list_scoped(&self) -> Result<Vec<DownloadItem>, String> {
-        Ok(vec![])
+        Ok(self
+            .completed_for_import
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(item, _)| item.clone())
+            .collect())
     }
-    async fn get_files(&self, _hash: &str) -> Result<Vec<DownloadFile>, String> {
-        Ok(vec![])
+    async fn get_files(&self, hash: &str) -> Result<Vec<DownloadFile>, String> {
+        let gate = self.import_file_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.started.notify_one();
+            gate.release.notified().await;
+        }
+        Ok(self
+            .completed_for_import
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(item, _)| item.hash == hash)
+            .map(|(_, files)| files.clone())
+            .unwrap_or_default())
     }
     async fn pause(&self, _hash: &str) -> Result<(), String> {
         Ok(())
@@ -1662,6 +1689,9 @@ async fn seed_unhandled_misgrab(
 
 const WRONG_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const RIGHT_HASH: &str = "cccccccccccccccccccccccccccccccccccccccc";
+
+#[path = "auto_search_e2e/requirements_retry.rs"]
+mod requirements_retry;
 
 fn research_results_page() -> String {
     nyaa_results_page(&format!(

@@ -2366,6 +2366,131 @@ async fn run_once_imports_the_subtitle_next_to_the_video_when_enabled() {
     );
 }
 
+#[tokio::test]
+async fn run_once_distinguishes_verified_requirements_from_unreadable_media() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    for dimensions_and_subs in [Some((1920, 1080, false)), Some((854, 480, true)), None] {
+        let db = in_memory_pool().await;
+        let media_root = tempfile::tempdir().unwrap();
+        let source_dir = tempfile::tempdir().unwrap();
+        sqlx::query(
+            "INSERT INTO config (id, post_processing_enabled, media_root, post_processing_mode, \
+             media_requirements_enabled, minimum_resolution, target_resolution, \
+             required_subtitle_languages, minimum_subtitle_check, auto_redownload_failed) \
+             VALUES (1, 1, ?, 'copy', 1, '720', '1080', 'en', 1, 0)",
+        )
+        .bind(media_root.path().to_str().unwrap())
+        .execute(&db)
+        .await
+        .unwrap();
+        let sid = seed_series(&db, 1, "Show Title").await;
+        let old = media_root
+            .path()
+            .join("Show Title/Season 01/Show Title - S01E01 [720p].mkv");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, b"original media remains here").unwrap();
+        let title = "[Group] Show Title - 01 (1080p WEB)";
+        let name = format!("{title}.mkv");
+        let source = source_dir.path().join(&name);
+        std::fs::write(&source, b"downloaded video fixture").unwrap();
+        if let Some((width, height, subtitles)) = dimensions_and_subs {
+            let canonical = std::fs::canonicalize(&source).unwrap();
+            let identity = crate::services::media_info::FileIdentity::from_metadata(
+                &std::fs::metadata(&canonical).unwrap(),
+            )
+            .unwrap();
+            let mut streams = vec![serde_json::json!({
+                "index":0,"codec_type":"video","codec_name":"h264",
+                "width":width,"height":height
+            })];
+            if subtitles {
+                streams.push(serde_json::json!({
+                    "index":1,"codec_type":"subtitle","codec_name":"ass",
+                    "tags":{"language":"eng"}
+                }));
+            }
+            crate::models::media_probe_cache::upsert_identified(
+                &db,
+                canonical.to_str().unwrap(),
+                &identity.cache_key(),
+                identity.size as i64,
+                &serde_json::json!({"streams":streams}).to_string(),
+            )
+            .await;
+        }
+        let grab_id =
+            grabbed_torrents::record_grab(&db, "requirement-hash", title, sid, &[1], false)
+                .await
+                .unwrap()
+                .unwrap();
+        grabbed_torrents::set_download_client(&db, grab_id, Some(1))
+            .await
+            .unwrap();
+        insert_dc(
+            &db,
+            DownloadClientForm {
+                name: "default",
+                kind: "qbittorrent",
+                url: "http://q",
+                username: "",
+                password: "",
+                label: "",
+                download_path: "",
+                enabled: true,
+                is_default: true,
+            },
+        )
+        .await
+        .unwrap();
+        let path = source_dir.path().to_string_lossy().to_string();
+        let torrent = DownloadItem {
+            hash: "requirement-hash".into(),
+            name: title.into(),
+            size: 24,
+            progress: 1.0,
+            dlspeed: 0,
+            state: "seeding".into(),
+            category: "anime".into(),
+            eta: 0,
+            save_path: path.clone(),
+            content_path: path,
+            state_kind: DownloadItemState::Seeding,
+            seeding_done: false,
+        };
+        let state = build_test_app_state(db.clone(), None);
+        let client = Arc::new(ImportingClient {
+            torrent,
+            files: vec![DownloadFile {
+                name,
+                size: 24,
+                progress: 1.0,
+                wanted: true,
+            }],
+        });
+        install_pool(&state, vec![(1, client as Arc<dyn DownloadClient>, true)]).await;
+        post_processing::run_once(&state).await;
+        let failed: (String, String) = sqlx::query_as(
+            "SELECT state,COALESCE(failure_reason,'') FROM grabbed_torrents WHERE id=?",
+        )
+        .bind(grab_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(failed.0, "failed");
+        assert_eq!(
+            failed.1,
+            if dimensions_and_subs.is_some() {
+                post_processing::REQUIREMENTS_REJECTED_REASON
+            } else {
+                ""
+            },
+            "unreadable files must stay ordinary import failures"
+        );
+        assert_eq!(std::fs::read(&old).unwrap(), b"original media remains here");
+        assert_eq!(std::fs::read(&source).unwrap(), b"downloaded video fixture");
+    }
+}
+
 // ─── Warning state and the errored branch's boot grace ─────────────
 
 #[tokio::test]

@@ -43,6 +43,74 @@ mod crud_ci {
         serde_json::from_slice(&body).expect("parse response body as JSON")
     }
 
+    #[tokio::test]
+    async fn restored_episode_does_not_borrow_another_episodes_imported_release() {
+        use crate::models::config::{Config, save_config};
+
+        let db = in_memory_pool().await;
+        let series_id = seed_series(&db, 90001, "Show").await;
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("Show").join("Season 01");
+        tokio::fs::create_dir_all(&folder).await.unwrap();
+        let filename = "Show - S01E05 - Episode 5 [720p WEB-DL] [OriginalGroup].mkv";
+        let file = folder.join(filename);
+        tokio::fs::write(&file, b"preserved episode").await.unwrap();
+        let identity = crate::services::media_info::FileIdentity::from_metadata(
+            &tokio::fs::metadata(&file).await.unwrap(),
+        )
+        .unwrap();
+        crate::models::media_probe_cache::upsert_identified(
+            &db,
+            file.to_str().unwrap(),
+            &identity.cache_key(),
+            identity.size as i64,
+            r#"{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","width":1280,"height":720},{"index":1,"codec_type":"audio","codec_name":"aac","channels":2}]}"#,
+        )
+        .await;
+        save_config(
+            &db,
+            &Config {
+                media_root: root.path().to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let imported = crate::test_support::seed_grabbed_torrent(
+            &db,
+            series_id,
+            "another-episode-hash",
+            "[AnotherGroup] Show - S01E04 [1080p WEB-DL]",
+            &[4],
+        )
+        .await;
+        sqlx::query("UPDATE grabbed_torrents SET state='imported' WHERE id=?")
+            .bind(imported)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let state = build_test_app_state(db.clone(), None);
+        reclassify_on_disk_episode(&state, series_id, 5)
+            .await
+            .unwrap();
+        let tags = episode_tags::get_for_series(&db, series_id).await.unwrap();
+        let tag = tags.get(&5).unwrap();
+        let original_relative_path = format!("Season 01/{filename}");
+        assert_eq!(tag.release_title, original_relative_path);
+        assert_eq!(tag.state, "completed");
+        assert!(!tag.manual_override);
+        let history: String = sqlx::query_scalar(
+            "SELECT release_title FROM episode_grab_history WHERE series_id=? AND episode_number=5",
+        )
+        .bind(series_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(history, original_relative_path);
+        assert_eq!(tokio::fs::read(&file).await.unwrap(), b"preserved episode");
+    }
+
     // ─── set_folder ──────────────────────────────────────────
 
     #[tokio::test]
