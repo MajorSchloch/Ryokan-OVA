@@ -1978,3 +1978,7 @@
    cards, read top to bottom. */
 .setup-library { max-width: 760px; margin-inline: auto; }
 .setup-library > .cf-section-desc { margin-bottom: 20px; }
+
+.quality-advanced > summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
+.quality-advanced > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+#media-requirements-settings select { max-width: 100%; }
