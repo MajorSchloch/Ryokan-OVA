@@ -54,6 +54,8 @@ A file can pass the minimum while remaining below target. Once the target is met
 
 Requirements mode uses the target resolution before source preferences and ignores the advanced source cutoff and finished-series BD-only preference. Explicit block filters and the Custom Format minimum still apply. Per-release Upgrades switches, pins, active downloads and multi-episode protections remain in force. Enabling this mode does not enable upgrades for existing releases.
 
+In requirements mode, autobrr pushes fill missing episodes only. Overlapping existing files, pins and active downloads are skipped before dispatch. Use RSS or automatic search to plan upgrades, or choose a release manually. The automatic batch button also requires an empty release; the explicit release picker remains available. Duplicate files for one episode require review before an automatic upgrade.
+
 The following source, revision and score cutoffs govern **Advanced source and score cutoffs** mode:
 
 - **Allow upgrades for new series**: off by default. Sets the initial Upgrades switch for every new series, including imports, synced lists, and compatibility API requests. Existing series keep their own choice. Change that choice on the series page. When a series has Upgrades off, download imports keep its existing episodes and fill missing slots. A direct episode grab can replace the requested episode. Selecting a batch or files in the download picker does not grant that exception.
