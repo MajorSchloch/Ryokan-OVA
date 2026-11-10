@@ -40,6 +40,22 @@ Two more things live on this tab:
 
 The scoring inputs that decide which release wins when several match the same episode.
 
+**Minimum + good enough** is an opt-in alternative to advanced source and score cutoffs. Existing installations keep their previous mode.
+
+- **Minimum resolution**: accept this resolution or higher. The suggested floor is 720p. Unknown or lower resolution is held before import.
+- **Good enough resolution**: stop resolution upgrades here. The suggested target is 1080p; 2160p (4K) is also available.
+- **Subtitle languages**: choose language names or codes, such as English/en or Spanish/es. Require all listed languages or any one. Empty means subtitles are not required.
+- **Minimum subtitle requirement**: require selectable tracks, or explicitly allow unverified subtitles temporarily. The latter also accepts videos with no captions; review them yourself.
+- **Good enough subtitles**: prefer selectable tracks in your languages, or use the minimum subtitle rule. Burned-in and unknown captions do not satisfy a selectable-track target.
+
+The target uses actual video dimensions and declared languages in selectable tracks or valid matching subtitle files. Forced and signs-only tracks do not count. Language labels cannot prove translation quality. Ryokan cannot detect captions burned into the picture.
+
+A file can pass the minimum while remaining below target. Once the target is met, automatic source, revision and score upgrades stop. Below target, a replacement must improve an unmet requirement without reducing known resolution or losing required selectable subtitles. The downloaded file is checked again before the existing file is retired. Failed checks keep the old file and download for review. Explicit manual replacements still obey the minimum but can replace a target-met file.
+
+Requirements mode uses the target resolution before source preferences and ignores the advanced source cutoff and finished-series BD-only preference. Explicit block filters and the Custom Format minimum still apply. Per-release Upgrades switches, pins, active downloads and multi-episode protections remain in force. Enabling this mode does not enable upgrades for existing releases.
+
+The following source, revision and score cutoffs govern **Advanced source and score cutoffs** mode:
+
 - **Allow upgrades for new series**: off by default. Sets the initial Upgrades switch for every new series, including imports, synced lists, and compatibility API requests. Existing series keep their own choice. Change that choice on the series page. When a series has Upgrades off, download imports keep its existing episodes and fill missing slots. A direct episode grab can replace the requested episode. Selecting a batch or files in the download picker does not grant that exception.
 - **Automatic Upgrade Search**: runs a daily search for better releases when the series allows upgrades. RSS can also select upgrades for those series when the daily search is off.
 

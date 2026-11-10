@@ -2349,7 +2349,29 @@ pub async fn settings_quality_submit(
         form.target_subtitle_check.as_deref(),
     ) {
         Ok(value) => value,
-        Err(error) => return quality_response(&state, None, None, Some(error), is_htmx).await,
+        Err(error) => {
+            let mut draft = existing_cfg.clone();
+            if let Some(value) = &form.minimum_resolution {
+                draft.minimum_resolution.clone_from(value);
+            }
+            if let Some(value) = &form.target_resolution {
+                draft.target_resolution.clone_from(value);
+            }
+            if let Some(value) = &form.media_requirements_enabled {
+                draft.media_requirements_enabled = value == "1";
+            }
+            if let Some(value) = &form.minimum_subtitle_check {
+                draft.minimum_subtitle_check = value == "1";
+            }
+            if let Some(value) = &form.target_subtitle_check {
+                draft.target_subtitle_check = value == "1";
+            }
+            draft.required_subtitle_languages = required_subtitle_languages;
+            draft.subtitle_language_match = subtitle_language_match;
+            draft.preferred_groups = form.preferred_groups;
+            draft.blocked_groups = form.blocked_groups;
+            return quality_response(&state, Some(draft), None, Some(error), is_htmx).await;
+        }
     };
     let cfg = config::Config {
         media_requirements_enabled: requirements.enabled,

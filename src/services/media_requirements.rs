@@ -2,7 +2,10 @@
 //!
 //! Release labels are prospective claims. Only local media facts can satisfy
 //! the target or authorize retirement of an existing file.
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 use serde::Serialize;
 use sqlx::SqlitePool;
@@ -266,31 +269,40 @@ pub async fn observe_files(
         return HashMap::new();
     }
     let mut observed = HashMap::new();
+    let mut unavailable = HashSet::new();
     for file in files {
         if !file.is_own_season() || file.is_special {
             continue;
         }
-        let Ok(path) = tokio::fs::canonicalize(folder.join(&file.filename)).await else {
-            continue;
+        let episodes = file.episode_number..=file.episode_last.max(file.episode_number);
+        let path = match tokio::fs::canonicalize(folder.join(&file.filename)).await {
+            Ok(path) if path.starts_with(&folder) => path,
+            _ => {
+                unavailable.extend(episodes);
+                continue;
+            }
         };
-        if !path.starts_with(&folder) {
-            continue;
-        }
-        if let Ok(info) = media_info::inspect(db, Path::new(&path)).await {
-            let value = policy.observe(&info);
-            for ep in file.episode_number..=file.episode_last.max(file.episode_number) {
-                observed
-                    .entry(ep)
-                    .and_modify(|old: &mut Observed| {
-                        if value.resolution.rank() < old.resolution.rank() {
-                            old.resolution = value.resolution;
-                        }
-                        old.subtitles_satisfied &= value.subtitles_satisfied;
-                    })
-                    .or_insert(value);
+        match media_info::inspect(db, Path::new(&path)).await {
+            Ok(info) => {
+                let value = policy.observe(&info);
+                for ep in episodes {
+                    observed
+                        .entry(ep)
+                        .and_modify(|old: &mut Observed| {
+                            if value.resolution.rank() < old.resolution.rank() {
+                                old.resolution = value.resolution;
+                            }
+                            old.subtitles_satisfied &= value.subtitles_satisfied;
+                        })
+                        .or_insert(value);
+                }
+            }
+            Err(_) => {
+                unavailable.extend(episodes);
             }
         }
     }
+    observed.retain(|ep, _| !unavailable.contains(ep));
     observed
 }
 
@@ -472,5 +484,61 @@ mod tests {
         assert_eq!(v.target_resolution, "2160");
         assert!(settings_values(&cfg, None, Some("1080"), Some("720"), None, None).is_err());
         assert!(settings_values(&cfg, Some("garbage"), None, None, None, None).is_err());
+    }
+    #[test]
+    fn actual_spanish_tracks_and_language_match_control_a_4k_target() {
+        let mut p = Policy::from_config(&Config {
+            media_requirements_enabled: true,
+            target_resolution: "2160".into(),
+            required_subtitle_languages: "es,en".into(),
+            ..Default::default()
+        });
+        let identity = media_info::FileIdentity {
+            size: 1,
+            mtime_ns: "1".into(),
+            device: None,
+            inode: None,
+        };
+        let info=media_info::parse_probe_json(r#"{"streams":[{"index":0,"codec_type":"video","width":3840,"height":1600},{"index":1,"codec_type":"subtitle","codec_name":"ass","tags":{"language":"spa"}}]}"#,identity,false).unwrap();
+        assert!(!p.target_met(&p.observe(&info)));
+        p.language_match = "any".into();
+        assert!(p.target_met(&p.observe(&info)));
+        p.required_languages = vec!["en".into()];
+        assert!(!p.target_met(&p.observe(&info)));
+        assert_eq!(p.observe(&info).resolution, Resolution::R2160p);
+    }
+
+    #[tokio::test]
+    async fn missing_overlapping_file_invalidates_an_otherwise_observed_episode() {
+        let db = crate::test_support::in_memory_pool().await;
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().join("Show");
+        tokio::fs::create_dir(&folder).await.unwrap();
+        let video = folder.join("Show - S01E01.mkv");
+        tokio::fs::write(&video, "video").await.unwrap();
+        let identity =
+            media_info::FileIdentity::from_metadata(&tokio::fs::metadata(&video).await.unwrap())
+                .unwrap();
+        crate::models::media_probe_cache::upsert_identified(&db,video.to_str().unwrap(),&identity.cache_key(),identity.size as i64,r#"{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","width":1280,"height":720}]}"#).await;
+        let cfg = Config {
+            media_requirements_enabled: true,
+            media_root: temp.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let mut files = media::scan_series_folder(&cfg.media_root, "Show").await;
+        assert_eq!(files.len(), 1);
+        assert!(
+            observe_files(&db, &cfg, "Show", &files)
+                .await
+                .contains_key(&1)
+        );
+        let mut missing = files[0].clone();
+        missing.filename = "missing.mkv".into();
+        files.push(missing);
+        assert!(
+            !observe_files(&db, &cfg, "Show", &files)
+                .await
+                .contains_key(&1)
+        );
     }
 }

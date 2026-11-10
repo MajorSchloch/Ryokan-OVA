@@ -18,6 +18,7 @@ pub(crate) struct RequiredSubtitleImport {
     dir: Option<TempDir>,
     source: PathBuf,
     source_identity: FileIdentity,
+    observed_source: crate::services::media_requirements::Observed,
     dest_video: PathBuf,
     sidecars: Vec<(PathBuf, PathBuf)>,
     source_sidecars: Vec<(PathBuf, FileIdentity)>,
@@ -35,7 +36,7 @@ pub(crate) fn required_languages(cfg: &Config) -> Vec<String> {
 }
 
 pub(crate) fn required(cfg: &Config) -> bool {
-    !required_languages(cfg).is_empty()
+    cfg.media_requirements_enabled || !required_languages(cfg).is_empty()
 }
 
 /// Preflight the actual video and the exact sidecars the importer will
@@ -50,15 +51,18 @@ pub(crate) async fn prepare(
     videos_in_download: usize,
 ) -> Result<Option<RequiredSubtitleImport>, String> {
     let required = required_languages(cfg);
-    if required.is_empty() {
+    if !self::required(cfg) {
         return Ok(None);
     }
+    let policy = crate::services::media_requirements::Policy::from_config(cfg);
+    let enforce_subtitles = !policy.enabled || policy.minimum_subtitle_check;
     let info = media_info::inspect_with_sidecars(db, source, candidates, span, videos_in_download)
         .await
         .map_err(|e| format!("Subtitle requirement: {e}"))?;
+    policy.validate_minimum(&info)?;
     let verdict =
         media_info::evaluate_subtitle_requirements(&info, &required, &cfg.subtitle_language_match);
-    if !verdict.satisfied {
+    if enforce_subtitles && !verdict.satisfied {
         return Err(format!(
             "Subtitle requirement: {}",
             verdict.reasons.join("; ")
@@ -130,7 +134,7 @@ pub(crate) async fn prepare(
         &required,
         &cfg.subtitle_language_match,
     );
-    if !verdict.satisfied {
+    if enforce_subtitles && !verdict.satisfied {
         return Err(format!(
             "Subtitle requirement: required subtitle files could not be imported and verified: {}",
             verdict.reasons.join("; ")
@@ -156,6 +160,7 @@ pub(crate) async fn prepare(
         dir: Some(dir),
         source: source.to_path_buf(),
         source_identity: info.identity,
+        observed_source: policy.observe(&staged),
         dest_video: dest_video.to_path_buf(),
         sidecars,
         source_sidecars,
@@ -323,10 +328,24 @@ pub(crate) async fn import_required(
     candidates: &[PathBuf],
     span: Option<EpisodeSpan>,
     videos_in_download: usize,
+    automatic: bool,
 ) -> Result<(), String> {
     let mut transaction = prepare(db, cfg, source, dest, candidates, span, videos_in_download)
         .await?
         .ok_or_else(|| "Subtitle requirement: policy is disabled".to_string())?;
+    if automatic && cfg.media_requirements_enabled {
+        let policy = crate::services::media_requirements::Policy::from_config(cfg);
+        for old in old_videos {
+            let info = media_info::inspect(db, old)
+                .await
+                .map_err(|e| format!("Media requirement: cannot verify existing file: {e}"))?;
+            policy
+                .validate_replacement(&policy.observe(&info), &transaction.observed_source)
+                .map_err(|reason| {
+                    format!("Media requirement: {reason}; existing media was kept")
+                })?;
+        }
+    }
     transaction.snapshot(old_videos).await?;
     let landing = super::staging_path(dest);
     // Copy mode for a move request keeps the source recoverable until
@@ -408,11 +427,21 @@ mod tests {
     use super::*;
 
     async fn seed_probe(db: &SqlitePool, path: &Path, subtitles: bool) {
+        seed_probe_dimensions(db, path, subtitles, 1280, 720).await;
+    }
+
+    async fn seed_probe_dimensions(
+        db: &SqlitePool,
+        path: &Path,
+        subtitles: bool,
+        width: u32,
+        height: u32,
+    ) {
         let canonical = tokio::fs::canonicalize(path).await.unwrap();
         let identity =
             FileIdentity::from_metadata(&tokio::fs::metadata(&canonical).await.unwrap()).unwrap();
         let mut streams = vec![
-            serde_json::json!({"index":0,"codec_type":"video","codec_name":"h264","width":1280,"height":720}),
+            serde_json::json!({"index":0,"codec_type":"video","codec_name":"h264","width":width,"height":height}),
         ];
         if subtitles {
             streams.push(serde_json::json!({"index":1,"codec_type":"subtitle","codec_name":"ass","tags":{"language":"eng"}}));
@@ -460,6 +489,7 @@ mod tests {
             &[],
             Some(EpisodeSpan::single(None, 6)),
             1,
+            false,
         )
         .await
         .unwrap_err();
@@ -508,6 +538,7 @@ mod tests {
                 std::slice::from_ref(&subtitle),
                 Some(EpisodeSpan::single(None, 6)),
                 12,
+                false,
             )
             .await
             .unwrap();
@@ -626,11 +657,196 @@ mod tests {
                 "Show",
                 &[subtitle],
                 Some(EpisodeSpan::single(None, 6)),
-                1
+                1,
+                false,
             )
             .await
             .is_err()
         );
         assert!(!dest.exists());
+    }
+    #[tokio::test]
+    async fn minimum_resolution_rejection_preserves_source_and_existing_files() {
+        let db = crate::test_support::in_memory_pool().await;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("new.mkv");
+        let old = temp.path().join("old.mkv");
+        tokio::fs::write(&source, "source video").await.unwrap();
+        tokio::fs::write(&old, "existing video").await.unwrap();
+        seed_probe_dimensions(&db, &source, true, 854, 480).await;
+        let cfg = Config {
+            media_requirements_enabled: true,
+            required_subtitle_languages: "en".into(),
+            ..Default::default()
+        };
+        let error = import_required(
+            &db,
+            &cfg,
+            "move",
+            &source,
+            &old,
+            std::slice::from_ref(&old),
+            1,
+            "Show",
+            &[],
+            None,
+            1,
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("below the 720p minimum"));
+        assert_eq!(
+            tokio::fs::read_to_string(&old).await.unwrap(),
+            "existing video"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(&source).await.unwrap(),
+            "source video"
+        );
+    }
+
+    #[tokio::test]
+    async fn actual_upgrade_gates_keep_target_met_and_non_improving_files() {
+        for (old_resolution, old_subs, new_resolution, new_subs, should_replace) in [
+            (720, true, 1080, true, true),
+            (1080, true, 2160, true, false),
+            (1080, false, 1080, false, false),
+            (1080, false, 720, true, false),
+            (720, true, 1080, false, false),
+            (1080, false, 1080, true, true),
+        ] {
+            let db = crate::test_support::in_memory_pool().await;
+            let temp = tempfile::tempdir().unwrap();
+            let source = temp.path().join("new.mkv");
+            let dest = temp.path().join("old.mkv");
+            tokio::fs::write(&source, "new video data").await.unwrap();
+            tokio::fs::write(&dest, "old video data").await.unwrap();
+            let width = |height| match height {
+                2160 => 3840,
+                1080 => 1920,
+                _ => 1280,
+            };
+            seed_probe_dimensions(
+                &db,
+                &source,
+                new_subs,
+                width(new_resolution),
+                new_resolution,
+            )
+            .await;
+            seed_probe_dimensions(&db, &dest, old_subs, width(old_resolution), old_resolution)
+                .await;
+            let cfg = Config {
+                media_requirements_enabled: true,
+                minimum_subtitle_check: false,
+                required_subtitle_languages: "en".into(),
+                ..Default::default()
+            };
+            let result = import_required(
+                &db,
+                &cfg,
+                "copy",
+                &source,
+                &dest,
+                std::slice::from_ref(&dest),
+                1,
+                "Show",
+                &[],
+                None,
+                1,
+                true,
+            )
+            .await;
+            assert_eq!(
+                result.is_ok(),
+                should_replace,
+                "{old_resolution}/{old_subs} -> {new_resolution}/{new_subs}: {result:?}"
+            );
+            assert_eq!(
+                tokio::fs::read_to_string(&dest).await.unwrap(),
+                if should_replace {
+                    "new video data"
+                } else {
+                    "old video data"
+                }
+            );
+            assert!(source.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_unverified_minimum_accepts_fallback_without_fabricating_subtitles() {
+        let db = crate::test_support::in_memory_pool().await;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.mkv");
+        let dest = temp.path().join("library/episode.mkv");
+        tokio::fs::write(&source, "video with unverified captions")
+            .await
+            .unwrap();
+        seed_probe(&db, &source, false).await;
+        let cfg = Config {
+            media_requirements_enabled: true,
+            minimum_subtitle_check: false,
+            required_subtitle_languages: "es".into(),
+            ..Default::default()
+        };
+        import_required(
+            &db,
+            &cfg,
+            "copy",
+            &source,
+            &dest,
+            &[],
+            1,
+            "Show",
+            &[],
+            None,
+            1,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(dest.exists());
+        assert!(!dest.with_extension("es.srt").exists());
+        let info = media_info::inspect(&db, &source).await.unwrap();
+        let policy = crate::services::media_requirements::Policy::from_config(&cfg);
+        assert!(policy.minimum_met(&policy.observe(&info)));
+        assert!(!policy.target_met(&policy.observe(&info)));
+        assert!(info.subtitles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn explicit_manual_replacement_obeys_minimum_without_automatic_target_stop() {
+        let db = crate::test_support::in_memory_pool().await;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("new.mkv");
+        let dest = temp.path().join("old.mkv");
+        tokio::fs::write(&source, "new video").await.unwrap();
+        tokio::fs::write(&dest, "old video").await.unwrap();
+        seed_probe_dimensions(&db, &source, true, 1920, 1080).await;
+        seed_probe_dimensions(&db, &dest, true, 1920, 1080).await;
+        let cfg = Config {
+            media_requirements_enabled: true,
+            required_subtitle_languages: "en".into(),
+            ..Default::default()
+        };
+        import_required(
+            &db,
+            &cfg,
+            "copy",
+            &source,
+            &dest,
+            std::slice::from_ref(&dest),
+            1,
+            "Show",
+            &[],
+            None,
+            1,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(tokio::fs::read_to_string(dest).await.unwrap(), "new video");
     }
 }

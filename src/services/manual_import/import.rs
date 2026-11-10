@@ -526,6 +526,7 @@ pub async fn run_import(
                             &candidates,
                             media::parse_episode_span(&file.file_name.to_ascii_lowercase()),
                             videos_in_source,
+                            false,
                         )
                         .await
                     } else {
@@ -674,6 +675,7 @@ pub async fn run_import(
                     &candidates,
                     media::parse_episode_span(&file.file_name.to_ascii_lowercase()),
                     videos_in_source,
+                    false,
                 )
                 .await
             } else {
