@@ -78,24 +78,7 @@ impl Policy {
             .or_else(|| info.video.first());
         let resolution = video
             .map(|v| {
-                let width = v.width.unwrap_or(0);
-                let height = v.height.unwrap_or(0);
-                if width == 0 || height == 0 {
-                    return Resolution::Unknown;
-                }
-                // Preserve the tier of widescreen crops (1920x800, 3840x1600).
-                let by_width = match width {
-                    3800.. => Resolution::R2160p,
-                    1850.. => Resolution::R1080p,
-                    1200.. => Resolution::R720p,
-                    _ => Resolution::Unknown,
-                };
-                let by_height = Resolution::from_dimensions(width, height);
-                if by_width.rank() > by_height.rank() {
-                    by_width
-                } else {
-                    by_height
-                }
+                Resolution::from_observed_dimensions(v.width.unwrap_or(0), v.height.unwrap_or(0))
             })
             .unwrap_or(Resolution::Unknown);
         let subtitles = media_info::evaluate_subtitle_requirements(
