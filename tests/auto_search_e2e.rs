@@ -21,6 +21,9 @@ use tokio::sync::Mutex;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[path = "auto_search_e2e/unmarked_packs.rs"]
+mod unmarked_packs;
+
 /// Serialize within-binary tests on the RYOKAN_NYAA_API_BASE write so
 /// tokio's parallel scheduler can't race two tests on the same env var.
 /// Other test binaries get their own process under nextest, so cross-
@@ -1705,6 +1708,8 @@ async fn seed_unhandled_misgrab(
 const WRONG_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const RIGHT_HASH: &str = "cccccccccccccccccccccccccccccccccccccccc";
 
+#[path = "auto_search_e2e/alternate_names.rs"]
+mod alternate_names;
 #[path = "auto_search_e2e/cour_season_identity.rs"]
 mod cour_season_identity;
 #[path = "auto_search_e2e/numeric_title_identity.rs"]

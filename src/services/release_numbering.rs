@@ -3,6 +3,7 @@
 //! proof of a video's contents. Provider disagreement requires source evidence.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::services::anibridge::MalEpisodePlan;
 use crate::services::anilist::MAX_PLAUSIBLE_EPISODES;
@@ -168,20 +169,7 @@ impl NumberingContext {
         if !is_batch && last - first >= media::MAX_FILE_SPAN {
             return Err("Episode mapping: single file has an unsupported episode span".into());
         }
-        if let Some(plan) = &self.provider_plan {
-            plan.source_slots()?;
-            for source in &plan.sources {
-                for &number in &numbers {
-                    let mapped = episode_mapping::resolve_episode(&source.rules, number)
-                        .map_err(|e| e.to_string())?;
-                    if mapped.entry != self.anilist_id || mapped.number != number {
-                        return Err(format!(
-                            "Episode mapping: source episode {number} has conflicting library identities; identify the source scheme"
-                        ));
-                    }
-                }
-            }
-        }
+        self.validate_provider_numbers(&numbers)?;
         if self
             .episode_count
             .is_some_and(|count| count > 0 && last > count)
@@ -206,6 +194,70 @@ impl NumberingContext {
         };
         mapping.validate()?;
         Ok(mapping)
+    }
+
+    /// Called only after a same-hash published file list establishes this
+    /// entry's full relative episode set. A catalogue count alone is not
+    /// evidence: every distinct source slot must actually be present.
+    pub(crate) fn choose_published_entry_pack(
+        &self,
+        source_episodes: &[i32],
+        source_season: Option<i32>,
+    ) -> Result<ReleaseMapping, String> {
+        let count = self
+            .episode_count
+            .filter(|n| (2..=MAX_PLAUSIBLE_EPISODES).contains(n))
+            .ok_or_else(|| {
+                "Episode mapping: published pack needs a known multi-episode entry".to_string()
+            })?;
+        if self.anilist_id == 0
+            || source_season.is_some_and(|season| season != self.expected_season)
+        {
+            return Err("Episode mapping: published pack names another entry or season".into());
+        }
+        let mut numbers = source_episodes.to_vec();
+        numbers.sort_unstable();
+        if numbers.len() != count as usize || !numbers.iter().copied().eq(1..=count) {
+            return Err(
+                "Episode mapping: published pack does not prove the complete entry-relative range"
+                    .into(),
+            );
+        }
+        self.validate_provider_numbers(&numbers)?;
+        let mapping = ReleaseMapping {
+            version: 1,
+            anilist_id: self.anilist_id,
+            tv_series: self.tv_series,
+            source_first: 1,
+            source_last: count,
+            target_first: 1,
+            source_season: Some(source_season.unwrap_or(self.expected_season)),
+            basis: if source_season.is_some() {
+                NumberingBasis::SeasonRelative
+            } else {
+                NumberingBasis::EntryRelative
+            },
+        };
+        mapping.validate()?;
+        Ok(mapping)
+    }
+
+    fn validate_provider_numbers(&self, numbers: &[i32]) -> Result<(), String> {
+        if let Some(plan) = &self.provider_plan {
+            plan.source_slots()?;
+            for source in &plan.sources {
+                for &number in numbers {
+                    let mapped = episode_mapping::resolve_episode(&source.rules, number)
+                        .map_err(|e| e.to_string())?;
+                    if mapped.entry != self.anilist_id || mapped.number != number {
+                        return Err(format!(
+                            "Episode mapping: source episode {number} has conflicting library identities; identify the source scheme"
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -262,6 +314,27 @@ pub async fn filter_automatic_candidates(
     target: &auto_search::SearchTarget,
     candidates: Vec<crate::services::nyaa::SearchResult>,
 ) -> Vec<crate::services::nyaa::SearchResult> {
+    filter_automatic_candidates_with_pack_mappings(
+        db,
+        detail,
+        offset,
+        target,
+        candidates,
+        &HashMap::new(),
+    )
+    .await
+}
+
+/// Published-pack decisions are private search evidence, never a field
+/// supplied by a client or an indexer. Reviewed source decisions win.
+pub(crate) async fn filter_automatic_candidates_with_pack_mappings(
+    db: &sqlx::SqlitePool,
+    detail: &crate::services::anilist::AnimeDetail,
+    offset: i32,
+    target: &auto_search::SearchTarget,
+    candidates: Vec<crate::services::nyaa::SearchResult>,
+    pack_mappings: &HashMap<String, ReleaseMapping>,
+) -> Vec<crate::services::nyaa::SearchResult> {
     let standalone = detail.format == "MOVIE"
         || (matches!(detail.format.as_str(), "SPECIAL" | "OVA" | "ONA")
             && detail.episodes == Some(1));
@@ -303,10 +376,28 @@ pub async fn filter_automatic_candidates(
             }
             Ok(false) => {}
         }
-        let decision = context
-            .as_ref()
-            .map_err(Clone::clone)
-            .and_then(|ctx| ctx.choose(&candidate.title, candidate.is_batch));
+        let decision = context.as_ref().map_err(Clone::clone).and_then(|ctx| {
+            if let Some(mapping) = pack_mappings.get(&candidate.info_hash.to_ascii_lowercase()) {
+                mapping.validate()?;
+                let expected = ctx.choose_published_entry_pack(
+                    &mapping.episodes(),
+                    // Entry-relative files may omit a season. Keep that
+                    // distinction when rebuilding the saved decision.
+                    match mapping.basis {
+                        NumberingBasis::EntryRelative => None,
+                        NumberingBasis::SeasonRelative => mapping.source_season,
+                    },
+                )?;
+                if !candidate.is_batch || expected != *mapping {
+                    return Err(
+                        "Episode mapping: published pack decision changed during search".into(),
+                    );
+                }
+                Ok(expected)
+            } else {
+                ctx.choose(&candidate.title, candidate.is_batch)
+            }
+        });
         match decision {
             Ok(mapping) if wanted.is_none_or(|n| mapping.contains_episode(n)) => {
                 candidate.release_mapping = Some(mapping);
@@ -432,6 +523,93 @@ mod tests {
         let mut invalid = restored;
         invalid.version = 2;
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn published_complete_files_prove_relative_numbering_without_clearing_the_offset() {
+        for (offset, count) in [(19, 11), (68, 4), (79, 6)] {
+            let mut ctx = context(offset);
+            ctx.expected_season = 1;
+            ctx.episode_count = Some(count);
+            assert!(ctx.choose("[MTBB] Entry (BD 1080p)", true).is_err());
+            let mapping = ctx
+                .choose_published_entry_pack(&(1..=count).collect::<Vec<_>>(), None)
+                .unwrap();
+            assert_eq!(mapping.episodes(), (1..=count).collect::<Vec<_>>());
+            assert_eq!(ctx.cumulative_offset, offset);
+            assert_eq!(mapping.offset(), 0);
+            assert_eq!(
+                mapping
+                    .resolve_file(media::EpisodeSpan::single(None, 1))
+                    .unwrap()
+                    .first,
+                1
+            );
+            assert!(
+                mapping
+                    .resolve_file(media::EpisodeSpan::single(None, count + 1))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn published_pack_evidence_refuses_partial_duplicate_extra_or_unknown_coverage() {
+        let ctx = context(24);
+        for numbers in [
+            vec![],
+            vec![1],
+            (2..=13).collect(),
+            (1..=14).collect(),
+            vec![1; 13],
+        ] {
+            assert!(
+                ctx.choose_published_entry_pack(&numbers, None).is_err(),
+                "{numbers:?}"
+            );
+        }
+        let full: Vec<_> = (1..=13).collect();
+        assert!(ctx.choose_published_entry_pack(&full, Some(1)).is_err());
+        assert!(ctx.choose_published_entry_pack(&full, Some(0)).is_err());
+        assert!(ctx.choose_published_entry_pack(&full, Some(2)).is_ok());
+        for count in [None, Some(0), Some(1), Some(MAX_PLAUSIBLE_EPISODES + 1)] {
+            let mut unknown = context(24);
+            unknown.episode_count = count;
+            assert!(unknown.choose_published_entry_pack(&full, None).is_err());
+        }
+    }
+
+    #[test]
+    fn published_pack_does_not_override_a_conflicting_provider_identity() {
+        let mut ctx = context(19);
+        ctx.episode_count = Some(12);
+        ctx.provider_plan = Some(MalEpisodePlan {
+            anilist_id: 10,
+            unsupported: false,
+            sources: vec![MalSource {
+                mal_id: 20,
+                rules: vec![MappingRule {
+                    source_first: 1,
+                    source_last: 12,
+                    target_entry: 99,
+                    target_first: 1,
+                }],
+            }],
+        });
+        assert!(
+            ctx.choose_published_entry_pack(&(1..=12).collect::<Vec<_>>(), None)
+                .is_err()
+        );
+        ctx.provider_plan.as_mut().unwrap().sources[0].rules[0].target_entry = 10;
+        assert!(
+            ctx.choose_published_entry_pack(&(1..=12).collect::<Vec<_>>(), None)
+                .is_ok()
+        );
+        ctx.provider_plan.as_mut().unwrap().sources[0].rules[0].target_first = 2;
+        assert!(
+            ctx.choose_published_entry_pack(&(1..=12).collect::<Vec<_>>(), None)
+                .is_err()
+        );
     }
 
     #[test]

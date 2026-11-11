@@ -1005,6 +1005,37 @@ pub async fn clear_episode_tag(
     Ok(())
 }
 
+/// Retire only in-flight claims this release wrote for deselected episodes.
+/// Completed rows, pinned slots and another release's current tag are retained.
+pub(crate) async fn clear_unselected_for_release(
+    db: &SqlitePool,
+    series_id: i64,
+    episodes: &[i32],
+    release_title: &str,
+) -> Result<(), sqlx::Error> {
+    if episodes.is_empty() {
+        return Ok(());
+    }
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    for episode in episodes {
+        let pinned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM episode_quality_tags WHERE series_id=? AND episode_number=? AND COALESCE(manual_override,0) != 0)")
+            .bind(series_id).bind(episode).fetch_one(&mut *tx).await?;
+        if pinned {
+            continue;
+        }
+        sqlx::query("DELETE FROM episode_quality_tags WHERE series_id=? AND episode_number=? AND release_title=? AND state='grabbed' AND COALESCE(manual_override,0)=0")
+            .bind(series_id).bind(episode).bind(release_title).execute(&mut *tx).await?;
+        sqlx::query("UPDATE episode_grab_history SET state='removed' WHERE series_id=? AND episode_number=? AND release_title=? AND state='grabbed'")
+            .bind(series_id).bind(episode).bind(release_title).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "episode_tags_selected_tests.rs"]
+mod selected_coverage_tests;
+
 /// Flip the latest `completed` grab_history row for (series_id, ep) to
 /// `replaced` — the per-episode counterpart of
 /// `grabbed_torrents::mark_replaced`. Called by post-processing when an

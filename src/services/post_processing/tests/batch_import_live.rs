@@ -36,6 +36,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::POST_PROC_TEST_SERIALIZER;
 
+#[path = "selected_file_coverage.rs"]
+mod selected_file_coverage;
+
 #[tokio::test]
 async fn verified_migration_replay_uses_file_identities_and_preserves_existing_episodes() {
     use grabbed_torrents::migration_replay::{ReplayFile, ReplayPlan};

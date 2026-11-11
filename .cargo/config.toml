@@ -7,9 +7,9 @@
 # dominates the edit-build-test loop once the dep graph is warm. Install: pacman -S mold
 # (Arch) / apt install mold (Ubuntu 22.04+).
 #
-# CI note: GitHub's ubuntu-latest runners ship with binutils ld and
-# don't have mold preinstalled — the `rust.yml` workflow installs it
-# via apt before the build steps so this config doesn't break CI.
+# CI note: GitHub's Ubuntu 24.04 runners do not have mold preinstalled.
+# The `rust.yml` workflow installs a checksum-verified official archive
+# and tests Clang + mold before the build steps.
 [target.x86_64-unknown-linux-gnu]
 linker = "clang"
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]

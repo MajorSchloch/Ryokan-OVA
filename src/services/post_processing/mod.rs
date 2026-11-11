@@ -1395,22 +1395,10 @@ async fn import_torrent(
                 // a "downloading" tag, or add a sibling series. An
                 // empty name keeps the index aligned with the client's
                 // list; every parse-based pass ignores it.
-                let filenames: Vec<String> = files
-                    .iter()
-                    .map(|f| {
-                        if f.wanted {
-                            f.name.clone()
-                        } else {
-                            String::new()
-                        }
-                    })
-                    .collect();
-                let parent_eps: Vec<i32> = cached
-                    .detail
-                    .episodes
-                    .filter(|n| *n > 0 && *n <= 1000)
-                    .map(|n| (1..=n).collect())
-                    .unwrap_or_default();
+                let filenames = crate::services::grab_commit::wanted_filenames(&files);
+                // The saved claim belongs to the actual grab. A catalog
+                // count includes deselected episodes such as recaps.
+                let parent_eps = grab.episode_numbers.clone();
                 // Synthetic grab context. The per-episode tag rows
                 // `expand_from_files` writes for new siblings get
                 // their classifications overwritten by

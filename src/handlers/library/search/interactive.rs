@@ -593,22 +593,14 @@ pub async fn search_batch_releases(
             )
             .await;
             if let Some(sid) = series_id_for_grab {
-                // Parse episode list from the batch title so every covered
-                // episode gets a per-episode `episode_quality_tags` row at
-                // grab time, not just at post-processing time. Without
-                // this the UI shows UNKNOWN for every episode of a
-                // freshly-grabbed batch — and if the user has
-                // post-processing disabled the rows never get created at
-                // all. Mirrors the auto-search-path logic at
-                // `run_auto_search_targets_with_upgrades` (look for
-                // `parse_release_numbers` above).
-                //
-                // Fallback when the title carries no explicit range
-                // (e.g. "Jellyfish Can't Swim in the Night" with no
-                // "01-12" suffix): use the series' known episode count.
-                // Capped at 1000 so a garbage AniList record can't
-                // spawn a million rows.
-                let ep_nums = batch_episode_numbers(&result.title, &detail);
+                // Preserve the automatic source-file decision through import,
+                // including entry-relative packs whose numbers overlap the
+                // franchise offset. Reviewed source coverage takes precedence.
+                let ep_nums = result
+                    .replay_episodes
+                    .clone()
+                    .or_else(|| result.release_mapping.as_ref().map(|m| m.episodes()))
+                    .unwrap_or_else(|| batch_episode_numbers(&result.title, &detail));
                 let saved = crate::models::grabbed_torrents::source_replay::record(
                     &state.db,
                     &canonical_id,
@@ -616,14 +608,14 @@ pub async fn search_batch_releases(
                     sid,
                     &ep_nums,
                     result.is_batch,
-                    None,
+                    result.release_mapping.as_ref(),
                     None,
                     crate::models::grabbed_torrents::source_replay::SourceRef {
                         url: &url,
                         guid: &result.source_guid,
                         indexer_id: result.indexer_id,
                         client_id: Some(dispatch_client_id),
-                        required_replay: false,
+                        required_replay: result.replay_episodes.is_some(),
                     },
                 )
                 .await
