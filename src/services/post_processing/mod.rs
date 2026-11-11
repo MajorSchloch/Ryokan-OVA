@@ -1693,7 +1693,7 @@ async fn import_torrent(
                 let special = media::is_tv_format(&owner.format)
                     && (span.special || media::path_names_specials(Path::new(&file.name)));
                 if !special {
-                    let mapped = mapping.resolve_file(span)?;
+                    let mapped = mapping.resolve_named_file(basename)?;
                     actual_episodes.extend(mapped.first..=mapped.last);
                 }
             }

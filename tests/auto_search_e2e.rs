@@ -1718,6 +1718,8 @@ mod numeric_title_identity;
 mod related_release_identity;
 #[path = "auto_search_e2e/requirements_retry.rs"]
 mod requirements_retry;
+#[path = "auto_search_e2e/structural_season_numbering.rs"]
+mod structural_season_numbering;
 #[path = "auto_search_e2e/upgrade_sweep.rs"]
 mod upgrade_sweep;
 
