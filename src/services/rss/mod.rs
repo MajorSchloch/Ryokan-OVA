@@ -306,6 +306,10 @@ struct CandidateDecision {
 struct SeriesMeta {
     series: series::Series,
     original_aliases: Vec<String>,
+    /// Full cached provider names only. They never define canonical
+    /// season/part numbers or the core aliases used for family mapping.
+    provider_aliases: Vec<String>,
+    related_identity: Option<auto_search::SiblingRejectPrecompute>,
     aliases: Vec<String>,
     core_aliases: Vec<String>,
     collapsed_aliases: Vec<String>,
@@ -357,6 +361,8 @@ impl SeriesMeta {
         Self {
             series: series.clone(),
             original_aliases: aliases,
+            provider_aliases: Vec::new(),
+            related_identity: None,
             aliases: expanded,
             core_aliases,
             collapsed_aliases,
@@ -365,6 +371,39 @@ impl SeriesMeta {
             target_parts,
         }
     }
+
+    fn with_cached_detail(mut self, detail: &crate::services::anilist::AnimeDetail) -> Self {
+        self.provider_aliases = auto_search::collect_synonym_aliases(detail)
+            .iter()
+            .map(|name| auto_search::normalize_title(name))
+            .collect();
+        let own = [self.original_aliases.clone(), self.provider_aliases.clone()].concat();
+        let related = auto_search::collect_related_identity_aliases(detail, &own);
+        if !related.is_empty() {
+            self.related_identity =
+                Some(auto_search::SiblingRejectPrecompute::build(&own, &related));
+        }
+        self
+    }
+}
+
+/// Read existing metadata once per series at pass construction. Feed-item
+/// matching below stays entirely in memory, including when the cache is absent
+/// or malformed; this path must never hydrate metadata from a provider.
+async fn load_series_meta(db: &sqlx::SqlitePool, tracked: &[series::Series]) -> Vec<SeriesMeta> {
+    let mut result = Vec::with_capacity(tracked.len());
+    for series in tracked {
+        let mut meta = SeriesMeta::from_series(series);
+        if let Ok(Some(cached)) =
+            crate::models::metadata_cache::get_by_series_id(db, series.id).await
+            && cached.provider_id == series.anilist_id
+            && cached.detail.id == series.anilist_id
+        {
+            meta = meta.with_cached_detail(&cached.detail);
+        }
+        result.push(meta);
+    }
+    result
 }
 
 fn series_alias_views(aliases: &[String], season_num: Option<i32>) -> [Vec<String>; 4] {
@@ -737,7 +776,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
 
     let whitelist = quality::parse_group_list(&cfg.preferred_groups);
     let blacklist = quality::parse_group_list(&cfg.blocked_groups);
-    let all_meta: Vec<SeriesMeta> = tracked.iter().map(SeriesMeta::from_series).collect();
+    let all_meta = load_series_meta(&state.db, &tracked).await;
     let mut canonical_history =
         load_canonical_history(&state.db, nyaa_client.as_deref(), &all_meta).await;
 
@@ -1843,7 +1882,7 @@ pub async fn match_library_title(
     if all_series.is_empty() {
         return None;
     }
-    let all_meta: Vec<SeriesMeta> = all_series.iter().map(SeriesMeta::from_series).collect();
+    let all_meta = load_series_meta(db, &all_series).await;
     // Synthetic RssItem for the matcher — `source` doesn't matter
     // here because this path is title-only matching for the
     // post-grab attribution helper, not a sync-time fetch.
@@ -2513,6 +2552,7 @@ fn best_series_match(item: &RssItem, all_meta: &[SeriesMeta]) -> Option<MatchRes
     let parsed = parse_release(item);
     let item_tokens = auto_search::token_set(&parsed.normalized_title);
     let item_core_tokens = auto_search::token_set(&parsed.core_title);
+    let padded_title = format!(" {} ", parsed.normalized_title);
 
     let mut best: Option<(f32, MatchResult)> = None;
     let title_numbers = auto_search::TitleNumberEvidence::new(&item.title);
@@ -2528,6 +2568,11 @@ fn best_series_match(item: &RssItem, all_meta: &[SeriesMeta]) -> Option<MatchRes
     };
 
     for meta in all_meta {
+        if meta.related_identity.as_ref().is_some_and(|related| {
+            auto_search::sibling_match_rejects(&parsed.normalized_title, &item_tokens, related)
+        }) {
+            continue;
+        }
         // A Part/Cour is its own release identity, never a TV season.
         // These checks precede alias scoring so a stripped core alias
         // cannot rescue a different season or part.
@@ -2551,6 +2596,11 @@ fn best_series_match(item: &RssItem, all_meta: &[SeriesMeta]) -> Option<MatchRes
         } else {
             std::borrow::Cow::Borrowed(meta.original_aliases.as_slice())
         };
+        // A provider name without the target's number cannot rescue a
+        // canonical title whose number came only from the episode payload.
+        if eligible.is_empty() {
+            continue;
+        }
         let filtered_views = matches!(eligible, std::borrow::Cow::Owned(_))
             .then(|| series_alias_views(&eligible, meta.season_num));
         let alias_set = match &filtered_views {
@@ -2574,7 +2624,31 @@ fn best_series_match(item: &RssItem, all_meta: &[SeriesMeta]) -> Option<MatchRes
                 collapsed_core_aliases: &meta.collapsed_core_aliases,
             },
         };
-        let alias_score = score_alias_overlap(&item_view, &alias_set);
+        let provider_aliases = if filter_numbers {
+            title_numbers.filter_aliases(&meta.provider_aliases)
+        } else {
+            std::borrow::Cow::Borrowed(meta.provider_aliases.as_slice())
+        };
+        // Full provider aliases get exact token-boundary matching only.
+        // Do not derive shorter cores or family aliases from them.
+        let provider_exact = provider_aliases
+            .iter()
+            .any(|alias| padded_title.contains(&format!(" {alias} ")));
+        let provider_score = if provider_exact {
+            let strict_aliases: Vec<_> = eligible
+                .iter()
+                .chain(provider_aliases.iter())
+                .cloned()
+                .collect();
+            if auto_search::names_more_than_the_series(&item.title, &strict_aliases) {
+                0.0
+            } else {
+                1.0
+            }
+        } else {
+            0.0
+        };
+        let alias_score = score_alias_overlap(&item_view, &alias_set).max(provider_score);
         if alias_score < 0.82 {
             continue;
         }
