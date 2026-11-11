@@ -194,9 +194,9 @@ impl Resolution {
         }
     }
 
-    /// Derive resolution from explicit pixel dimensions. Used by ffprobe layer
-    /// in Phase 2, and by Layer 1 for cross-referencing against mentioned
-    /// dimensions like "1920x1080".
+    /// Derive resolution from the pixel height. Layer 1 uses this for
+    /// dimensions mentioned in a release title. Measured video uses
+    /// [`Self::from_observed_dimensions`] to retain widescreen crop tiers.
     ///
     /// The height thresholds are loose lower-bounds to absorb anamorphic and
     /// cropped content — NTSC DVD (480), PAL DVD (576), and all the common
@@ -215,6 +215,27 @@ impl Resolution {
             Resolution::R480p
         } else {
             Resolution::Unknown
+        }
+    }
+
+    /// Derive an observed video tier, retaining the width tier for
+    /// widescreen crops such as 1920x816 and 3840x1600. Both dimensions
+    /// must be known. This is shared by file classification and requirements.
+    pub fn from_observed_dimensions(width: u32, height: u32) -> Self {
+        if width == 0 || height == 0 {
+            return Resolution::Unknown;
+        }
+        let by_width = match width {
+            3800.. => Resolution::R2160p,
+            1850.. => Resolution::R1080p,
+            1200.. => Resolution::R720p,
+            _ => Resolution::Unknown,
+        };
+        let by_height = Self::from_dimensions(width, height);
+        if by_width.rank() > by_height.rank() {
+            by_width
+        } else {
+            by_height
         }
     }
 }

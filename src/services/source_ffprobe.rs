@@ -520,6 +520,14 @@ pub fn scan_ffprobe_json(json: &str) -> FfprobeClassification {
     scan_ffprobe_json_with_facts(json).1
 }
 
+fn video_disposition(stream: &Value, name: &str) -> bool {
+    // Match the disposition flags used by media_info and requirements.
+    stream
+        .get("disposition")
+        .and_then(|flags| flags.get(name))
+        .is_some_and(|value| value.as_i64() == Some(1) || value.as_bool() == Some(true))
+}
+
 /// Internal variant that also returns the intermediate [`ProbeFacts`]
 /// bag. Used by `scan_ffprobe_json_logged` to emit a structured debug
 /// summary of every probe — the observed dimensions, codecs, and
@@ -535,9 +543,25 @@ fn scan_ffprobe_json_with_facts(json: &str) -> (ProbeFacts, FfprobeClassificatio
         return (ProbeFacts::default(), FfprobeClassification::default());
     };
 
+    // Use the same primary video as requirements: first default real
+    // video, otherwise first real video. A later auxiliary image may
+    // lack attached_pic and must not overwrite the main video's facts.
+    let mut videos = streams.iter().enumerate().filter(|(_, stream)| {
+        stream
+            .get("codec_type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("video"))
+            && !video_disposition(stream, "attached_pic")
+    });
+    let primary_video = videos
+        .clone()
+        .find(|(_, stream)| video_disposition(stream, "default"))
+        .or_else(|| videos.next())
+        .map(|(index, _)| index);
+
     // First pass: collect the facts we need for the rule evaluation.
     let mut facts = ProbeFacts::default();
-    for s in streams {
+    for (index, s) in streams.iter().enumerate() {
         let codec_type = s
             .get("codec_type")
             .and_then(|v| v.as_str())
@@ -551,27 +575,7 @@ fn scan_ffprobe_json_with_facts(json: &str) -> (ProbeFacts, FfprobeClassificatio
 
         match codec_type.as_str() {
             "video" => {
-                // Skip attached-picture streams (cover art, album thumbnails,
-                // poster frames). ffprobe labels them `codec_type = "video"`
-                // but their dimensions are the cover image (often small and
-                // portrait — 600x900 posters, 300x400 thumbnails) rather
-                // than the actual video track. Without this guard they'd
-                // overwrite the real video stream's width/height when they
-                // sit later in the streams array, which is how an EMBER
-                // Wajutsushi release came back with the 1080p main track
-                // silently replaced by a ~150-tall thumbnail — the height
-                // dropped below the `from_dimensions` 460-pixel floor so
-                // every affected episode rendered with no resolution tag
-                // at all. Check `disposition.attached_pic` (ffprobe sets it
-                // to 1 for these streams) and treat it as "not a real video
-                // stream" — skip it entirely.
-                let attached_pic = s
-                    .get("disposition")
-                    .and_then(|d| d.get("attached_pic"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0)
-                    != 0;
-                if attached_pic {
+                if Some(index) != primary_video {
                     continue;
                 }
                 facts.has_video = true;
@@ -635,7 +639,7 @@ fn scan_ffprobe_json_with_facts(json: &str) -> (ProbeFacts, FfprobeClassificatio
     // Observed resolution — always set if we have a video stream with
     // readable dimensions, even when no source evidence fires.
     if facts.width > 0 && facts.height > 0 {
-        let res = Resolution::from_dimensions(facts.width, facts.height);
+        let res = Resolution::from_observed_dimensions(facts.width, facts.height);
         if res != Resolution::Unknown {
             out.resolution = Some(res);
         }
@@ -790,6 +794,144 @@ struct ProbeFacts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_beast_tamer_main_video_is_not_replaced_by_later_jpeg() {
+        // Actual cached E01: default HEVC 1080p precedes a JPEG video
+        // without attached_pic. The old last-video rule reported 576p.
+        let json = include_str!("../../tests/fixtures/ffprobe/beast-tamer-e01-primary-video.json");
+        let (facts, out) = scan_ffprobe_json_with_facts(json);
+        assert_eq!(out.resolution, Some(Resolution::R1080p));
+        assert_eq!((facts.width, facts.height), (1920, 1080));
+        assert_eq!(facts.video_codec, "hevc");
+        assert_eq!(facts.bit_depth, 10);
+        assert_eq!(facts.audio_codecs, ["aac", "aac"]);
+    }
+
+    #[test]
+    fn primary_video_uses_first_default_or_first_real_stream() {
+        let plain = video_stream("hevc", 1280, 720, "yuv420p10le");
+        let mut default = video_stream("h264", 1920, 1080, "yuv420p");
+        default["disposition"] = serde_json::json!({"default":1});
+        let mut later_default = video_stream("av1", 3840, 2160, "yuv420p12le");
+        later_default["disposition"] = serde_json::json!({"default":true});
+        for (streams, expected, codec, depth) in [
+            (
+                vec![plain.clone(), default.clone()],
+                Resolution::R1080p,
+                "h264",
+                8,
+            ),
+            (
+                vec![default.clone(), later_default.clone()],
+                Resolution::R1080p,
+                "h264",
+                8,
+            ),
+            (
+                vec![plain.clone(), later_default],
+                Resolution::R2160p,
+                "av1",
+                12,
+            ),
+            (
+                vec![plain, video_stream("h264", 1920, 1080, "yuv420p")],
+                Resolution::R720p,
+                "hevc",
+                10,
+            ),
+        ] {
+            let (facts, out) = scan_ffprobe_json_with_facts(&probe_json(streams));
+            assert_eq!(out.resolution, Some(expected));
+            assert_eq!(facts.video_codec, codec);
+            assert_eq!(facts.bit_depth, depth);
+        }
+    }
+
+    #[test]
+    fn primary_video_skips_attached_defaults_without_falling_past_missing_dimensions() {
+        let mut attached = attached_pic_stream("mjpeg", 3840, 2160);
+        attached["disposition"]["default"] = serde_json::json!(true);
+        attached["disposition"]["attached_pic"] = serde_json::json!(true);
+        assert!(
+            scan_ffprobe_json(&probe_json(vec![attached.clone()]))
+                .resolution
+                .is_none()
+        );
+        let main = video_stream("hevc", 1280, 720, "yuv420p10le");
+        let out = scan_ffprobe_json(&probe_json(vec![attached.clone(), main, attached]));
+        assert_eq!(out.resolution, Some(Resolution::R720p));
+
+        let mut missing = video_stream("hevc", 0, 0, "yuv420p10le");
+        missing.as_object_mut().unwrap().remove("width");
+        missing.as_object_mut().unwrap().remove("height");
+        missing["disposition"] = serde_json::json!({"default":1});
+        let out = scan_ffprobe_json(&probe_json(vec![
+            video_stream("h264", 1920, 1080, "yuv420p"),
+            missing,
+        ]));
+        assert!(out.resolution.is_none());
+    }
+
+    #[test]
+    fn primary_video_keeps_audio_and_subtitle_evidence_from_all_streams() {
+        let (facts, out) = scan_ffprobe_json_with_facts(&probe_json(vec![
+            audio_stream_with_title("eac3", "Director Commentary"),
+            video_stream("hevc", 1920, 1080, "yuv420p10le"),
+            video_stream("h264", 400, 564, "yuv420p"),
+            audio_stream("flac"),
+            subtitle_stream("hdmv_pgs_subtitle"),
+        ]));
+        assert_eq!(out.resolution, Some(Resolution::R1080p));
+        assert_eq!(facts.video_codec, "hevc");
+        assert_eq!(facts.bit_depth, 10);
+        assert_eq!(facts.audio_codecs, ["eac3", "flac"]);
+        assert!(facts.has_commentary);
+        assert!(facts.has_pgs_subs);
+        assert!(
+            out.evidence
+                .iter()
+                .any(|e| e.detail == "HEVC + FLAC + 10-bit BD encode fingerprint")
+        );
+    }
+
+    #[test]
+    fn cropped_hd_video_keeps_its_observed_resolution_tier() {
+        for (width, height, expected) in [
+            (1920, 816, Resolution::R1080p),
+            (1920, 800, Resolution::R1080p),
+            (3840, 1600, Resolution::R2160p),
+            (1280, 536, Resolution::R720p),
+        ] {
+            let out = scan_ffprobe_json(&probe_json(vec![video_stream(
+                "hevc",
+                width,
+                height,
+                "yuv420p10le",
+            )]));
+            assert_eq!(out.resolution, Some(expected), "{width}x{height}");
+        }
+    }
+
+    #[test]
+    fn observed_resolution_preserves_sd_and_missing_dimension_controls() {
+        for (width, height, expected) in [
+            (1280, 720, Some(Resolution::R720p)),
+            (704, 480, Some(Resolution::R480p)),
+            (720, 576, Some(Resolution::R576p)),
+            (640, 360, None),
+            (0, 1080, None),
+            (1920, 0, None),
+        ] {
+            let out = scan_ffprobe_json(&probe_json(vec![video_stream(
+                "hevc",
+                width,
+                height,
+                "yuv420p10le",
+            )]));
+            assert_eq!(out.resolution, expected, "{width}x{height}");
+        }
+    }
 
     /// Minimal ffprobe-shaped JSON builder for tests. Composes a root with
     /// a single video stream and an arbitrary list of audio/subtitle streams.

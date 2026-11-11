@@ -240,6 +240,183 @@ pub fn build_requirements_upgrade_targets(
 mod tests {
     use super::*;
 
+    #[test]
+    fn primary_video_classification_matches_requirements_and_target_stop() {
+        use crate::services::{media_info, source_ffprobe};
+
+        let policy = Policy::from_config(&crate::models::config::Config {
+            media_requirements_enabled: true,
+            target_resolution: "1080".into(),
+            required_subtitle_languages: "en".into(),
+            ..Default::default()
+        });
+        let fixture =
+            include_str!("../../../tests/fixtures/ffprobe/beast-tamer-e01-primary-video.json");
+        for (main_width, main_height, auxiliary_width, auxiliary_height, expected, target_met) in [
+            (1920, 1080, 400, 564, Resolution::R1080p, true),
+            // A higher-resolution auxiliary stream cannot satisfy the target.
+            (1280, 720, 3840, 2160, Resolution::R720p, false),
+        ] {
+            let mut probe: serde_json::Value = serde_json::from_str(fixture).unwrap();
+            probe["streams"][0]["width"] = main_width.into();
+            probe["streams"][0]["height"] = main_height.into();
+            probe["streams"][5]["width"] = auxiliary_width.into();
+            probe["streams"][5]["height"] = auxiliary_height.into();
+            let json = probe.to_string();
+            let classified = source_ffprobe::scan_ffprobe_json(&json);
+            let info = media_info::parse_probe_json(
+                &json,
+                media_info::FileIdentity {
+                    size: 1,
+                    mtime_ns: "1".into(),
+                    device: None,
+                    inode: None,
+                },
+                true,
+            )
+            .unwrap();
+            let observed = policy.observe(&info);
+            assert_eq!(classified.resolution, Some(expected));
+            assert_eq!(observed.resolution, expected);
+            assert!(observed.subtitles_satisfied);
+            assert_eq!(policy.target_met(&observed), target_met);
+            let targets = build_requirements_upgrade_targets(
+                &[requirement_file(1)],
+                &[1],
+                &HashMap::new(),
+                &policy,
+                &HashMap::from([(1, observed)]),
+            );
+            assert_eq!(targets.is_empty(), target_met);
+            if !target_met {
+                assert!(matches!(targets[0].0, SearchTarget::Episode(1)));
+                assert_eq!(targets[0].1.resolution, Resolution::R720p);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cropped_hd_files_stop_at_target_despite_stale_tags() {
+        use crate::models::{episode_tags, media_probe_cache};
+        use crate::services::{media_info, media_requirements, source_ffprobe};
+
+        let db = crate::test_support::in_memory_pool().await;
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().join("Show");
+        std::fs::create_dir(&folder).unwrap();
+        let series_id = crate::test_support::seed_series(&db, 1, "Show").await;
+        let cfg = crate::models::config::Config {
+            media_root: temp.path().to_str().unwrap().into(),
+            media_requirements_enabled: true,
+            minimum_resolution: "720".into(),
+            target_resolution: "1080".into(),
+            minimum_subtitle_check: true,
+            target_subtitle_check: true,
+            required_subtitle_languages: "en".into(),
+            subtitle_language_match: "all".into(),
+            ..Default::default()
+        };
+        let policy = Policy::from_config(&cfg);
+
+        // E1 meets the target despite its old 720p label. E2 is really
+        // 720p; E3 is cropped 1080p with signs-only English subtitles.
+        for (ep, width, height, subtitle_title) in [
+            (1, 1920, 816, "Full English"),
+            (2, 1280, 720, "Full English"),
+            (3, 1920, 816, "English Signs & Songs"),
+        ] {
+            let path = folder.join(format!("Show - S01E{ep:02} [1080p BluRay].mkv"));
+            std::fs::write(&path, b"probe-cache fixture").unwrap();
+            let canonical = std::fs::canonicalize(&path).unwrap();
+            let meta = std::fs::metadata(&canonical).unwrap();
+            let identity = media_info::FileIdentity::from_metadata(&meta).unwrap();
+            let probe = serde_json::json!({
+                "streams": [
+                    {"codec_type":"video", "codec_name":"hevc", "width":width,
+                     "height":height, "pix_fmt":"yuv420p10le", "disposition":{"default":1}},
+                    {"codec_type":"audio", "codec_name":"flac", "tags":{"language":"jpn"}},
+                    {"codec_type":"subtitle", "codec_name":"ass",
+                     "tags":{"language":"eng", "title":subtitle_title},
+                     "disposition":{"forced":0}}
+                ],
+                "format":{"duration":"2880.0"}
+            });
+            media_probe_cache::upsert_identified(
+                &db,
+                canonical.to_str().unwrap(),
+                &identity.cache_key(),
+                meta.len() as i64,
+                &probe.to_string(),
+            )
+            .await;
+
+            // Exercise the same cached-file classifier used after import.
+            let classification = source::classify_post_download(
+                &db,
+                &canonical,
+                Some(&folder),
+                "[Group] Show (BD 1080p)",
+                None,
+                true,
+            )
+            .await;
+            assert_eq!(
+                classification.resolution,
+                if ep == 2 {
+                    Resolution::R720p
+                } else {
+                    Resolution::R1080p
+                }
+            );
+            if ep == 1 {
+                assert_eq!(classification.label(), "BD-1080p");
+            }
+            let mut stored = classification;
+            if ep == 1 {
+                stored.resolution = Resolution::R720p;
+            }
+            episode_tags::record_grab(
+                &db,
+                series_id,
+                ep,
+                &stored,
+                "original release",
+                "Group",
+                1,
+                true,
+            )
+            .await
+            .unwrap();
+            // The cache is a real identity-bound probe, not a hand-built Observed.
+            assert!(
+                source_ffprobe::classify_ffprobe(&db, &canonical)
+                    .await
+                    .resolution
+                    .is_some()
+            );
+        }
+        episode_tags::mark_completed(&db, series_id, &[1, 2, 3])
+            .await
+            .unwrap();
+        let tags = episode_tags::get_for_series(&db, series_id).await.unwrap();
+        assert_eq!(tags[&1].quality_tag, "BD-720p");
+        let files = media::scan_series_folder(&cfg.media_root, "Show").await;
+        let observed = media_requirements::observe_files(&db, &cfg, "Show", &files).await;
+        assert!(policy.target_met(&observed[&1]));
+        assert!(!policy.target_met(&observed[&2]));
+        assert!(!policy.target_met(&observed[&3]));
+        let targets =
+            build_requirements_upgrade_targets(&files, &[1, 2, 3], &tags, &policy, &observed);
+        let episodes: Vec<_> = targets
+            .iter()
+            .map(|(target, _)| match target {
+                SearchTarget::Episode(ep) => *ep,
+                SearchTarget::Single => panic!("expected episode target"),
+            })
+            .collect();
+        assert_eq!(episodes, [2, 3]);
+    }
+
     fn requirement_file(ep: i32) -> media::EpisodeFile {
         media::EpisodeFile {
             filename: format!("Show - S01E{ep:02}.mkv"),
