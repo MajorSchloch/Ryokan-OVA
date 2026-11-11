@@ -18,6 +18,9 @@ use crate::services::{auto_search, media};
 static SOURCE_EPISODE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?:^|[\s._-])(?P<payload>(?:s\d{1,2}e|-\s*|e(?:p\.?)?|episode\s+)(?P<number>\d{1,4})(?:v\d+)?(?:(?:\s*[-~]\s*(?:e(?:p\.?)?)?|e)\d{1,4}(?:v\d+)?)*)\b").unwrap()
 });
+static SOURCE_PACK_RANGE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:^|[\s._])(?P<payload>(?P<number>\d{1,4})(?:v\d+)?\s*[-~]\s*(?:e(?:p\.?)?)?\d{1,4}(?:v\d+)?(?:(?:\s*[-~]\s*(?:e(?:p\.?)?)?|e)\d{1,4}(?:v\d+)?)*)\b").unwrap()
+});
 static SOURCE_SEASON: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(?:s(\d{1,2})|season\s*(\d{1,2})|(\d{1,2})(?:st|nd|rd|th)\s+season)\b")
         .unwrap()
@@ -33,7 +36,10 @@ struct SourceHeading {
     first_episode: Option<i32>,
 }
 
-fn source_heading(title: &str) -> Result<SourceHeading, String> {
+fn source_heading(title: &str, marked_batch: bool) -> Result<SourceHeading, String> {
+    if title.len() > media::MAX_RELEASE_TITLE_BYTES {
+        return Err("Episode mapping: source title exceeds the maximum length".into());
+    }
     // Preserve byte positions and word boundaries while excluding groups
     // and metadata. Malformed nesting cannot establish source evidence.
     let mut masked = String::with_capacity(title.len());
@@ -63,7 +69,78 @@ fn source_heading(title: &str) -> Result<SourceHeading, String> {
     if !brackets.is_empty() {
         return Err("Episode mapping: malformed source heading brackets".into());
     }
-    let first_payload = SOURCE_EPISODE.captures(&masked);
+    // A caller-recognized pack can use a plain 01-12 range. A marked whole
+    // season may omit its range; choose still requires its count and provider map.
+    let mut first_payload = SOURCE_EPISODE.captures(&masked);
+    let mut plain_pack_range = false;
+    {
+        for candidate in SOURCE_PACK_RANGE.captures_iter(&masked) {
+            let payload = candidate.name("payload").expect("a range has a payload");
+            let number = candidate
+                .name("number")
+                .expect("a range has a first number");
+            let season_marker = SOURCE_SEASON.captures_iter(&masked).find_map(|season| {
+                (1..=3)
+                    .filter_map(|index| season.get(index))
+                    .any(|value| value.start() == number.start())
+                    .then(|| season.get(0).expect("a season has a whole match"))
+            });
+            if payload.as_str().contains(char::is_whitespace)
+                && let Some(season_marker) = season_marker
+            {
+                // A spaced range cannot borrow the heading's Season 2 as
+                // its left endpoint. English ordinal wording is ambiguous
+                // here, so hold "Second Season 01 - 26" rather than keep 26.
+                let preceding = masked[..season_marker.start()]
+                    .split(|ch: char| !ch.is_ascii_alphanumeric())
+                    .rev()
+                    .find(|word| !word.is_empty())
+                    .unwrap_or("");
+                if matches!(
+                    preceding.to_ascii_lowercase().as_str(),
+                    "first"
+                        | "second"
+                        | "third"
+                        | "fourth"
+                        | "fifth"
+                        | "sixth"
+                        | "seventh"
+                        | "eighth"
+                        | "ninth"
+                        | "tenth"
+                ) {
+                    return Err("Episode mapping: ambiguous season and pack range boundary".into());
+                }
+                continue;
+            }
+            if first_payload.as_ref().is_none_or(|first| {
+                first
+                    .name("payload")
+                    .expect("an episode has a payload")
+                    .start()
+                    > payload.start()
+            }) {
+                if !marked_batch {
+                    if SOURCE_SEASON.captures_iter(&masked).any(|season| {
+                        season
+                            .get(0)
+                            .is_some_and(|marker| marker.end() <= payload.start())
+                    }) {
+                        return Err(
+                            "Episode mapping: plain pack range requires a marked batch".into()
+                        );
+                    }
+                    // Without an earlier structural season, the left number
+                    // can belong to the canonical title: "Adventure 02 - 03".
+                    // Its identity is checked upstream; keep the strict marker.
+                    continue;
+                }
+                first_payload = Some(candidate);
+                plain_pack_range = true;
+            }
+            break;
+        }
+    }
     let boundary = first_payload
         .as_ref()
         .and_then(|captures| captures.name("payload"))
@@ -78,7 +155,11 @@ fn source_heading(title: &str) -> Result<SourceHeading, String> {
     };
     for captures in SOURCE_SEASON.captures_iter(&masked) {
         let marker = captures.get(0).expect("a season capture has a whole match");
-        if boundary.is_none_or(|start| marker.start() >= start) {
+        if boundary.is_some_and(|start| marker.start() < start && marker.end() > start) {
+            // In "Second Season 01-26", the range's 01 is not Season 1.
+            continue;
+        }
+        if boundary.map_or(!marked_batch, |start| marker.start() >= start) {
             return Err("Episode mapping: source season is outside the release heading".into());
         }
         let number = (1..=3)
@@ -97,10 +178,16 @@ fn source_heading(title: &str) -> Result<SourceHeading, String> {
             .map_err(|_| "Episode mapping: invalid source season".to_string())?;
         record(number)?;
     }
-    let payload_span = boundary.and_then(|start| {
-        // The strict dash parser needs its leading separator space.
-        media::parse_episode_span(&format!(" {}", &masked[start..]).to_ascii_lowercase())
-    });
+    let payload_span = if plain_pack_range {
+        // The strict file parser can read a later spaced range endpoint as
+        // a single episode. This batch-only range uses the isolated parser.
+        None
+    } else {
+        boundary.and_then(|start| {
+            // The strict dash parser needs its leading separator space.
+            media::parse_episode_span(&format!(" {}", &masked[start..]).to_ascii_lowercase())
+        })
+    };
     let number = first_payload
         .as_ref()
         .and_then(|captures| captures.name("number"));
@@ -209,10 +296,10 @@ impl ReleaseMapping {
     /// Validate the actual filename's source heading as well as its strict
     /// episode span. A saved Season 2 decision cannot import Season 3 - 03.
     pub fn resolve_named_file(&self, filename: &str) -> Result<MappedFile, String> {
+        let heading = source_heading(filename, false)?;
         let span = media::parse_episode_span(&filename.to_ascii_lowercase()).ok_or_else(|| {
             "Episode mapping: file has no identifiable episode number".to_string()
         })?;
-        let heading = source_heading(filename)?;
         if (heading.season.is_some() && heading.payload_span.is_none())
             || heading
                 .season
@@ -273,6 +360,7 @@ impl NumberingContext {
     /// No requested episode enters this function. Counts bound a decision;
     /// they never choose between relative and continuous numbering.
     pub fn choose(&self, title: &str, is_batch: bool) -> Result<ReleaseMapping, String> {
+        let heading = source_heading(title, is_batch)?;
         if self.anilist_id == 0 || (self.tv_series && media::is_special_release(title)) {
             return Err("Episode mapping: source episode needs an explicit mapping".into());
         }
@@ -280,7 +368,6 @@ impl NumberingContext {
         if span.is_some_and(|s| s.season == Some(0)) {
             return Err("Episode mapping: season zero needs an explicit mapping".into());
         }
-        let heading = source_heading(title)?;
         let explicit_season = heading.season;
         if !is_batch && explicit_season.is_some() && heading.payload_span.is_none() {
             return Err("Episode mapping: source heading has no strict episode payload".into());
@@ -322,6 +409,7 @@ impl NumberingContext {
         numbers.sort_unstable();
         if is_batch
             && explicit_season.is_some()
+            && heading.first_episode.is_some()
             && (numbers.is_empty() || numbers.first().copied() != heading.first_episode)
         {
             return Err("Episode mapping: conflicting source batch payload".into());
@@ -694,6 +782,14 @@ mod tests {
         tv.expected_season = 2;
         let mapping = tv.choose("Show Season 2 - 03", false).unwrap();
         assert_eq!(mapping.episodes(), vec![3]);
+        assert_eq!(
+            context(0)
+                .choose("[Keyword] Digimon Adventure 02 - 03 [BD 1080p]", false)
+                .unwrap()
+                .episodes(),
+            [3],
+            "a canonical numeric title is not an earlier episode range"
+        );
         assert!(context(0).choose("Show OVA 01", false).is_err());
         let mut ova = context(0);
         ova.tv_series = false;
@@ -778,6 +874,75 @@ mod tests {
             assert!(context(12).choose(title, false).is_err(), "{title}");
         }
         assert!(context(0).choose("Show Season 2 - 03", false).is_err());
+    }
+
+    #[test]
+    fn marked_packs_keep_plain_ranges_and_known_complete_seasons() {
+        for title in [
+            "[Fixture] Different Voyage S02 01-12 (Batch BD 1080p)",
+            "[Fixture] Night Voyage Season 2 01-12 (Batch BD 1080p)",
+            "[Fixture] Night Voyage 2nd Season 01-12 (Batch BD 1080p)",
+            "[Fixture] Different Voyage S02 01 - 12 (Batch BD 1080p)",
+            "[Fixture] Night Voyage Season 2 01 - 12 (Batch BD 1080p)",
+            "[Fixture] Night Voyage Season 2 01 ~ 12 (Batch BD 1080p)",
+        ] {
+            assert_eq!(
+                context(12).choose(title, true).unwrap().episodes(),
+                (1..=12).collect::<Vec<_>>(),
+                "{title}"
+            );
+            assert!(context(12).choose(title, false).is_err(), "{title}");
+        }
+        let mut monogatari = context(0);
+        monogatari.episode_count = Some(26);
+        for title in [
+            "[Fixture] Monogatari Series Second Season 01-26 (Batch BD 1080p)",
+            "[a-S_subs] Monogatari Second Season 1-26 (BDRip 1080p x265 AC3)",
+        ] {
+            let mapping = monogatari.choose(title, true).unwrap();
+            assert_eq!(mapping.episodes(), (1..=26).collect::<Vec<_>>());
+            assert_eq!(mapping.basis, NumberingBasis::EntryRelative);
+        }
+        assert!(
+            monogatari
+                .choose("Monogatari Second Season 01 - 26 (Batch BD 1080p)", true)
+                .is_err(),
+            "an ambiguous boundary must not truncate a pack to episode 26"
+        );
+        for title in [
+            "Show Season 2 Complete [BD 1080p]",
+            "Show S02 [Batch BD 1080p]",
+            "Show 2nd Season [BD 1080p]",
+        ] {
+            assert_eq!(
+                context(12).choose(title, true).unwrap().episodes(),
+                (1..=13).collect::<Vec<_>>(),
+                "the marked pack's known count remains the existing contract: {title}"
+            );
+            assert!(context(12).choose(title, false).is_err());
+        }
+        for title in [
+            "Show 3rd Season Complete [BD 1080p]",
+            "Show [Season 2] Complete [BD 1080p]",
+            "[S2] Show Complete [BD 1080p]",
+            "Show [BD 1080p]",
+            "Show Season 2 Season 3 Complete [BD 1080p]",
+        ] {
+            assert!(context(12).choose(title, true).is_err(), "{title}");
+        }
+        assert!(
+            returner_context()
+                .choose("Show Season 2 Complete", true)
+                .is_err()
+        );
+        let mut partial_provider = returner_context();
+        partial_provider.episode_count = Some(12);
+        assert!(
+            partial_provider
+                .choose("Show Season 2 Complete", true)
+                .is_err(),
+            "a known count cannot fill gaps in the provider's four-episode map"
+        );
     }
 
     #[test]
@@ -989,5 +1154,41 @@ mod tests {
                 .is_err()
         );
         assert!(context(0).choose("Show - 00", false).is_err());
+    }
+
+    #[test]
+    fn source_heading_enforces_the_existing_byte_limit_without_truncation() {
+        let prefix = "Show S02E03 [";
+        let suffix = "].mkv";
+        let title = format!(
+            "{prefix}{}{suffix}",
+            "x".repeat(media::MAX_RELEASE_TITLE_BYTES - prefix.len() - suffix.len())
+        );
+        assert_eq!(title.len(), media::MAX_RELEASE_TITLE_BYTES);
+        let ctx = context(12);
+        let mapping = ctx.choose(&title, false).unwrap();
+        assert_eq!(mapping.episodes(), [3]);
+        assert_eq!(mapping.resolve_named_file(&title).unwrap().first, 3);
+        for oversized in [
+            format!("{title}x"),
+            "あ".repeat(media::MAX_RELEASE_TITLE_BYTES / 3 + 1),
+            "Season 1 - 01 ".repeat(media::MAX_RELEASE_TITLE_BYTES),
+        ] {
+            assert!(oversized.len() > media::MAX_RELEASE_TITLE_BYTES);
+            assert!(
+                ctx.choose(&oversized, true)
+                    .unwrap_err()
+                    .contains("maximum length")
+            );
+            assert!(
+                mapping
+                    .resolve_named_file(&oversized)
+                    .unwrap_err()
+                    .contains("maximum length")
+            );
+        }
+        let repeated = "Season 1 - 01 ".repeat(50);
+        assert!(repeated.len() <= media::MAX_RELEASE_TITLE_BYTES);
+        assert!(ctx.choose(&repeated, true).is_err());
     }
 }
