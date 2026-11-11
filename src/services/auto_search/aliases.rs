@@ -451,6 +451,13 @@ pub fn sequel_variant_aliases(aliases: &[String]) -> Vec<String> {
     dedupe_strings(out)
 }
 
+/// Distinctive full titles of this series' pack-eligible siblings.
+/// File-list verification uses these as positive evidence, so this
+/// list keeps the pack relation filter and does not shorten titles.
+pub fn collect_sibling_aliases(detail: &AnimeDetail, own_aliases: &[String]) -> Vec<String> {
+    collect_related_aliases(detail, own_aliases, false)
+}
+
 /// Distinctive titles of this series' siblings (sequels, prequels, side
 /// stories, alternative versions, spin-offs, summaries) — used to reject
 /// releases that look MORE like a sibling than the target.
@@ -467,10 +474,24 @@ pub fn sequel_variant_aliases(aliases: &[String]) -> Vec<String> {
 /// Returns sibling titles only where the sibling's normalized title is
 /// NOT a substring of any of this target's own aliases (otherwise the
 /// sibling title would match the target too — e.g. a prequel sharing
-/// the base franchise name is not a useful discriminator). The returned
-/// titles are still raw (un-normalized) so the matching logic can
-/// re-normalize them the same way it does the release title.
-pub fn collect_sibling_aliases(detail: &AnimeDetail, own_aliases: &[String]) -> Vec<String> {
+/// the base franchise name is not a useful discriminator).
+/// All known anime relations can supply negative evidence, including
+/// OTHER. Specific subseries heads can omit an installment subtitle.
+/// These are never positive pack or file-verification aliases.
+/// The returned titles are still raw (un-normalized) so the matching
+/// logic can re-normalize them the same way it does the release title.
+pub fn collect_related_identity_aliases(
+    detail: &AnimeDetail,
+    own_aliases: &[String],
+) -> Vec<String> {
+    collect_related_aliases(detail, own_aliases, true)
+}
+
+fn collect_related_aliases(
+    detail: &AnimeDetail,
+    own_aliases: &[String],
+    negative_identity: bool,
+) -> Vec<String> {
     if detail.id <= 0 || detail.relations.is_empty() {
         return Vec::new();
     }
@@ -483,13 +504,22 @@ pub fn collect_sibling_aliases(detail: &AnimeDetail, own_aliases: &[String]) -> 
         .map(|a| normalize_title(a))
         .filter(|s| !s.is_empty())
         .collect();
+    let own_content: HashSet<String> = normalized_own
+        .iter()
+        .flat_map(|title| crate::services::misgrab::verdict::content_tokens(title))
+        .collect();
 
     let mut out: Vec<String> = Vec::new();
     for rel in &detail.relations {
-        if !rel.media_type.eq_ignore_ascii_case("ANIME") {
+        // A noisy relation may be unsuitable for positive pack expansion
+        // and still identify a different anime. OTHER movies must not
+        // become parent episodes through a short franchise alias.
+        if !rel.media_type.eq_ignore_ascii_case("ANIME")
+            || (negative_identity && rel.id == detail.id)
+        {
             continue;
         }
-        if !is_pack_candidate_relation(&rel.relation_type) {
+        if !negative_identity && !is_pack_candidate_relation(&rel.relation_type) {
             continue;
         }
         // Consider all three title fields so romaji-only or native-only
@@ -502,21 +532,26 @@ pub fn collect_sibling_aliases(detail: &AnimeDetail, own_aliases: &[String]) -> 
             if raw.is_empty() {
                 continue;
             }
-            let normalized = normalize_title(raw);
-            // Need ≥ 2 tokens for the sibling title to be a meaningful
-            // discriminator — a single token is too generic and will
-            // false-positive on unrelated releases that happen to share
-            // a common word.
-            if normalized.split_whitespace().count() < 2 {
-                continue;
+            let heads = if negative_identity {
+                super::related_identity::subseries_heads(
+                    raw,
+                    &own_content,
+                    rel.format.eq_ignore_ascii_case("MOVIE"),
+                )
+            } else {
+                Vec::new()
+            };
+            for candidate in std::iter::once(raw.to_string()).chain(heads) {
+                let normalized = normalize_title(&candidate);
+                // A shared parent or a single word cannot distinguish
+                // the related entry from this one.
+                if normalized.split_whitespace().count() < 2
+                    || normalized_own.iter().any(|own| own.contains(&normalized))
+                {
+                    continue;
+                }
+                out.push(candidate);
             }
-            // Skip sibling titles whose normalized form is a substring
-            // of one of our own aliases — those can't tell us apart
-            // from the target.
-            if normalized_own.iter().any(|own| own.contains(&normalized)) {
-                continue;
-            }
-            out.push(raw.to_string());
         }
     }
     dedupe_strings(out)
@@ -582,8 +617,9 @@ impl SiblingRejectPrecompute {
     pub(super) fn for_absolute_fallback(
         franchise_aliases: &[String],
         target_aliases: &[String],
+        related_identity_aliases: &[String],
     ) -> Self {
-        let mut value = Self::build(franchise_aliases, &[]);
+        let mut value = Self::build(franchise_aliases, related_identity_aliases);
         value.target_parts = target_aliases
             .iter()
             .flat_map(|alias| super::release_parse::part_cour_numbers(alias))
@@ -1105,7 +1141,7 @@ pub fn classify_match(
 
     // Sibling rejection: if the release looks more like a sequel /
     // prequel / side story than it looks like us, reject. See the
-    // JJK S1→S3 case in the `collect_sibling_aliases` docstring.
+    // JJK S1→S3 case in the `collect_related_identity_aliases` docstring.
     if sibling_match_rejects(&normalized_title, &title_tokens, sibling_precompute) {
         return None;
     }
@@ -1269,7 +1305,7 @@ mod tests {
                 );
             }
             let absolute_precompute =
-                SiblingRejectPrecompute::for_absolute_fallback(&franchise, &cour_aliases);
+                SiblingRejectPrecompute::for_absolute_fallback(&franchise, &cour_aliases, &[]);
             let absolute_title = format!(
                 "[Group] Mushoku Tensei: Isekai Ittara Honki Dasu S01E{absolute:02} [1080p]"
             );

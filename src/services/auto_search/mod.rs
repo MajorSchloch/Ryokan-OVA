@@ -20,6 +20,7 @@ mod aliases;
 mod numeric_title;
 mod pack_detection;
 mod provenance;
+mod related_identity;
 mod release_parse;
 mod scoring;
 mod seadex_lookup;
@@ -27,10 +28,10 @@ mod search_target;
 
 use aliases::{SiblingRejectPrecompute, sibling_match_rejects};
 pub use aliases::{
-    classify_match, collect_aliases, collect_extended_aliases, collect_sibling_aliases,
-    dedupe_strings, distinctive_overlap_ratio, is_generic_title_token, matches_target,
-    names_more_than_the_series, normalize_title, sequel_variant_aliases, token_overlap_ratio,
-    token_set, with_alternate_titles,
+    classify_match, collect_aliases, collect_extended_aliases, collect_related_identity_aliases,
+    collect_sibling_aliases, dedupe_strings, distinctive_overlap_ratio, is_generic_title_token,
+    matches_target, names_more_than_the_series, normalize_title, sequel_variant_aliases,
+    token_overlap_ratio, token_set, with_alternate_titles,
 };
 pub(crate) use numeric_title::TitleNumberEvidence;
 pub use pack_detection::{
@@ -169,7 +170,7 @@ async fn find_all_for_target_with_probes(
     let seadex_hashes = seadex_payload.hashes;
 
     let expected_season = infer_season_from_detail(detail);
-    let sibling_aliases = collect_sibling_aliases(detail, &aliases);
+    let sibling_aliases = collect_related_identity_aliases(detail, &aliases);
     let sibling_precompute = SiblingRejectPrecompute::build(&aliases, &sibling_aliases);
     let categories = nyaa_search_categories(config, &detail.format);
     let mut seen = HashSet::new();
@@ -291,10 +292,9 @@ async fn find_all_for_target_with_probes(
     // 2 tokens with the release, below the 0.5 overlap threshold.
     //
     // This pass runs with a different ctx that treats franchise aliases
-    // as the own-side, the computed absolute episode as the target, and
-    // an empty sibling set (the base franchise name trivially substring-
-    // matches every sibling in the graph, so re-using Phase 1's sibling
-    // list would reject every absolute-numbered release).
+    // as the own-side and the computed absolute episode as the target.
+    // Keep known related identity evidence: a shared franchise prefix
+    // alone cannot reject a release, but a specific sibling name can.
     let franchise_precompute;
     let absolute_target;
     if series_ctx.absolute_offset > 0
@@ -302,8 +302,11 @@ async fn find_all_for_target_with_probes(
         && let SearchTarget::Episode(ep) = target
     {
         absolute_target = SearchTarget::Episode(ep.saturating_add(series_ctx.absolute_offset));
-        franchise_precompute =
-            SiblingRejectPrecompute::for_absolute_fallback(&series_ctx.franchise_aliases, &aliases);
+        franchise_precompute = SiblingRejectPrecompute::for_absolute_fallback(
+            &series_ctx.franchise_aliases,
+            &aliases,
+            &sibling_aliases,
+        );
         let franchise_queries = append_custom_tokens(
             build_queries_from_aliases(
                 &series_ctx.franchise_aliases,
@@ -730,7 +733,7 @@ pub async fn collect_scored_batches_for_target_with_diag(
     let seadex_hashes = seadex_payload.hashes;
 
     let expected_season = infer_season_from_detail(detail);
-    let sibling_aliases = collect_sibling_aliases(detail, &aliases);
+    let sibling_aliases = collect_related_identity_aliases(detail, &aliases);
     let sibling_precompute = SiblingRejectPrecompute::build(&aliases, &sibling_aliases);
     let mut seen = HashSet::new();
     let mut candidates: Vec<SearchResult> = Vec::new();
@@ -1039,7 +1042,7 @@ async fn collect_scored_for_target_filtered(
     let seadex_hashes = seadex_payload.hashes;
 
     let expected_season = infer_season_from_detail(detail);
-    let sibling_aliases = collect_sibling_aliases(detail, &aliases);
+    let sibling_aliases = collect_related_identity_aliases(detail, &aliases);
     let sibling_precompute = SiblingRejectPrecompute::build(&aliases, &sibling_aliases);
     let mut seen = HashSet::new();
     let mut candidates: Vec<SearchResult> = Vec::new();
@@ -1216,8 +1219,11 @@ async fn collect_scored_for_target_filtered(
         && let SearchTarget::Episode(ep) = target
     {
         absolute_target = SearchTarget::Episode(ep.saturating_add(series_ctx.absolute_offset));
-        franchise_precompute =
-            SiblingRejectPrecompute::for_absolute_fallback(&series_ctx.franchise_aliases, &aliases);
+        franchise_precompute = SiblingRejectPrecompute::for_absolute_fallback(
+            &series_ctx.franchise_aliases,
+            &aliases,
+            &sibling_aliases,
+        );
         let franchise_queries = append_custom_tokens(
             build_queries_from_aliases(
                 &series_ctx.franchise_aliases,
@@ -1399,7 +1405,7 @@ struct AutoQueryCtx<'a> {
     /// like a sequel/prequel/side-story than the target. Built once
     /// at the top of the collect function so the ~50-candidates ×
     /// ~5-siblings normalize/tokenize loop runs once per sweep
-    /// instead of once per candidate. See `collect_sibling_aliases`
+    /// instead of once per candidate. See `collect_related_identity_aliases`
     /// for the JJK S1→S3 motivating case.
     sibling_precompute: &'a SiblingRejectPrecompute,
     preferred_groups: &'a [String],
