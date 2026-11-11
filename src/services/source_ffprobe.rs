@@ -635,7 +635,7 @@ fn scan_ffprobe_json_with_facts(json: &str) -> (ProbeFacts, FfprobeClassificatio
     // Observed resolution — always set if we have a video stream with
     // readable dimensions, even when no source evidence fires.
     if facts.width > 0 && facts.height > 0 {
-        let res = Resolution::from_dimensions(facts.width, facts.height);
+        let res = Resolution::from_observed_dimensions(facts.width, facts.height);
         if res != Resolution::Unknown {
             out.resolution = Some(res);
         }
@@ -790,6 +790,44 @@ struct ProbeFacts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cropped_hd_video_keeps_its_observed_resolution_tier() {
+        for (width, height, expected) in [
+            (1920, 816, Resolution::R1080p),
+            (1920, 800, Resolution::R1080p),
+            (3840, 1600, Resolution::R2160p),
+            (1280, 536, Resolution::R720p),
+        ] {
+            let out = scan_ffprobe_json(&probe_json(vec![video_stream(
+                "hevc",
+                width,
+                height,
+                "yuv420p10le",
+            )]));
+            assert_eq!(out.resolution, Some(expected), "{width}x{height}");
+        }
+    }
+
+    #[test]
+    fn observed_resolution_preserves_sd_and_missing_dimension_controls() {
+        for (width, height, expected) in [
+            (1280, 720, Some(Resolution::R720p)),
+            (704, 480, Some(Resolution::R480p)),
+            (720, 576, Some(Resolution::R576p)),
+            (640, 360, None),
+            (0, 1080, None),
+            (1920, 0, None),
+        ] {
+            let out = scan_ffprobe_json(&probe_json(vec![video_stream(
+                "hevc",
+                width,
+                height,
+                "yuv420p10le",
+            )]));
+            assert_eq!(out.resolution, expected, "{width}x{height}");
+        }
+    }
 
     /// Minimal ffprobe-shaped JSON builder for tests. Composes a root with
     /// a single video stream and an arbitrary list of audio/subtitle streams.
