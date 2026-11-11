@@ -32,9 +32,11 @@ env:
 jobs:
   build:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
-    runs-on: ubuntu-latest
+    # A fixed OS release keeps native tool setup and caches independent
+    # of ubuntu-latest migrations.
+    runs-on: ubuntu-24.04
     # GitHub's per-job default is 6h; the verify pass should never
-    # exceed ~10 min on ubuntu-latest, so 30 min is a generous ceiling
+    # exceed ~10 min on Ubuntu 24.04, so 30 min is a generous ceiling
     # that still terminates a hung step (e.g. a flaky wiremock binding
     # eating the runner) before it burns hours of runner minutes.
     timeout-minutes: 30
@@ -45,8 +47,10 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ubuntu-24.04
       # mold is the linker pinned in `.cargo/config.toml` for linux
-      # targets; CI's ubuntu-latest doesn't ship it preinstalled, so
+      # targets; CI's Ubuntu runner doesn't ship it preinstalled, so
       # without this step every link step would fail with
       # "linker `clang` not found" / "ld.mold not found". apt install
       # is fast (~5s) and mold itself cuts incremental link time
@@ -105,7 +109,7 @@ jobs:
     # care about here is strictly "does the code compile on 1.95?"
     name: MSRV (1.95)
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # MSRV build is just `cargo build --workspace --locked` — even on a
     # cold cache it runs in ~5 min. 20 min ceiling guards against a
     # hung dep download.
@@ -117,7 +121,7 @@ jobs:
           toolchain: 1.95.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: msrv
+          key: msrv-ubuntu-24.04
       # The repo's `.cargo/config.toml` pins clang+mold as the linker
       # on linux targets; this job inherits that config and would fail
       # at link-time without them.
