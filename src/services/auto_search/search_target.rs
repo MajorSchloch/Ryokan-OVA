@@ -240,6 +240,61 @@ pub fn build_requirements_upgrade_targets(
 mod tests {
     use super::*;
 
+    #[test]
+    fn primary_video_classification_matches_requirements_and_target_stop() {
+        use crate::services::{media_info, source_ffprobe};
+
+        let policy = Policy::from_config(&crate::models::config::Config {
+            media_requirements_enabled: true,
+            target_resolution: "1080".into(),
+            required_subtitle_languages: "en".into(),
+            ..Default::default()
+        });
+        let fixture =
+            include_str!("../../../tests/fixtures/ffprobe/beast-tamer-e01-primary-video.json");
+        for (main_width, main_height, auxiliary_width, auxiliary_height, expected, target_met) in [
+            (1920, 1080, 400, 564, Resolution::R1080p, true),
+            // A higher-resolution auxiliary stream cannot satisfy the target.
+            (1280, 720, 3840, 2160, Resolution::R720p, false),
+        ] {
+            let mut probe: serde_json::Value = serde_json::from_str(fixture).unwrap();
+            probe["streams"][0]["width"] = main_width.into();
+            probe["streams"][0]["height"] = main_height.into();
+            probe["streams"][5]["width"] = auxiliary_width.into();
+            probe["streams"][5]["height"] = auxiliary_height.into();
+            let json = probe.to_string();
+            let classified = source_ffprobe::scan_ffprobe_json(&json);
+            let info = media_info::parse_probe_json(
+                &json,
+                media_info::FileIdentity {
+                    size: 1,
+                    mtime_ns: "1".into(),
+                    device: None,
+                    inode: None,
+                },
+                true,
+            )
+            .unwrap();
+            let observed = policy.observe(&info);
+            assert_eq!(classified.resolution, Some(expected));
+            assert_eq!(observed.resolution, expected);
+            assert!(observed.subtitles_satisfied);
+            assert_eq!(policy.target_met(&observed), target_met);
+            let targets = build_requirements_upgrade_targets(
+                &[requirement_file(1)],
+                &[1],
+                &HashMap::new(),
+                &policy,
+                &HashMap::from([(1, observed)]),
+            );
+            assert_eq!(targets.is_empty(), target_met);
+            if !target_met {
+                assert!(matches!(targets[0].0, SearchTarget::Episode(1)));
+                assert_eq!(targets[0].1.resolution, Resolution::R720p);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn cropped_hd_files_stop_at_target_despite_stale_tags() {
         use crate::models::{episode_tags, media_probe_cache};
