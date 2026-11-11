@@ -1709,6 +1709,8 @@ const RIGHT_HASH: &str = "cccccccccccccccccccccccccccccccccccccccc";
 mod cour_season_identity;
 #[path = "auto_search_e2e/numeric_title_identity.rs"]
 mod numeric_title_identity;
+#[path = "auto_search_e2e/related_release_identity.rs"]
+mod related_release_identity;
 #[path = "auto_search_e2e/requirements_retry.rs"]
 mod requirements_retry;
 #[path = "auto_search_e2e/upgrade_sweep.rs"]
