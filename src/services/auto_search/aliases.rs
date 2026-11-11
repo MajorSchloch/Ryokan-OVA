@@ -196,6 +196,47 @@ pub fn collect_aliases(detail: &AnimeDetail) -> Vec<String> {
     ])
 }
 
+/// Full provider titles are safe query alternatives; decomposed title
+/// fragments remain an extended-search fallback. Do not let a synonym
+/// that names a known related entry become an alias for this entry.
+pub(crate) fn collect_synonym_aliases(detail: &AnimeDetail) -> Vec<String> {
+    let primary = collect_aliases(detail);
+    let mut related = related_anime_titles(detail);
+    let negative = collect_related_identity_aliases(detail, &primary);
+    let specific_heads: Vec<_> = negative
+        .iter()
+        .map(|s| normalize_title(s))
+        .filter(|s| !related.contains(s))
+        .map(|s| token_set(&s))
+        .collect();
+    related.extend(negative.iter().map(|title| normalize_title(title)));
+    let episodic = crate::services::media::is_tv_format(&detail.format)
+        || (matches!(detail.format.as_str(), "OVA" | "ONA" | "SPECIAL")
+            && detail.episodes != Some(1));
+    let target_parts: HashSet<_> = primary
+        .iter()
+        .flat_map(|s| super::part_cour_numbers(s))
+        .collect();
+    let mut seen: HashSet<String> = primary.iter().map(|title| normalize_title(title)).collect();
+    detail
+        .synonyms
+        .iter()
+        .filter(|title| {
+            let normalized = normalize_title(title);
+            let parts = super::part_cour_numbers(title);
+            let tokens = token_set(&normalized);
+            !normalized.is_empty()
+                && !related.contains(&normalized)
+                && !specific_heads.iter().any(|head| head.is_subset(&tokens))
+                // Provider alternatives cannot redefine an episodic
+                // entry's Part/Cour identity for every other alias.
+                && (!episodic || parts.is_empty() || parts == target_parts)
+                && seen.insert(normalized)
+        })
+        .map(|title| title.trim().to_string())
+        .collect()
+}
+
 // ── Sequel / part variant aliases (issue #84) ─────────────────────────────
 //
 // Motivating bug: auto-searching a sequel cour or a numbered movie entry
@@ -482,9 +523,11 @@ pub fn collect_sibling_aliases(detail: &AnimeDetail, own_aliases: &[String]) -> 
 /// logic can re-normalize them the same way it does the release title.
 pub fn collect_related_identity_aliases(
     detail: &AnimeDetail,
-    own_aliases: &[String],
+    _own_aliases: &[String],
 ) -> Vec<String> {
-    collect_related_aliases(detail, own_aliases, true)
+    // Query alternatives must not erase negative evidence about another
+    // entry. Derive specific related heads from canonical ownership.
+    collect_related_aliases(detail, &collect_aliases(detail), true)
 }
 
 fn collect_related_aliases(
@@ -641,7 +684,7 @@ impl SiblingRejectPrecompute {
 /// here the release already passes the "could plausibly be us" gate —
 /// the sibling check is the last defense against "plausibly us" also
 /// being "more plausibly a sibling".
-pub(super) fn sibling_match_rejects(
+pub(crate) fn sibling_match_rejects(
     normalized_release: &str,
     normalized_release_tokens: &HashSet<String>,
     precompute: &SiblingRejectPrecompute,
@@ -691,17 +734,15 @@ pub(super) fn sibling_match_rejects(
 /// Only used as a fallback when primary aliases don't find results.
 pub fn collect_extended_aliases(detail: &AnimeDetail) -> Vec<String> {
     let primary = collect_aliases(detail);
-    let related = related_anime_titles(detail);
-    let mut extra = Vec::new();
-
-    // Add AniList synonyms, except one that is a related entry's title.
-    extra.extend(
-        detail
-            .synonyms
+    let mut related = related_anime_titles(detail);
+    related.extend(
+        collect_related_identity_aliases(detail, &primary)
             .iter()
-            .filter(|s| !related.contains(&normalize_title(s)))
-            .cloned(),
+            .map(|title| normalize_title(title)),
     );
+    // Reuse the full-name safety rule on fallback searches too. A
+    // rejected related-entry head must not return through this path.
+    let mut extra = collect_synonym_aliases(detail);
 
     // Decompose all titles (primary + synonyms) into sub-phrases.
     // Nyaa releases often use just the subtitle portion

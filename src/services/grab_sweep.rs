@@ -2,8 +2,8 @@
 //!
 //! Implements plan decision #3's "auto-commit on walkaway" shape:
 //! when a modal's heartbeat lapses, the torrent is still a user-
-//! intended download (they hit Grab), so we resume it with every
-//! file marked wanted rather than leaving it paused forever. The
+//! intended download (they hit Grab), so we apply its saved selection
+//! and resume it. Only an unposted selection defaults to every file. The
 //! full grab-row-write + sibling auto-expand chain is a follow-up
 //! scope — this sweep gets the files downloading, but library
 //! attribution (the `grabbed_torrents` row wiring) is a separate
@@ -12,8 +12,8 @@
 //! Per-row flow:
 //!   1. Load the row via `list_expired`.
 //!   2. If `file_list_json` is populated, a download client is
-//!      configured, and `error_message` is empty, mark every file
-//!      wanted and resume the torrent.
+//!      configured, and `error_message` is empty, apply the selected
+//!      file priorities and resume. An explicit empty selection cancels.
 //!   3. Delete the `pending_grabs` row either way so the sweep
 //!      doesn't loop forever on a permanently-stuck entry.
 //!
@@ -165,15 +165,23 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
     // The picker's last posted selection, when there is one: the
     // walkaway commits what the user had ticked, the way Confirm would
     // have. Nothing posted (an older modal, metadata that arrived
-    // after the tab closed) means every file, as before; so does a
-    // selection with no index in range, which a modal never posts.
-    let selection: Option<Vec<usize>> = pending_grabs::wanted_indices(row)
-        .map(|v| {
-            v.into_iter()
-                .filter(|&i| i < file_count)
-                .collect::<Vec<_>>()
-        })
-        .filter(|v| !v.is_empty());
+    // after the tab closed) means every file. A posted selection that
+    // now contains no valid index is still empty, never default-all.
+    let selection: Option<Vec<usize>> = pending_grabs::wanted_indices(row).map(|v| {
+        v.into_iter()
+            .filter(|&i| i < file_count)
+            .collect::<Vec<_>>()
+    });
+    if selection.as_ref().is_some_and(|indices| indices.is_empty()) {
+        // The explicit-empty case above uses the same ownership rule.
+        if row.we_added_torrent
+            && let Err(error) = client.delete(&row.info_hash, true).await
+        {
+            tracing::warn!(preview_id = %row.preview_id, %error,
+                "auto-cancel failed for a selection with no valid file indices");
+        }
+        return;
+    }
     let wanted: Vec<usize> = match &selection {
         Some(v) => v.clone(),
         None => (0..file_count).collect(),
@@ -230,10 +238,8 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
         return;
     }
 
-    // Library attribution. Walkaway means the user got every
-    // file wanted, so the full file list is passed to auto-expand —
-    // unlike the confirm path which passes only the user-selected
-    // subset. Failures inside `commit_grab_and_expand` are logged;
+    // Library attribution uses the same index-aligned masked filename
+    // vector as Confirm. Failures inside `commit_grab_and_expand` are logged;
     // the sweep still deletes the pending row so it doesn't loop.
     let release_title = crate::handlers::grab::extract_release_title(&row.release_metadata_json)
         .unwrap_or_else(|| row.info_hash.clone());
@@ -242,14 +248,9 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
     // (see `extract_release_is_batch`).
     let is_batch = crate::handlers::grab::extract_release_is_batch(&row.release_metadata_json)
         .unwrap_or(file_count > 1);
-    let wanted_set: std::collections::HashSet<usize> = wanted.iter().copied().collect();
     let wanted_count = wanted.len();
-    let filenames: Vec<String> = files
-        .into_iter()
-        .enumerate()
-        .filter(|(i, _)| wanted_set.contains(i))
-        .map(|(_, f)| f.name)
-        .collect();
+    let names: Vec<String> = files.into_iter().map(|file| file.name).collect();
+    let filenames = crate::services::grab_commit::filenames_for_selection(&names, Some(&wanted));
     crate::services::grab_commit::commit_grab_and_expand(
         state,
         row,
@@ -672,6 +673,54 @@ mod tests {
         assert!(client.set_wanted_calls.lock().unwrap().is_empty());
         assert!(client.resume_calls.lock().unwrap().is_empty());
         assert!(pending_grabs::get(&db, "present").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn sweep_out_of_range_selection_does_not_become_default_all() {
+        let db = in_memory_pool().await;
+        pending_grabs::create(
+            &db,
+            "out-of-range",
+            "hash-range",
+            "qbittorrent",
+            None,
+            None,
+            "{}",
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        pending_grabs::set_file_list(
+            &db,
+            "out-of-range",
+            "[{\"name\":\"Show - 01.mkv\",\"size\":1}]",
+        )
+        .await
+        .unwrap();
+        pending_grabs::set_wanted_indices(&db, "out-of-range", "[999]")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE pending_grabs SET heartbeat_at=? WHERE preview_id='out-of-range'")
+            .bind(now_unix() - HEARTBEAT_TTL_SECS - 5)
+            .execute(&db)
+            .await
+            .unwrap();
+        let client = Arc::new(RecordingClient::default());
+        let state = build_test_app_state(db.clone(), Some(client.clone()));
+        assert_eq!(sweep_once(&state).await.unwrap(), 1);
+        assert!(client.set_wanted_calls.lock().unwrap().is_empty());
+        assert!(client.resume_calls.lock().unwrap().is_empty());
+        assert_eq!(
+            client.delete_calls.lock().unwrap().clone(),
+            vec![("hash-range".to_string(), true)]
+        );
+        assert!(
+            pending_grabs::get(&db, "out-of-range")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// Multi-client routing regression — the auto-commit-on-walkaway
