@@ -29,6 +29,10 @@ use crate::services::anilist::AnimeDetail;
 use crate::services::source::ClassificationResult;
 use crate::services::{anilist, auto_search, logger, media, metadata_sync};
 
+#[cfg(test)]
+#[path = "auto_expand_selected_coverage.rs"]
+mod selected_coverage_tests;
+
 /// Grab-time context threaded through the auto-expand path so each
 /// detected sibling gets its own `episode_quality_tags` +
 /// `episode_grab_history` rows alongside its route record. Without
@@ -497,49 +501,98 @@ pub(crate) async fn try_expand_from_files(
     // "[Arid] Land of the Lustrous [BDRip 1080p Hi10 FLAC]" —
     // come in as `episode_numbers=[1], is_batch=0` and post-
     // processing only imports ep 1).
+    let parent = series::get_by_id(db, parent_series_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Episode mapping: parent entry no longer exists".to_string())?;
+    let original_grab = grabbed_torrents::get_by_id(db, grab_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Episode mapping: parent grab no longer exists".to_string())?;
+    let tv_series = media::is_tv_format(&parent.format);
     let parent_eps_covered: std::collections::HashSet<i32> =
         parent_episode_numbers.iter().copied().collect();
-    let mut all_parent_eps: std::collections::BTreeSet<i32> =
-        parent_eps_covered.iter().copied().collect();
+    let mut all_parent_eps = std::collections::BTreeSet::new();
+    let mut parsed_parent = false;
+    let mut parent_offsets = std::collections::HashSet::new();
     for &file_idx in &parent_file_indices {
         let Some(name) = filenames.get(file_idx) else {
             continue;
         };
-        let Some(span) = media::parse_episode_span(&name.to_ascii_lowercase()) else {
+        if tv_series && media::path_names_specials(std::path::Path::new(name)) {
+            parsed_parent = true;
+            continue;
+        }
+        let base = name.rsplit('/').next().unwrap_or(name).to_ascii_lowercase();
+        if media::is_non_episodic_file(&base) || (tv_series && media::is_special_release(&base)) {
+            parsed_parent = true;
+            continue;
+        }
+        let Some(span) = media::parse_episode_span(&base) else {
             continue;
         };
-        // Every episode a multi-episode file holds (issue #246).
-        for raw_ep in span.episodes() {
-            if raw_ep <= 0 {
-                continue;
-            }
-            all_parent_eps.insert(raw_ep);
-            if parent_eps_covered.contains(&raw_ep) {
-                continue;
-            }
-            if let Err(e) = episode_tags::record_grab(
-                db,
-                parent_series_id,
-                raw_ep,
-                &grab_ctx.classification,
-                torrent_title,
-                &grab_ctx.release_group,
-                grab_ctx.size_bytes,
-                true,
+        parsed_parent = true;
+        if tv_series && span.special {
+            continue;
+        }
+        // Match import's existing claim/count decision. A saved relative E12
+        // must not become E11 merely because the cumulative offset is one.
+        let offset = if span.season.is_some() {
+            0
+        } else {
+            crate::services::post_processing::claimed_ep_offset(
+                span.first,
+                parent.cumulative_prior_episodes,
+                &original_grab.episode_numbers,
+                parent.episodes.unwrap_or(0),
             )
-            .await
-            {
-                logger::warn(
+        };
+        let rule = crate::services::episode_mapping::MappingRule::for_offset(
+            parent.anilist_id,
+            span.first,
+            span.last,
+            offset,
+        )
+        .map_err(|e| format!("Episode mapping: {e}"))?;
+        let mapped = crate::services::episode_mapping::resolve_file(&[rule], span.first, span.last)
+            .map_err(|e| format!("Episode mapping: {e}"))?;
+        parent_offsets.insert(offset);
+        all_parent_eps.extend(mapped.first..=mapped.last);
+    }
+    // Unparseable media retains the prior title claim. A parsed TV special
+    // is a known empty main-episode set, not permission to restore a range.
+    if !parsed_parent && !parent_file_indices.is_empty() {
+        all_parent_eps.extend(parent_eps_covered.iter().copied());
+    }
+    if !routes.is_empty() && parent_offsets.len() > 1 {
+        return Err("Episode mapping: parent files mix relative and absolute numbering".into());
+    }
+    for episode in all_parent_eps
+        .iter()
+        .filter(|ep| !parent_eps_covered.contains(*ep))
+    {
+        if let Err(e) = episode_tags::record_grab(
+            db,
+            parent_series_id,
+            *episode,
+            &grab_ctx.classification,
+            torrent_title,
+            &grab_ctx.release_group,
+            grab_ctx.size_bytes,
+            true,
+        )
+        .await
+        {
+            logger::warn(
                     db,
                     LogCategory::Library,
                     &format!(
                         "Auto-expand: failed to backfill grab history for parent {} ep {} (AL-overflow)",
-                        parent_series_id, raw_ep,
+                        parent_series_id, episode,
                     ),
                     &format!("{}: {}", torrent_title, e),
                 )
                 .await;
-            }
         }
     }
 
@@ -550,24 +603,30 @@ pub(crate) async fn try_expand_from_files(
     // detection missed (no `[BD]` / `Batch` / `Complete` / episode-
     // range token, common with BD release groups like Arid / Legion).
     //
-    // Filter on `> 1` so a single-episode grab whose file count is 1
-    // doesn't get falsely flagged as `is_batch=true`.
+    // Known selected coverage can also shrink to one or zero main episodes.
+    // Keep the original batch flag unless actual coverage proves a batch.
     let parent_ep_vec: Vec<i32> = all_parent_eps.iter().copied().collect();
-    if parent_ep_vec.len() > 1
-        && let Err(e) =
-            grabbed_torrents::update_episode_coverage(db, grab_id, &parent_ep_vec, true).await
-    {
-        logger::warn(
-            db,
-            LogCategory::Library,
-            &format!(
-                "Auto-expand: failed to update grab {} episode coverage (parent {})",
-                grab_id, parent_series_id,
-            ),
-            &format!("{}: {}", torrent_title, e),
-        )
-        .await;
-    }
+    let selected_set: std::collections::HashSet<_> = parent_ep_vec.iter().copied().collect();
+    let stale: Vec<_> = parent_eps_covered
+        .difference(&selected_set)
+        .copied()
+        .collect();
+    episode_tags::clear_unselected_for_release(
+        db,
+        parent_series_id,
+        &stale,
+        &original_grab.torrent_name,
+    )
+    .await
+    .map_err(|e| format!("Episode mapping: could not retire deselected claims: {e}"))?;
+    grabbed_torrents::update_episode_coverage(
+        db,
+        grab_id,
+        &parent_ep_vec,
+        original_grab.is_batch || parent_ep_vec.len() > 1,
+    )
+    .await
+    .map_err(|e| format!("Episode mapping: could not save selected parent coverage: {e}"))?;
 
     if !routes.is_empty() && !parent_file_indices.is_empty() {
         logger::warn(
@@ -591,11 +650,10 @@ pub(crate) async fn try_expand_from_files(
             grab_id,
             series_id: parent_series_id,
             file_indices: parent_file_indices,
-            episode_numbers: parent_episode_numbers.to_vec(),
+            episode_numbers: parent_ep_vec,
             matched_subtitle: String::new(),
-            // Parent-route files always use their own arc-local
-            // numbering — no offset ever needed here.
-            episode_offset: 0,
+            // Preserve the same parent numbering used for its saved claims.
+            episode_offset: parent_offsets.into_iter().next().unwrap_or(0),
         });
     }
 
@@ -640,7 +698,11 @@ mod tests {
     use super::*;
     use crate::services::anilist::RelatedEntry;
 
-    fn empty_anime_detail(id: i64, title_english: &str, episodes: Option<i32>) -> AnimeDetail {
+    pub(super) fn empty_anime_detail(
+        id: i64,
+        title_english: &str,
+        episodes: Option<i32>,
+    ) -> AnimeDetail {
         AnimeDetail {
             release_date: None,
             is_adult: false,
@@ -673,7 +735,11 @@ mod tests {
         }
     }
 
-    fn related_entry(id: i64, title_english: &str, episodes: Option<i32>) -> RelatedEntry {
+    pub(super) fn related_entry(
+        id: i64,
+        title_english: &str,
+        episodes: Option<i32>,
+    ) -> RelatedEntry {
         RelatedEntry {
             release_date: None,
             id,

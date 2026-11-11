@@ -1,0 +1,59 @@
+[
+  {
+    "view_id": 1582107,
+    "anilist_id": 11597,
+    "title": "[MTBB] Nisemonogatari (BD 1080p)",
+    "entry_title": "Nisemonogatari",
+    "format": "TV",
+    "episodes": 11,
+    "offset": 19,
+    "info_hash": "3fa0d40334cefa060ca5226a3d0dfe302799b785",
+    "files": [
+      "[MTBB] Nisemonogatari - 01v2 [E295CAF7].mkv",
+      "[MTBB] Nisemonogatari - 02v2 [40C4B9B5].mkv",
+      "[MTBB] Nisemonogatari - 03v2 [05BCC05A].mkv",
+      "[MTBB] Nisemonogatari - 04v2 [73DD2CC7].mkv",
+      "[MTBB] Nisemonogatari - 05 [F7F6DA35].mkv",
+      "[MTBB] Nisemonogatari - 06v2 [48F79AE9].mkv",
+      "[MTBB] Nisemonogatari - 07v2 [64891423].mkv",
+      "[MTBB] Nisemonogatari - 08 [485B192E].mkv",
+      "[MTBB] Nisemonogatari - 09 [B129BF29].mkv",
+      "[MTBB] Nisemonogatari - 10v2 [9D044D7A].mkv",
+      "[MTBB] Nisemonogatari - 11v2 [89F241C7].mkv"
+    ]
+  },
+  {
+    "view_id": 1490370,
+    "anilist_id": 20918,
+    "title": "[MTBB] Tsukimonogatari (BD 1080p)",
+    "entry_title": "Tsukimonogatari",
+    "format": "TV",
+    "episodes": 4,
+    "offset": 68,
+    "info_hash": "c57be2519d7636c0b09cad1ef39df069fff15f61",
+    "files": [
+      "[MTBB] Tsukimonogatari - 01 [EC319405].mkv",
+      "[MTBB] Tsukimonogatari - 02 [D47FDCBA].mkv",
+      "[MTBB] Tsukimonogatari - 03 [864CF534].mkv",
+      "[MTBB] Tsukimonogatari - 04 [A05BB13C].mkv"
+    ]
+  },
+  {
+    "view_id": 1487250,
+    "anilist_id": 100815,
+    "title": "[MTBB] Zoku Owarimonogatari (BD 1080p)",
+    "entry_title": "Zoku Owarimonogatari",
+    "format": "OVA",
+    "episodes": 6,
+    "offset": 79,
+    "info_hash": "1b832a159034e1e7c2e5a0620554730c5609d368",
+    "files": [
+      "[MTBB] Zoku Owarimonogatari - 01v2 [286AA830].mkv",
+      "[MTBB] Zoku Owarimonogatari - 02v2 [11D620E3].mkv",
+      "[MTBB] Zoku Owarimonogatari - 03v2 [09F2B23D].mkv",
+      "[MTBB] Zoku Owarimonogatari - 04v2 [8DDF5663].mkv",
+      "[MTBB] Zoku Owarimonogatari - 05v2 [B347098A].mkv",
+      "[MTBB] Zoku Owarimonogatari - 06v2 [CD210E16].mkv"
+    ]
+  }
+]

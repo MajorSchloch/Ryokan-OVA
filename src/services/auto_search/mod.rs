@@ -20,13 +20,14 @@ mod aliases;
 mod numeric_title;
 mod pack_detection;
 mod provenance;
+mod published_packs;
 mod related_identity;
 mod release_parse;
 mod scoring;
 mod seadex_lookup;
 mod search_target;
 
-use aliases::{SiblingRejectPrecompute, sibling_match_rejects};
+pub(crate) use aliases::{SiblingRejectPrecompute, collect_synonym_aliases, sibling_match_rejects};
 pub use aliases::{
     classify_match, collect_aliases, collect_extended_aliases, collect_related_identity_aliases,
     collect_sibling_aliases, dedupe_strings, distinctive_overlap_ratio, is_generic_title_token,
@@ -130,8 +131,12 @@ async fn find_all_for_target_with_probes(
         indexers_snapshot.as_slice();
     let (aliases, canonical_aliases, variant_aliases) = collect_aliases_with_variants(detail);
     let series_ctx = resolve_search_overrides(db, detail, config).await;
-    let (aliases, canonical_aliases) =
-        add_alternate_aliases(aliases, canonical_aliases, &series_ctx.alternate_titles);
+    let (aliases, canonical_aliases, variant_aliases) = add_alternate_aliases(
+        aliases,
+        canonical_aliases,
+        variant_aliases,
+        &series_ctx.alternate_titles,
+    );
     let queries = append_custom_tokens(
         build_queries_mixed(
             &canonical_aliases,
@@ -197,6 +202,7 @@ async fn find_all_for_target_with_probes(
     let ctx = InteractiveQueryCtx {
         phase: MatchPhase::Primary,
         aliases: &aliases,
+        canonical_owner_aliases: &canonical_aliases,
         indexer_categories: &indexer_categories,
         sibling_precompute: &sibling_precompute,
         preferred_groups: &preferred_groups,
@@ -318,6 +324,7 @@ async fn find_all_for_target_with_probes(
         let franchise_ctx = InteractiveQueryCtx {
             phase: MatchPhase::Franchise,
             aliases: &series_ctx.franchise_aliases,
+            canonical_owner_aliases: &series_ctx.franchise_aliases,
             sibling_precompute: &franchise_precompute,
             target: &absolute_target,
             // `target` already carries the absolute number, so no
@@ -480,7 +487,41 @@ pub async fn find_best_for_target_with_filter(
         eligible,
     )
     .await;
-    (scored.into_iter().next(), fuzzy_only)
+    if let Some(best) = scored.into_iter().next() {
+        return (Some(best), fuzzy_only);
+    }
+    // Ordinary automatic searches also discover unmarked entry packs. This
+    // fallback is single-shot, opts in only with allow_batch, and retains
+    // the caller's capability/upgrade filter after the candidate is a batch.
+    if allow_batch
+        && published_packs::supports(detail)
+        && let SearchTarget::Episode(ep) = target
+    {
+        let (packs, rejected) = collect_scored_batches_for_target_filtered(
+            db,
+            detail,
+            config,
+            &SearchTarget::Single,
+            cfs,
+            indexers_cache,
+            true,
+            eligible,
+        )
+        .await;
+        let mut diagnostics = fuzzy_only;
+        diagnostics.extend(rejected);
+        diagnostics = dedupe_strings(diagnostics);
+        let best = packs.into_iter().find(|c| {
+            c.replay_episodes
+                .as_ref()
+                .is_some_and(|episodes| episodes.contains(ep))
+                || c.release_mapping
+                    .as_ref()
+                    .is_some_and(|mapping| mapping.contains_episode(*ep))
+        });
+        return (best, diagnostics);
+    }
+    (None, fuzzy_only)
 }
 
 /// One hit of the episode-set interactive search: the release plus the
@@ -706,10 +747,38 @@ pub async fn collect_scored_batches_for_target_with_diag(
     indexers_cache: &crate::IndexerCache,
     require_verbatim: bool,
 ) -> (Vec<SearchResult>, Vec<String>) {
+    collect_scored_batches_for_target_filtered(
+        db,
+        detail,
+        config,
+        target,
+        cfs,
+        indexers_cache,
+        require_verbatim,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn collect_scored_batches_for_target_filtered(
+    db: &SqlitePool,
+    detail: &AnimeDetail,
+    config: &Config,
+    target: &SearchTarget,
+    cfs: &[CompiledCustomFormat],
+    indexers_cache: &crate::IndexerCache,
+    require_verbatim: bool,
+    eligible: Option<CandidateFilter<'_>>,
+) -> (Vec<SearchResult>, Vec<String>) {
     let (aliases, canonical_aliases, variant_aliases) = collect_aliases_with_variants(detail);
     let series_ctx = resolve_search_overrides(db, detail, config).await;
-    let (aliases, canonical_aliases) =
-        add_alternate_aliases(aliases, canonical_aliases, &series_ctx.alternate_titles);
+    let (aliases, canonical_aliases, variant_aliases) = add_alternate_aliases(
+        aliases,
+        canonical_aliases,
+        variant_aliases,
+        &series_ctx.alternate_titles,
+    );
     let preferred_groups = quality::parse_group_list(&config.preferred_groups);
     let preferred_res = preferred_resolution_search_value(config);
     let is_finished = detail.is_finished();
@@ -780,8 +849,9 @@ pub async fn collect_scored_batches_for_target_with_diag(
             .media_requirements_enabled
             .then(|| Resolution::from_str(&config.minimum_resolution)),
         fuzzy_rejected: &fuzzy_rejected,
-        eligible: None,
+        eligible,
         aliases: &aliases,
+        canonical_owner_aliases: &canonical_aliases,
         indexer_categories: &indexer_categories,
         sibling_precompute: &sibling_precompute,
         preferred_groups: &preferred_groups,
@@ -815,8 +885,10 @@ pub async fn collect_scored_batches_for_target_with_diag(
     // Batch-targeted probes — the important addition for this function.
     // Explicit "batch" / "complete" keywords push the Nyaa search toward
     // listings that wouldn't appear on page 1 for a plain title query.
+    let probe_aliases =
+        dedupe_strings([canonical_aliases.clone(), variant_aliases.clone()].concat());
     let batch_queries = append_custom_tokens(
-        quality::batch_probe_queries(&aliases),
+        quality::batch_probe_queries(&probe_aliases),
         &series_ctx.custom_tokens,
     );
     run_queries(
@@ -864,6 +936,42 @@ pub async fn collect_scored_batches_for_target_with_diag(
         .await;
     }
 
+    // Curated seeds did not pass run_queries' reviewed-source lookup. A
+    // reviewed file mapping is the exception for a genuine multi-season pack.
+    let mut identity_checked = Vec::with_capacity(candidates.len());
+    for mut candidate in candidates.drain(..) {
+        if candidate
+            .match_provenance
+            .as_ref()
+            .is_some_and(|p| p.kind == MatchKind::SeadexCurated)
+            && crate::services::release_numbering::apply_reviewed_source(
+                db,
+                detail.id,
+                target,
+                &mut candidate,
+            )
+            .await
+            .is_err()
+        {
+            continue;
+        }
+        if published_packs::identity_allows(detail, &candidate, &aliases, &sibling_precompute) {
+            identity_checked.push(candidate);
+        }
+    }
+    candidates = identity_checked;
+    let pack_mappings = published_packs::promote(
+        db,
+        detail,
+        &aliases,
+        &sibling_precompute,
+        series_ctx.absolute_offset,
+        &mut candidates,
+        eligible,
+        require_verbatim,
+    )
+    .await;
+
     // Drop non-batches before the classify/rescore pass so we don't pay
     // the classification cost on candidates we're going to throw away.
     // SeaDex-curated candidates are exempt: the curator has already
@@ -892,6 +1000,10 @@ pub async fn collect_scored_batches_for_target_with_diag(
             }),
         )
         .await;
+
+        if eligible.is_some_and(|allows| !allows(&c, &classification)) {
+            continue;
+        }
 
         if is_finished
             && !config.media_requirements_enabled
@@ -970,14 +1082,16 @@ pub async fn collect_scored_batches_for_target_with_diag(
         }
     }
     if require_verbatim {
-        scored = crate::services::release_numbering::filter_automatic_candidates(
-            db,
-            detail,
-            series_ctx.absolute_offset,
-            target,
-            scored,
-        )
-        .await;
+        scored =
+            crate::services::release_numbering::filter_automatic_candidates_with_pack_mappings(
+                db,
+                detail,
+                series_ctx.absolute_offset,
+                target,
+                scored,
+                &pack_mappings,
+            )
+            .await;
     }
     (scored, fuzzy_rejected.into_inner().unwrap_or_default())
 }
@@ -1007,8 +1121,12 @@ async fn collect_scored_for_target_filtered(
     let require_verbatim = true;
     let (aliases, canonical_aliases, variant_aliases) = collect_aliases_with_variants(detail);
     let series_ctx = resolve_search_overrides(db, detail, config).await;
-    let (aliases, canonical_aliases) =
-        add_alternate_aliases(aliases, canonical_aliases, &series_ctx.alternate_titles);
+    let (aliases, canonical_aliases, variant_aliases) = add_alternate_aliases(
+        aliases,
+        canonical_aliases,
+        variant_aliases,
+        &series_ctx.alternate_titles,
+    );
     let queries = append_custom_tokens(
         build_queries_mixed(
             &canonical_aliases,
@@ -1103,6 +1221,7 @@ async fn collect_scored_for_target_filtered(
             .then(|| Resolution::from_str(&config.minimum_resolution)),
         eligible,
         aliases: &aliases,
+        canonical_owner_aliases: &canonical_aliases,
         indexer_categories: &indexer_categories,
         sibling_precompute: &sibling_precompute,
         preferred_groups: &preferred_groups,
@@ -1235,6 +1354,7 @@ async fn collect_scored_for_target_filtered(
         let franchise_ctx = AutoQueryCtx {
             phase: MatchPhase::Franchise,
             aliases: &series_ctx.franchise_aliases,
+            canonical_owner_aliases: &series_ctx.franchise_aliases,
             sibling_precompute: &franchise_precompute,
             target: &absolute_target,
             absolute_offset: 0,
@@ -1397,6 +1517,8 @@ struct AutoQueryCtx<'a> {
     require_verbatim: bool,
     fuzzy_rejected: &'a std::sync::Mutex<Vec<String>>,
     aliases: &'a [String],
+    /// Supplemental names cannot rescue a missing numeric owner identity.
+    canonical_owner_aliases: &'a [String],
     /// Torznab / newznab categories to ask indexers for (see
     /// `indexers::search_categories`).
     indexer_categories: &'a [i32],
@@ -1466,6 +1588,7 @@ struct InteractiveQueryCtx<'a> {
     /// Which query pass this context runs; stamped on every candidate.
     phase: MatchPhase,
     aliases: &'a [String],
+    canonical_owner_aliases: &'a [String],
     /// Torznab / newznab categories to ask indexers for (see
     /// `indexers::search_categories`).
     indexer_categories: &'a [i32],
@@ -1686,6 +1809,14 @@ async fn run_queries(
                 );
                 MatchProvenance::seadex(ctx.phase)
             } else {
+                if !canonical_owner_supports_release(
+                    &result.title,
+                    ctx.canonical_owner_aliases,
+                    ctx.target,
+                ) {
+                    rejected_here.insert(dedupe_key);
+                    continue;
+                }
                 match classify_match(
                     &result.title,
                     ctx.aliases,
@@ -1766,6 +1897,14 @@ async fn run_queries(
         } else if is_seadex_match(&result.info_hash, ctx.seadex_hashes) {
             MatchProvenance::seadex(ctx.phase)
         } else {
+            if !canonical_owner_supports_release(
+                &result.title,
+                ctx.canonical_owner_aliases,
+                ctx.target,
+            ) {
+                rejected_here.insert(dedupe_key);
+                continue;
+            }
             match classify_match(
                 &result.title,
                 ctx.aliases,
@@ -1924,6 +2063,18 @@ async fn fan_out_indexers_for_interactive(
 /// so both the Nyaa loop and the indexer-fan-out loop apply the
 /// same relaxed-alias / sibling-rejection / season / episode gate
 /// without code duplication.
+fn canonical_owner_supports_release(
+    title: &str,
+    aliases: &[String],
+    target: &SearchTarget,
+) -> bool {
+    !matches!(target, SearchTarget::Episode(_))
+        || aliases.is_empty()
+        || !TitleNumberEvidence::new(title)
+            .filter_aliases(aliases)
+            .is_empty()
+}
+
 fn apply_interactive_filter_and_push(
     mut result: SearchResult,
     ctx: &InteractiveQueryCtx<'_>,
@@ -1975,6 +2126,9 @@ fn apply_interactive_filter_and_push(
         );
         result.match_provenance = Some(MatchProvenance::seadex(ctx.phase));
         candidates.push(result);
+        return;
+    }
+    if !canonical_owner_supports_release(&result.title, ctx.canonical_owner_aliases, ctx.target) {
         return;
     }
     // Relaxed alias matching: lower threshold than auto search. The
@@ -2291,14 +2445,24 @@ fn resolve_search_overrides_from_row(
 fn add_alternate_aliases(
     aliases: Vec<String>,
     canonical: Vec<String>,
+    variants: Vec<String>,
     alternate_titles: &[String],
-) -> (Vec<String>, Vec<String>) {
+) -> (Vec<String>, Vec<String>, Vec<String>) {
     if alternate_titles.is_empty() {
-        return (aliases, canonical);
+        return (aliases, canonical, variants);
     }
+    let alternate_variants = sequel_variant_aliases(alternate_titles);
     (
-        dedupe_strings([aliases, alternate_titles.to_vec()].concat()),
+        dedupe_strings(
+            [
+                aliases,
+                alternate_titles.to_vec(),
+                alternate_variants.clone(),
+            ]
+            .concat(),
+        ),
         dedupe_strings([canonical, alternate_titles.to_vec()].concat()),
+        dedupe_strings([variants, alternate_variants].concat()),
     )
 }
 
@@ -2344,12 +2508,30 @@ fn append_custom_tokens(queries: Vec<String>, tokens: &str) -> Vec<String> {
 /// visibly in the wild (issue #84 follow-up).
 fn collect_aliases_with_variants(detail: &AnimeDetail) -> (Vec<String>, Vec<String>, Vec<String>) {
     let canonical = collect_aliases(detail);
-    let variants = sequel_variant_aliases(&canonical);
-    let combined = if variants.is_empty() {
-        canonical.clone()
-    } else {
-        dedupe_strings(canonical.iter().chain(variants.iter()).cloned().collect())
-    };
+    let synonyms = collect_synonym_aliases(detail);
+    let synonym_variants = sequel_variant_aliases(&synonyms);
+    // Supplemental names use one query each, rather than the canonical
+    // four-query fan-out. Provider synonym lists can be long: bound the
+    // extra query forms while retaining every full name for matching.
+    const MAX_SYNONYM_QUERY_FORMS: usize = 8;
+    let mut seen: HashSet<String> = canonical.iter().map(|s| normalize_title(s)).collect();
+    let synonym_queries: Vec<String> = synonyms
+        .iter()
+        .chain(synonym_variants.iter())
+        .filter(|s| seen.insert(normalize_title(s)))
+        .take(MAX_SYNONYM_QUERY_FORMS)
+        .cloned()
+        .collect();
+    let variants = dedupe_strings([sequel_variant_aliases(&canonical), synonym_queries].concat());
+    let combined = dedupe_strings(
+        [
+            canonical.clone(),
+            variants.clone(),
+            synonyms,
+            synonym_variants,
+        ]
+        .concat(),
+    );
     (combined, canonical, variants)
 }
 
@@ -2720,6 +2902,7 @@ mod tests {
             phase: MatchPhase::Primary,
             aliases: &aliases,
             indexer_categories: &[],
+            canonical_owner_aliases: &aliases,
             sibling_precompute: &sibling_precompute,
             preferred_groups: &preferred_groups,
             preferred_resolution: "1080p",
@@ -2806,6 +2989,7 @@ mod tests {
             phase: MatchPhase::Primary,
             aliases: &aliases,
             indexer_categories: &[],
+            canonical_owner_aliases: &aliases,
             sibling_precompute: &sibling_precompute,
             preferred_groups: &preferred_groups,
             preferred_resolution: "1080p",
@@ -3510,6 +3694,149 @@ mod tests {
     }
 
     #[test]
+    fn full_provider_synonyms_use_collapsed_queries_and_preserve_canonical_identity() {
+        let mut d = detail(1, "Original Quest Part 2", "", "");
+        d.synonyms = vec![
+            "Alternative Quest Season 2".into(),
+            "Alternative Quest: Season 2".into(),
+        ];
+        let (combined, canonical, variants) = collect_aliases_with_variants(&d);
+        assert_eq!(canonical, vec!["Original Quest Part 2"]);
+        assert!(combined.iter().any(|s| s == "Alternative Quest Season 2"));
+        let queries = build_queries_mixed(&canonical, &variants, &SearchTarget::Episode(3), false);
+        assert!(queries.iter().any(|q| q == "Alternative Quest Season 2 03"));
+        assert!(
+            !queries
+                .iter()
+                .any(|q| q == "Alternative Quest Season 2 - 03")
+        );
+        assert!(
+            !queries
+                .iter()
+                .any(|q| q == "\"Alternative Quest Season 2\" 03")
+        );
+        assert_eq!(
+            infer_season_from_detail(&d),
+            0,
+            "a synonym cannot turn Part 2 into TV season 2"
+        );
+    }
+
+    #[test]
+    fn full_synonym_queries_are_bounded_without_truncating_matching_names() {
+        let mut d = detail(1, "Original Quest", "", "");
+        d.synonyms = (0..100).map(|n| format!("Alternative Quest {n}")).collect();
+        let (combined, canonical, variants) = collect_aliases_with_variants(&d);
+        assert_eq!(variants.len(), 8);
+        assert!(combined.iter().any(|s| s == "Alternative Quest 99"));
+        let queries = build_queries_mixed(&canonical, &variants, &SearchTarget::Episode(3), false);
+        assert_eq!(queries.len(), 4 + 8);
+    }
+
+    #[test]
+    fn full_synonym_queries_exclude_known_related_titles() {
+        let mut d = frieren_minis();
+        d.synonyms.push("Frieren: Beyond Journey's End".into());
+        let (combined, canonical, variants) = collect_aliases_with_variants(&d);
+        let queries = build_queries_mixed(&canonical, &variants, &SearchTarget::Single, false);
+        assert!(
+            !combined
+                .iter()
+                .any(|s| normalize_title(s) == "frieren beyond journeys end")
+        );
+        assert!(
+            !queries
+                .iter()
+                .any(|s| normalize_title(s) == "frieren beyond journeys end")
+        );
+        assert!(queries.iter().any(|s| s == "Sousou no Frieren Mini Anime"));
+    }
+
+    #[test]
+    fn provider_aliases_cannot_hide_a_related_movie_head() {
+        let mut d = detail(
+            1575,
+            "Code Geass: Hangyaku no Lelouch",
+            "Code Geass: Lelouch of the Rebellion",
+            "",
+        );
+        let mut movie = related_anime(
+            "OTHER",
+            "Code Geass: Boukoku no Akito 1 - Yokuryuu wa Maiorita",
+            "Code Geass: Akito the Exiled - The Wyvern Arrives",
+        );
+        movie.format = "MOVIE".into();
+        d.relations.push(movie);
+        d.synonyms = vec![
+            "Code Geass: Boukoku no Akito".into(),
+            "Code Geass Boukoku no Akito TV".into(),
+            "Boukoku".into(),
+        ];
+        let (combined, _, _) = collect_aliases_with_variants(&d);
+        assert!(
+            !combined
+                .iter()
+                .any(|s| normalize_title(s).contains("code geass boukoku no akito"))
+        );
+        let related = collect_related_identity_aliases(&d, &combined);
+        assert!(
+            related
+                .iter()
+                .any(|s| normalize_title(s) == "code geass boukoku no akito")
+        );
+        let precomputed = SiblingRejectPrecompute::build(&combined, &related);
+        assert!(
+            classify_match(
+                "[LNS] Code Geass - Boukoku no Akito (Akito the Exiled) - 01 [BD 1080p]",
+                &combined,
+                &precomputed,
+                &SearchTarget::Episode(1),
+                0,
+                false,
+                0
+            )
+            .is_none()
+        );
+        assert!(
+            !collect_extended_aliases(&d)
+                .iter()
+                .any(|s| normalize_title(s).contains("code geass boukoku no akito"))
+        );
+    }
+
+    #[test]
+    fn provider_aliases_do_not_redefine_episodic_part_identity() {
+        let mut d = detail(1, "Original Quest", "", "");
+        d.synonyms = vec![
+            "Alternative Quest Part 2".into(),
+            "Alternative Quest".into(),
+        ];
+        let (combined, _, _) = collect_aliases_with_variants(&d);
+        assert!(!combined.iter().any(|s| s == "Alternative Quest Part 2"));
+        assert!(combined.iter().any(|s| s == "Alternative Quest"));
+        d.title_romaji = "Original Quest Part 2".into();
+        let (combined, _, _) = collect_aliases_with_variants(&d);
+        assert!(combined.iter().any(|s| s == "Alternative Quest Part 2"));
+    }
+
+    #[test]
+    fn explicit_alternate_names_get_structural_query_variants() {
+        let d = detail(1, "Original Quest", "", "");
+        let (combined, canonical, variants) = collect_aliases_with_variants(&d);
+        let (combined, canonical, variants) = add_alternate_aliases(
+            combined,
+            canonical,
+            variants,
+            &["Alternative Quest Season 2".into()],
+        );
+        assert!(canonical.iter().any(|s| s == "Alternative Quest Season 2"));
+        assert!(combined.iter().any(|s| s == "Alternative Quest S02"));
+        let queries = build_queries_mixed(&canonical, &variants, &SearchTarget::Episode(3), false);
+        assert!(queries.iter().any(|q| q == "Alternative Quest S02 03"));
+        assert!(!queries.iter().any(|q| q == "Alternative Quest S02 - 03"));
+    }
+
+    #[test]
     fn collect_aliases_with_variants_returns_non_empty_combined_canonical_variants() {
         // The mutation surface (12 substitutions of the 3-tuple
         // return) all collapse to either an empty Vec, a single-
@@ -3600,6 +3927,7 @@ mod tests {
         let ctx = InteractiveQueryCtx {
             phase: MatchPhase::Extended,
             aliases: &aliases,
+            canonical_owner_aliases: &aliases,
             sibling_precompute: &sibling_precompute,
             preferred_groups: &preferred_groups,
             preferred_resolution: "1080p",

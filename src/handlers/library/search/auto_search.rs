@@ -119,7 +119,7 @@ pub(super) async fn auto_expand_library_from_pack(
             return 0;
         }
     };
-    let filenames: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
+    let filenames = crate::services::grab_commit::wanted_filenames(&files);
 
     expand_from_files(
         db,

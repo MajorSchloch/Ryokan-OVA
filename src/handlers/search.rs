@@ -544,7 +544,7 @@ pub async fn grab_release(
                             Ok(files) => files,
                             Err(_) => return,
                         };
-                        let filenames: Vec<String> = files.into_iter().map(|f| f.name).collect();
+                        let filenames = crate::services::grab_commit::wanted_filenames(&files);
                         let ctx = crate::services::auto_expand::AutoExpandGrabContext {
                             classification: classification_expand,
                             release_group: String::new(),

@@ -343,10 +343,23 @@ async fn requirements_rejection_researches_next_candidate_for_existing_future_or
             calls[0].1, RIGHT_HASH,
             "the rejected source remains blocklisted"
         );
-        let pending = ryokan::models::grabbed_torrents::get_all_pending(&state.db)
-            .await
-            .unwrap();
-        assert_eq!(pending.len(), 1);
+        // The detached retry's client add is acknowledged before the
+        // subsequent log/progress writes and grab-row transaction. Wait for
+        // the state this assertion actually needs, not just client receipt.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let pending = loop {
+            let pending = ryokan::models::grabbed_torrents::get_all_pending(&state.db)
+                .await
+                .unwrap();
+            if pending.iter().any(|row| row.hash == RIGHT_HASH)
+                || std::time::Instant::now() >= deadline
+            {
+                break pending;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        assert_eq!(pending.len(), 1, "{}", dump_logs(&state.db).await);
+        assert_eq!(pending[0].hash, RIGHT_HASH);
         assert_eq!(pending[0].episode_numbers, vec![3]);
         if on_disk {
             assert_eq!(

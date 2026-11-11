@@ -126,18 +126,17 @@ pub struct PreviewFile {
 /// absolute-numbered file (`- 56` when `cumulative_prior_episodes` is
 /// 47) is episode 9, the number the Wanted page asks the picker for and
 /// the import files it under. See `PreviewFile::episodes`.
-pub(crate) fn file_episodes(name: &str, cumulative_prior_episodes: i32) -> Vec<i32> {
-    if !crate::services::auto_search::is_media_filename(name) {
-        return Vec::new();
-    }
-    let base = name.rsplit('/').next().unwrap_or(name).to_ascii_lowercase();
-    match crate::services::media::parse_episode_span(&base) {
-        Some(span) if !span.special => {
-            crate::services::grab_commit::file_slot_episodes(span, cumulative_prior_episodes)
-                .collect()
-        }
-        _ => Vec::new(),
-    }
+pub(crate) fn file_episodes(
+    name: &str,
+    cumulative_prior_episodes: i32,
+    tv_series: bool,
+) -> Vec<i32> {
+    crate::services::grab_commit::file_episodes_for_series(
+        name,
+        cumulative_prior_episodes,
+        tv_series,
+    )
+    .unwrap_or_default()
 }
 
 /// POST body for `/api/grab/confirm`.
@@ -586,20 +585,25 @@ pub async fn grab_preview_status(
 
     let mut file_list: Vec<PreviewFile> =
         serde_json::from_str(&row.file_list_json).unwrap_or_default();
-    let cumulative_prior_episodes = match row.series_id {
+    let (cumulative_prior_episodes, tv_series) = match row.series_id {
         Some(id) => crate::models::series::get_by_id(&state.db, id)
             .await
             .ok()
             .flatten()
-            .map(|s| s.cumulative_prior_episodes)
-            .unwrap_or(0),
-        None => 0,
+            .map(|s| {
+                (
+                    s.cumulative_prior_episodes,
+                    crate::services::media::is_tv_format(&s.format),
+                )
+            })
+            .unwrap_or((0, true)),
+        None => (0, true),
     };
     // One regex pass plus an anitomy parse per file; a BD pack has
     // hundreds, so keep it off the async worker.
     let file_list = tokio::task::spawn_blocking(move || {
         for f in &mut file_list {
-            f.episodes = file_episodes(&f.name, cumulative_prior_episodes);
+            f.episodes = file_episodes(&f.name, cumulative_prior_episodes, tv_series);
         }
         file_list
     })
@@ -787,6 +791,12 @@ pub async fn grab_confirm(
         .filter(|&i| i < total)
         .collect();
     let wanted_set: std::collections::HashSet<usize> = wanted.iter().copied().collect();
+    if wanted_set.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Choose at least one file before confirming.".into(),
+        ));
+    }
     let unwanted: Vec<usize> = (0..total).filter(|i| !wanted_set.contains(i)).collect();
 
     let mut file_priority_errors: Vec<String> = Vec::new();
@@ -808,9 +818,10 @@ pub async fn grab_confirm(
     let resume_error = client.resume(&row.info_hash).await.err();
 
     // Library attribution. Writes the `grabbed_torrents` row
-    // and kicks off sibling auto-expand on the user-selected subset —
+    // and kicks off sibling auto-expand on the user-selected files —
     // files the user unchecked are excluded from the sibling-detection
-    // file list so a deselected sibling (user unchecked all its
+    // file list with empty names, retaining client indices, so a deselected sibling
+    // (user unchecked all its
     // episodes) doesn't get a ghost library row. Decision #7.
     //
     // We run this BEFORE deleting the pending row so a DB panic inside
@@ -824,10 +835,8 @@ pub async fn grab_confirm(
     // is imperfect (`.mkv + subs` produces false positives) but only
     // fires when a modal predating the fix reaches an updated server.
     let is_batch = extract_release_is_batch(&row.release_metadata_json).unwrap_or(total > 1);
-    let selected_filenames: Vec<String> = wanted
-        .iter()
-        .filter_map(|&i| files.get(i).map(|f| f.name.clone()))
-        .collect();
+    let filenames: Vec<String> = files.iter().map(|file| file.name.clone()).collect();
+    let selected_filenames = grab_commit::filenames_for_selection(&filenames, Some(&wanted));
     let new_grab_id = grab_commit::commit_grab_and_expand(
         &state,
         &row,
@@ -1752,19 +1761,32 @@ mod file_episode_tests {
     use super::file_episodes;
 
     #[test]
+    fn ova_main_content_remains_a_picker_episode_slot() {
+        assert_eq!(file_episodes("Show - OVA 01.mkv", 0, false), vec![1]);
+        assert!(file_episodes("Show - OVA 01.mkv", 0, true).is_empty());
+        assert!(file_episodes("Specials/Show - 01.mkv", 0, true).is_empty());
+    }
+
+    #[test]
     fn media_files_parse_extras_and_junk_do_not() {
-        assert_eq!(file_episodes("[Group] Show - 02 (1080p).mkv", 0), vec![2]);
-        assert_eq!(file_episodes("Show/Season 1/Show - S01E03.mkv", 0), vec![3]);
         assert_eq!(
-            file_episodes("[Group] Show - 05-06 (1080p).mkv", 0),
+            file_episodes("[Group] Show - 02 (1080p).mkv", 0, true),
+            vec![2]
+        );
+        assert_eq!(
+            file_episodes("Show/Season 1/Show - S01E03.mkv", 0, true),
+            vec![3]
+        );
+        assert_eq!(
+            file_episodes("[Group] Show - 05-06 (1080p).mkv", 0, true),
             vec![5, 6]
         );
-        assert!(file_episodes("[Group] Show - NCOP1.mkv", 0).is_empty());
+        assert!(file_episodes("[Group] Show - NCOP1.mkv", 0, true).is_empty());
         assert!(
-            file_episodes("[Group] Show - OVA 01.mkv", 0).is_empty(),
+            file_episodes("[Group] Show - OVA 01.mkv", 0, true).is_empty(),
             "a special is not an episode slot"
         );
-        assert!(file_episodes("readme - 01.txt", 0).is_empty());
+        assert!(file_episodes("readme - 01.txt", 0, true).is_empty());
     }
 
     #[test]
@@ -1772,18 +1794,21 @@ mod file_episode_tests {
         // JJK S3 E9 ships as `- 56` with 47 prior episodes; the Wanted
         // page asks the picker for episode 9 and must find this file.
         assert_eq!(
-            file_episodes("[S] Jujutsu Kaisen - 56 (1080p).mkv", 47),
+            file_episodes("[S] Jujutsu Kaisen - 56 (1080p).mkv", 47, true),
             vec![9]
         );
         assert_eq!(
-            file_episodes("[S] Jujutsu Kaisen - 56-57 (1080p).mkv", 47),
+            file_episodes("[S] Jujutsu Kaisen - 56-57 (1080p).mkv", 47, true),
             vec![9, 10]
         );
         // Already relative: a first-season number, or a SxxExx name.
         assert_eq!(
-            file_episodes("[S] Jujutsu Kaisen - 09 (1080p).mkv", 47),
+            file_episodes("[S] Jujutsu Kaisen - 09 (1080p).mkv", 47, true),
             vec![9]
         );
-        assert_eq!(file_episodes("Jujutsu Kaisen - S03E09.mkv", 47), vec![9]);
+        assert_eq!(
+            file_episodes("Jujutsu Kaisen - S03E09.mkv", 47, true),
+            vec![9]
+        );
     }
 }

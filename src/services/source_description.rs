@@ -191,7 +191,7 @@ async fn rate_limit() {
 /// Parse a Nyaa view-page HTML response and return the plain-text content
 /// of the description block. Nyaa renders submitted markdown into
 /// `<div id="torrent-description">`; everything else is chrome.
-fn extract_description_text(html: &str) -> String {
+pub(crate) fn extract_description_text(html: &str) -> String {
     let document = Html::parse_document(html);
     let Ok(selector) = Selector::parse("#torrent-description") else {
         return String::new();
