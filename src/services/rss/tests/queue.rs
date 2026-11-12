@@ -43,6 +43,7 @@ fn meta() -> Vec<SeriesMeta> {
 
 fn item(title: &str) -> RssItem {
     RssItem {
+        published_at: None,
         seeders: None,
         title: title.to_string(),
         link: String::new(),

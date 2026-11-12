@@ -41,6 +41,7 @@ fn series_named(title: &str) -> series::Series {
 
 fn item(title: &str) -> RssItem {
     RssItem {
+        published_at: None,
         seeders: None,
         title: title.to_string(),
         link: String::new(),

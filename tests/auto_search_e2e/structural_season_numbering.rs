@@ -60,13 +60,13 @@ async fn fixture() -> (
 }
 
 async fn serve(server: &MockServer, title: &str) {
+    // This suite checks structural season ownership, so its synthetic source
+    // must not predate the fixture's canonical 2026 premiere year.
+    let row = nyaa_row(HASH, 99981, title, "500 MiB", 50)
+        .replace("<td>2024-04-01 12:00</td>", "<td>2026-04-01 12:00</td>");
     Mock::given(method("GET"))
         .and(path("/"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(nyaa_results_page(&nyaa_row(
-                HASH, 99981, title, "500 MiB", 50,
-            ))),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string(nyaa_results_page(&row)))
         .mount(server)
         .await;
     set_nyaa_base(&server.uri());

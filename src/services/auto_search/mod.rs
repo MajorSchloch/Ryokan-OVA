@@ -851,6 +851,20 @@ async fn collect_scored_batches_for_target_filtered(
             continue;
         }
         if require_verbatim
+            && let Some(bound) =
+                crate::services::release_numbering::PremiereBound::from_detail(detail)
+            && let Err(reason) = bound.check(result.published_at)
+        {
+            logger::warn(
+                db,
+                LogCategory::Grab,
+                &format!("Automatic grab held: {}", result.title),
+                &reason,
+            )
+            .await;
+            continue;
+        }
+        if require_verbatim
             && config.media_requirements_enabled
             && !passes_presearch_requirements(
                 &result,
@@ -881,6 +895,9 @@ async fn collect_scored_batches_for_target_filtered(
     let automatic_sources = crate::services::source_numbering::loader::Resolver::default();
     let ctx = AutoQueryCtx {
         automatic_sources: &automatic_sources,
+        premiere_bound: require_verbatim
+            .then(|| crate::services::release_numbering::PremiereBound::from_detail(detail))
+            .flatten(),
         numbering_target: target,
         availability: require_verbatim.then_some(&availability),
         db,
@@ -1254,6 +1271,18 @@ async fn collect_scored_for_target_filtered(
         if !availability.allows_result(&result) {
             continue;
         }
+        if let Some(bound) = crate::services::release_numbering::PremiereBound::from_detail(detail)
+            && let Err(reason) = bound.check(result.published_at)
+        {
+            logger::warn(
+                db,
+                LogCategory::Grab,
+                &format!("Automatic grab held: {}", result.title),
+                &reason,
+            )
+            .await;
+            continue;
+        }
         if config.media_requirements_enabled
             && !passes_presearch_requirements(
                 &result,
@@ -1336,6 +1365,7 @@ async fn collect_scored_for_target_filtered(
         crate::services::indexers::search_categories(&detail.format, detail.is_adult);
     let ctx = AutoQueryCtx {
         automatic_sources: &automatic_sources,
+        premiere_bound: crate::services::release_numbering::PremiereBound::from_detail(detail),
         numbering_target: target,
         availability: Some(&availability),
         db,
@@ -1620,6 +1650,9 @@ async fn collect_scored_for_target_filtered(
 /// `AutoQueryCtx { aliases: &all_aliases, ..ctx }`.
 impl AutoQueryCtx<'_> {
     async fn apply_source(&self, result: &mut SearchResult) -> Result<bool, String> {
+        if let Some(bound) = self.premiere_bound {
+            bound.check(result.published_at)?;
+        }
         if crate::services::release_numbering::apply_reviewed_source(
             self.db,
             self.anilist_id,
@@ -1676,6 +1709,7 @@ impl AutoQueryCtx<'_> {
 #[derive(Clone, Copy)]
 struct AutoQueryCtx<'a> {
     automatic_sources: &'a crate::services::source_numbering::loader::Resolver,
+    premiere_bound: Option<crate::services::release_numbering::PremiereBound>,
     numbering_target: &'a SearchTarget,
     availability: Option<&'a crate::services::release_availability::Policy>,
     minimum_resolution: Option<Resolution>,
@@ -3087,6 +3121,7 @@ mod tests {
             info_hash: "deadbeef".to_string(),
             score_breakdown: Vec::new(),
             upload_date: String::new(),
+            published_at: None,
             indexer_id: None,
             indexer_name: String::new(),
         };
@@ -3179,6 +3214,7 @@ mod tests {
             info_hash: "deadbeef".to_string(),
             score_breakdown: Vec::new(),
             upload_date: String::new(),
+            published_at: None,
             indexer_id: None,
             indexer_name: String::new(),
         };
@@ -4118,6 +4154,7 @@ mod tests {
                 info_hash: hash.to_string(),
                 score_breakdown: Vec::new(),
                 upload_date: String::new(),
+                published_at: None,
                 indexer_id: None,
                 indexer_name: String::new(),
             }
@@ -4248,6 +4285,7 @@ mod episode_set_tests {
             info_hash: String::new(),
             score_breakdown: Vec::new(),
             upload_date: String::new(),
+            published_at: None,
             indexer_id: None,
             indexer_name: String::new(),
         }

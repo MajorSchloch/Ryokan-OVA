@@ -7,6 +7,7 @@ mod evaluate_candidate;
 mod exact_title;
 mod parse_release;
 mod provider_aliases;
+mod publication_date;
 mod queue;
 mod source;
 mod source_numbering;

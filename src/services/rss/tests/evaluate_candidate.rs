@@ -39,6 +39,7 @@ fn series(status: &str) -> series::Series {
 
 fn item_with(title: &str, is_batch: bool) -> RssItem {
     RssItem {
+        published_at: None,
         seeders: None,
         title: title.to_string(),
         link: String::new(),

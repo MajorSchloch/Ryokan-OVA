@@ -247,6 +247,8 @@ impl RssSource {
 
 #[derive(Debug, Clone)]
 pub struct RssItem {
+    /// Known positive publication timestamp from the feed or indexer.
+    pub published_at: Option<i64>,
     /// Known torrent seeders. None means the feed omitted the statistic;
     /// Usenet sources do not use this field.
     pub seeders: Option<i32>,
@@ -410,6 +412,13 @@ async fn exact_source_match(
             if proofs.len() != 1 {
                 return Err("Episode mapping: automatic source has zero or multiple tracked owners; source remains on hold".into());
             }
+            if let Some(bound) = all_meta
+                .iter()
+                .find(|meta| meta.series.anilist_id == proofs[0].target_anilist_id)
+                .and_then(|meta| meta.premiere_bound)
+            {
+                bound.check(item.published_at)?;
+            }
             saved_sources =
                 vec![crate::models::source_numbering::save_automatic(db, &proofs[0]).await?];
         } else if known_source {
@@ -419,15 +428,18 @@ async fn exact_source_match(
     let known_source = !saved_sources.is_empty();
     let mut selected = None;
     for saved in saved_sources {
-        if !automatic_scope {
-            crate::services::source_numbering::loader::refresh(db, &saved.proof).await?;
-        }
         let Some(meta) = all_meta
             .iter()
             .find(|meta| meta.series.anilist_id == saved.proof.target_anilist_id)
         else {
             continue;
         };
+        if let Some(bound) = meta.premiere_bound {
+            bound.check(item.published_at)?;
+        }
+        if !automatic_scope {
+            crate::services::source_numbering::loader::refresh(db, &saved.proof).await?;
+        }
         if selected.is_some() {
             return Err("Episode mapping: reviewed torrent has multiple tracked owners; select its release explicitly".into());
         }
@@ -474,6 +486,7 @@ struct SeriesMeta {
     /// season/part numbers or the core aliases used for family mapping.
     provider_aliases: Vec<String>,
     related_identity: Option<auto_search::SiblingRejectPrecompute>,
+    premiere_bound: Option<crate::services::release_numbering::PremiereBound>,
     aliases: Vec<String>,
     core_aliases: Vec<String>,
     collapsed_aliases: Vec<String>,
@@ -527,6 +540,9 @@ impl SeriesMeta {
             original_aliases: aliases,
             provider_aliases: Vec::new(),
             related_identity: None,
+            premiere_bound: crate::services::release_numbering::PremiereBound::from_year(
+                series.season_year,
+            ),
             aliases: expanded,
             core_aliases,
             collapsed_aliases,
@@ -537,6 +553,9 @@ impl SeriesMeta {
     }
 
     fn with_cached_detail(mut self, detail: &crate::services::anilist::AnimeDetail) -> Self {
+        self.premiere_bound =
+            crate::services::release_numbering::PremiereBound::from_detail(detail)
+                .or(self.premiere_bound);
         self.provider_aliases = auto_search::collect_synonym_aliases(detail)
             .iter()
             .map(|name| auto_search::normalize_title(name))
@@ -1098,6 +1117,32 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             .await;
             continue;
         };
+        if let Some(bound) = all_meta
+            .iter()
+            .find(|meta| meta.series.id == found.series.id)
+            .and_then(|meta| meta.premiere_bound)
+            && let Err(reason) = bound.check(item.published_at)
+        {
+            skipped += 1;
+            let _ = rss::record_decision(
+                &state.db,
+                rss::DecisionRecord {
+                    item_key: &item_key,
+                    title: &item.title,
+                    link: &item.link,
+                    series_id: Some(found.series.id),
+                    series_title: &found.series.title,
+                    group_name: &item.group,
+                    is_batch: item.is_batch,
+                    decision: "rejected",
+                    reason: &reason,
+                    source: src_str,
+                    source_id: src_id,
+                },
+            )
+            .await;
+            continue;
+        }
         let cfg = crate::services::language_preferences::apply(
             &cfg,
             per_release_languages
@@ -2259,6 +2304,7 @@ pub async fn match_library_title(
     // here because this path is title-only matching for the
     // post-grab attribution helper, not a sync-time fetch.
     let pseudo = RssItem {
+        published_at: None,
         seeders: None,
         title: title.to_string(),
         link: String::new(),
@@ -2314,6 +2360,7 @@ impl CanonicalHistory {
         // Same synthetic-item pattern as `find_series_for_title` —
         // matcher inputs only, no real grab.
         let pseudo = RssItem {
+            published_at: None,
             seeders: None,
             title: title.to_string(),
             link: String::new(),

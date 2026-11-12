@@ -154,6 +154,7 @@ fn automatic_availability_uses_configured_protocol_not_hashes_or_zero_peer_place
 
 fn feed_item(source: RssSource, link: &str) -> RssItem {
     RssItem {
+        published_at: None,
         seeders: None,
         title: "[Group] Example Show - 01 [1080p]".into(),
         link: link.into(),

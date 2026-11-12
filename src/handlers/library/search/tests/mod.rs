@@ -1097,6 +1097,7 @@ mod handler_endpoints {
             info_hash: info_hash.into(),
             score_breakdown: Vec::new(),
             upload_date: String::new(),
+            published_at: None,
             indexer_id: None,
             indexer_name: String::new(),
         }
@@ -1210,6 +1211,7 @@ mod handler_endpoints {
                 detail: Some("42 seeders".into()),
             }],
             upload_date: String::new(),
+            published_at: None,
             indexer_id: Some(7),
             indexer_name: "Example-Indexer".into(),
         };

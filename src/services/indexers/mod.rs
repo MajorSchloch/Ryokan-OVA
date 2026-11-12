@@ -634,6 +634,7 @@ impl Release {
         let resolution = extract_resolution_from_title(&self.title);
         let is_batch = detect_batch_from_title(&self.title);
         crate::services::rss::RssItem {
+            published_at: (self.publish_date > 0).then_some(self.publish_date),
             seeders: Some(self.seeders),
             title: self.title.clone(),
             link: self.link.clone(),
@@ -707,6 +708,7 @@ impl Release {
             // pubDate from the release as ISO-ish; the rest of
             // Ryokan's UI only renders the string verbatim.
             upload_date: format_publish_date(self.publish_date),
+            published_at: (self.publish_date > 0).then_some(self.publish_date),
             // PR #107 review fix #7: propagate the indexer_id so
             // grabbed_torrents.indexer_id can be populated at grab
             // time. Without this, the indexer_id FK column would be
@@ -918,6 +920,29 @@ mod tests {
             "indexer_name must round-trip through into_search_result()"
         );
         assert_eq!(sr.indexer_id, Some(7));
+    }
+
+    #[test]
+    fn publication_date_indexer_propagates_known_2019_time_to_search_and_rss() {
+        let mut r = release(7, 25, "abc", "g1", "[Fixture] Black Clover - 01", 10);
+        r.publish_date = 1_546_300_800;
+        let rss = r.to_rss_item("Indexer7", "newznab");
+        let search = r.into_search_result();
+        assert_eq!(rss.published_at, Some(1_546_300_800));
+        assert_eq!(search.published_at, Some(1_546_300_800));
+        assert_eq!(search.upload_date, "2019-01-01 00:00");
+    }
+
+    #[test]
+    fn publication_date_indexer_unknown_or_nonpositive_time_stays_absent() {
+        for timestamp in [0, -1] {
+            let mut r = release(7, 25, "abc", "g1", "Show - 01", 10);
+            r.publish_date = timestamp;
+            assert_eq!(r.to_rss_item("Indexer7", "torznab").published_at, None);
+            let search = r.into_search_result();
+            assert_eq!(search.published_at, None);
+            assert!(search.upload_date.is_empty());
+        }
     }
 
     /// Counterpart: a Release with an empty indexer_name (defensive
