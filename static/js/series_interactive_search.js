@@ -61,19 +61,10 @@ function openInteractiveSearch(epNum, btn) {
     const body = document.getElementById('isearch-body');
     // ASCII separator: house style bans em dashes in user-facing text.
     titleEl.textContent = `Interactive Search: Episode ${epNum}`;
-    body.innerHTML = '<div class="isearch-loading"><span class="isearch-loading-spinner" aria-hidden="true"></span><span>Searching indexers for episode ' + epNum + '</span></div>';
     modal.style.display = 'flex';
 
-    // HTMX-driven swap (issue #166). `htmx.ajax` sends `HX-Request: true`,
-    // so the handler returns the rendered partial; HTMX swaps it into
-    // `#isearch-body`. Per-row Grab buttons carry their full result JSON
-    // in `data-result` for `grabInteractiveResult` to read on click.
-    window.htmx.ajax('GET', `/api/series/${SD.id}/interactive-search/${epNum}`, {
-        target: '#isearch-body',
-        swap: 'innerHTML',
-    }).catch(function () {
-        body.innerHTML = '<div style="text-align:center;color:var(--red);padding:32px">Search failed</div>';
-    });
+    window.ryokanInteractiveSearch.load(body, `/api/series/${SD.id}/interactive-search/${epNum}`,
+        'Searching indexers for episode ' + epNum);
 }
 
 function grabInteractiveResult(epNum, btn) {
@@ -177,6 +168,7 @@ function grabInteractiveResult(epNum, btn) {
 function closeInteractiveSearch(e) {
     const modal = document.getElementById('isearch-modal');
     if (e && e.target !== modal) return;
+    window.ryokanInteractiveSearch.cancel(document.getElementById('isearch-body'));
     modal.style.display = 'none';
 }
 
@@ -191,15 +183,10 @@ function openInteractiveBatchSearch(btn) {
     const titleEl = document.getElementById('isearch-title');
     const body = document.getElementById('isearch-body');
     titleEl.textContent = 'Interactive Batch Search';
-    body.innerHTML = '<div class="isearch-loading"><span class="isearch-loading-spinner" aria-hidden="true"></span><span>Searching indexers for batch releases</span></div>';
     modal.style.display = 'flex';
 
-    window.htmx.ajax('GET', `/api/series/${SD.id}/interactive-search-batch`, {
-        target: '#isearch-body',
-        swap: 'innerHTML',
-    }).catch(function () {
-        body.innerHTML = '<div style="text-align:center;color:var(--red);padding:32px">Search failed</div>';
-    });
+    window.ryokanInteractiveSearch.load(body, `/api/series/${SD.id}/interactive-search-batch`,
+        'Searching indexers for batch releases');
 }
 
 function grabInteractiveBatchResult(btn) {

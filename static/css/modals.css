@@ -266,6 +266,10 @@
     margin-right: auto;
 }
 
+.isearch-retry {
+    margin-top: 16px;
+}
+
 .interactive-search-table {
     width: 100%;
     border-collapse: collapse;
