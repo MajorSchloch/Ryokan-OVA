@@ -45,7 +45,9 @@ pub async fn sweep_once(state: &AppState) -> Result<usize, String> {
     let expired = pending_grabs::list_expired(&state.db).await?;
     let count = expired.len();
     for row in expired {
-        auto_commit_row(state, &row).await;
+        if !auto_commit_row(state, &row).await {
+            continue;
+        }
         if let Err(e) = pending_grabs::delete(&state.db, &row.preview_id).await {
             tracing::warn!(
                 target: "ryokan::services::grab_sweep",
@@ -59,15 +61,37 @@ pub async fn sweep_once(state: &AppState) -> Result<usize, String> {
     Ok(count)
 }
 
+async fn hold_reviewed_preview(
+    state: &AppState,
+    row: &pending_grabs::PendingGrab,
+    reason: &str,
+) -> Result<(), String> {
+    pending_grabs::set_error(
+        &state.db,
+        &row.preview_id,
+        &format!(
+            "{}{reason}",
+            crate::services::source_numbering_grab::HOLD_PREFIX
+        ),
+    )
+    .await
+}
+
 /// Best-effort auto-commit for one expired row. Read-only against
 /// the passed `AppState` — all mutation goes through `DownloadClient`
 /// trait methods. Failures are logged and swallowed so the caller
 /// can delete the pending row regardless.
-async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
+async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) -> bool {
     // Don't unwind a previously-errored row. The handler already
     // surfaced the failure to the modal (status: "error") and the
     // torrent is either gone or in a broken state the user should
     // decide about via the Downloads page.
+    if row
+        .error_message
+        .starts_with(crate::services::source_numbering_grab::HOLD_PREFIX)
+    {
+        return false;
+    }
     if !row.error_message.is_empty() {
         tracing::debug!(
             target: "ryokan::services::grab_sweep",
@@ -75,7 +99,7 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
             info_hash = %row.info_hash,
             "evicted errored pending grab without auto-commit"
         );
-        return;
+        return true;
     }
 
     // Metadata never arrived → no file list to mark. Best we can
@@ -89,7 +113,7 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
             info_hash = %row.info_hash,
             "evicted pending grab without file list; no auto-commit possible"
         );
-        return;
+        return true;
     }
 
     // Multi-client routing — the auto-commit-on-walkaway path is the
@@ -115,7 +139,7 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
             stamped_client_id = ?row.download_client_id,
             "download client not available; can't auto-commit expired pending grab"
         );
-        return;
+        return true;
     };
 
     // The picker posted an empty selection: the user left with nothing
@@ -143,7 +167,7 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
             we_added_torrent = %row.we_added_torrent,
             "cancelled abandoned pending grab; the picker's last selection was empty"
         );
-        return;
+        return true;
     }
 
     // Parse the file list — we need the filenames for auto-expand
@@ -159,7 +183,7 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
             info_hash = %row.info_hash,
             "pending grab had an empty file_list_json array; skipping auto-commit"
         );
-        return;
+        return true;
     }
 
     // The picker's last posted selection, when there is one: the
@@ -180,12 +204,54 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
             tracing::warn!(preview_id = %row.preview_id, %error,
                 "auto-cancel failed for a selection with no valid file indices");
         }
-        return;
+        return true;
     }
     let wanted: Vec<usize> = match &selection {
         Some(v) => v.clone(),
         None => (0..file_count).collect(),
     };
+    let bound_mapping = if let Some(series_id) = row.series_id {
+        let selected_names: Vec<_> = wanted
+            .iter()
+            .map(|&index| files[index].name.clone())
+            .collect();
+        match crate::services::source_numbering_grab::mapping_for_selection(
+            &state.db,
+            series_id,
+            &row.info_hash,
+            &selected_names,
+        )
+        .await
+        {
+            Ok(mapping) => mapping,
+            Err(reason) => {
+                let _ = hold_reviewed_preview(state, row, &reason).await;
+                return false;
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(mapping) = &bound_mapping {
+        let names: Vec<_> = files.iter().map(|file| file.name.clone()).collect();
+        if let Err(reason) = crate::services::source_numbering_grab::validate_preview_manifest(
+            client.as_ref(),
+            &row.info_hash,
+            mapping,
+            &names,
+        )
+        .await
+        {
+            let _ = hold_reviewed_preview(state, row, &reason).await;
+            return false;
+        }
+    }
+    if bound_mapping.is_some()
+        && let Err(reason) = client.pause(&row.info_hash).await
+    {
+        let _ = hold_reviewed_preview(state, row, &reason).await;
+        return false;
+    }
     if let Some(sel) = &selection {
         let chosen: std::collections::HashSet<usize> = sel.iter().copied().collect();
         let unwanted: Vec<usize> = (0..file_count).filter(|i| !chosen.contains(i)).collect();
@@ -201,6 +267,10 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
                 error = %e,
                 "auto-commit set_file_wanted(selection, false) failed; the unticked files may download too"
             );
+            if bound_mapping.is_some() {
+                let _ = hold_reviewed_preview(state, row, &e).await;
+                return false;
+            }
         }
     }
     if let Err(e) = client.set_file_wanted(&row.info_hash, &wanted, true).await {
@@ -224,10 +294,28 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
             error = %e,
             "auto-commit set_file_wanted(all=true) failed; skipping resume — user can recover from the Downloads page"
         );
-        return;
+        if bound_mapping.is_some() {
+            let _ = hold_reviewed_preview(state, row, &e).await;
+            return false;
+        }
+        return true;
     }
 
-    if let Err(e) = client.resume(&row.info_hash).await {
+    if let Some(mapping) = &bound_mapping
+        && let Err(reason) = crate::services::source_numbering_grab::verify_client_selection(
+            client.as_ref(),
+            &row.info_hash,
+            mapping,
+        )
+        .await
+    {
+        let _ = hold_reviewed_preview(state, row, &reason).await;
+        return false;
+    }
+
+    if bound_mapping.is_none()
+        && let Err(e) = client.resume(&row.info_hash).await
+    {
         tracing::warn!(
             target: "ryokan::services::grab_sweep",
             preview_id = %row.preview_id,
@@ -235,7 +323,7 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
             error = %e,
             "auto-commit resume failed; torrent may remain paused"
         );
-        return;
+        return true;
     }
 
     // Library attribution uses the same index-aligned masked filename
@@ -251,7 +339,7 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
     let wanted_count = wanted.len();
     let names: Vec<String> = files.into_iter().map(|file| file.name).collect();
     let filenames = crate::services::grab_commit::filenames_for_selection(&names, Some(&wanted));
-    crate::services::grab_commit::commit_grab_and_expand(
+    let grab_id = crate::services::grab_commit::commit_grab_and_expand(
         state,
         row,
         filenames,
@@ -259,6 +347,31 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
         is_batch,
     )
     .await;
+    if let Some(mapping) = &bound_mapping {
+        if grab_id.is_none() {
+            let _ = hold_reviewed_preview(
+                state,
+                row,
+                "The episode decision could not be saved. The reviewed source stays paused.",
+            )
+            .await;
+            return false;
+        }
+        let checked = crate::services::source_numbering_grab::verify_client_selection(
+            client.as_ref(),
+            &row.info_hash,
+            mapping,
+        )
+        .await;
+        if let Err(reason) = checked {
+            let _ = hold_reviewed_preview(state, row, &reason).await;
+            return false;
+        }
+        if let Err(reason) = client.resume(&row.info_hash).await {
+            let _ = hold_reviewed_preview(state, row, &reason).await;
+            return false;
+        }
+    }
 
     tracing::info!(
         target: "ryokan::services::grab_sweep",
@@ -268,6 +381,7 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
         wanted_count = %wanted_count,
         "auto-committed abandoned pending grab; torrent is now downloading with the picker's selection"
     );
+    true
 }
 
 #[cfg(test)]

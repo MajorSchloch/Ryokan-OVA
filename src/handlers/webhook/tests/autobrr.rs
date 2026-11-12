@@ -308,6 +308,179 @@ struct RequirementsFixture {
     adds: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
+#[tokio::test]
+async fn automatic_availability_webhook_holds_zero_unknown_and_below_floor_without_adding() {
+    for seeders in [None, Some(-1), Some(0), Some(2)] {
+        let db = in_memory_pool().await;
+        seed_autobrr_enabled(&db, KEY).await;
+        seed_series(&db).await;
+        sqlx::query("UPDATE config SET minimum_torrent_seeders=3 WHERE id=1")
+            .execute(&db)
+            .await
+            .unwrap();
+        let client = AcceptingClient::default();
+        let adds = client.adds.clone();
+        let state = build_test_app_state(db.clone(), Some(std::sync::Arc::new(client)));
+        let mut payload = serde_json::json!({
+            "torrent_name": "Test Show - 01 [1080p]", "indexer": "Nyaa",
+            "info_hash": "c12fe1c06bba254a9dc9f519b335aa7c1367a88a",
+            "magnet_uri": "magnet:?xt=urn:btih:c12fe1c06bba254a9dc9f519b335aa7c1367a88a",
+        });
+        if let Some(seeders) = seeders {
+            payload["seeders"] = serde_json::json!(seeders);
+        }
+        let (status, body) =
+            post_payload(autobrr_webhook_router(state), &payload.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body.contains("\"status\":\"skipped\"") && body.contains("seeder"),
+            "{body}"
+        );
+        assert_eq!(adds.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let grabs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM grabbed_torrents")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(grabs, 0);
+    }
+}
+
+#[tokio::test]
+async fn automatic_availability_webhook_accepts_floor_and_explicit_zero_optout() {
+    for (floor, seeders) in [(3, Some(3)), (0, None)] {
+        let db = in_memory_pool().await;
+        seed_autobrr_enabled(&db, KEY).await;
+        seed_series(&db).await;
+        sqlx::query("UPDATE config SET minimum_torrent_seeders=? WHERE id=1")
+            .bind(floor)
+            .execute(&db)
+            .await
+            .unwrap();
+        let client = AcceptingClient::default();
+        let adds = client.adds.clone();
+        let state = build_test_app_state(db.clone(), Some(std::sync::Arc::new(client)));
+        let payload = serde_json::json!({
+            "torrent_name": "Test Show - 01 [1080p]", "indexer": "Nyaa", "seeders": seeders,
+            "info_hash": "c12fe1c06bba254a9dc9f519b335aa7c1367a88a",
+            "magnet_uri": "magnet:?xt=urn:btih:c12fe1c06bba254a9dc9f519b335aa7c1367a88a",
+        });
+        let (status, body) =
+            post_payload(autobrr_webhook_router(state), &payload.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("\"status\":\"ok\""), "{body}");
+        assert_eq!(adds.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn reviewed_source_webhook_holds_current_and_historical_proofs_before_any_add() {
+    for historical in [false, true] {
+        let db = in_memory_pool().await;
+        seed_autobrr_enabled(&db, KEY).await;
+        seed_series(&db).await;
+        let proof = crate::services::source_numbering::tests::lagoon_proof();
+        crate::models::source_numbering::save_reviewed(&db, &proof)
+            .await
+            .unwrap();
+        if historical {
+            let owner =
+                crate::test_support::seed_series(&db, 1519, "Black Lagoon: The Second Barrage")
+                    .await;
+            let mapping =
+                crate::services::release_numbering::ReleaseMapping::from_bound_source(&proof)
+                    .unwrap();
+            crate::models::grabbed_torrents::record_grab_with_release_mapping(
+                &db,
+                &proof.info_hash,
+                "Reviewed source",
+                owner,
+                &mapping.episodes(),
+                true,
+                Some(&mapping),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            sqlx::query("UPDATE grabbed_torrents SET state='removed' WHERE hash=?")
+                .bind(&proof.info_hash)
+                .execute(&db)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM source_numbering_decisions")
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM grabbed_torrents")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let client = AcceptingClient::default();
+        let adds = client.adds.clone();
+        let state = build_test_app_state(db.clone(), Some(std::sync::Arc::new(client)));
+        let payload = serde_json::json!({
+            "torrent_name": "Test Show - 01 [1080p]", "indexer": "Nyaa", "seeders": 10,
+            "info_hash": proof.info_hash, "magnet_uri": format!("magnet:?xt=urn:btih:{}", proof.info_hash)
+        });
+        let (status, body) =
+            post_payload(autobrr_webhook_router(state), &payload.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body.contains("\"status\":\"skipped\"") && body.contains("review"),
+            "{body}"
+        );
+        assert_eq!(adds.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM grabbed_torrents")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(after, before);
+    }
+}
+
+#[tokio::test]
+async fn automatic_availability_webhook_never_applies_peer_floor_to_configured_usenet() {
+    let db = in_memory_pool().await;
+    seed_autobrr_enabled(&db, KEY).await;
+    seed_series(&db).await;
+    let id = seed_indexer(&db, "Usenet source").await;
+    sqlx::query(
+        "UPDATE indexers SET kind='newznab',download_client_id=1,caps_json='{}' WHERE id=?",
+    )
+    .bind(id)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE config SET minimum_torrent_seeders=10000 WHERE id=1")
+        .execute(&db)
+        .await
+        .unwrap();
+    let client = AcceptingClient {
+        usenet: true,
+        ..Default::default()
+    };
+    let adds = client.adds.clone();
+    let state = build_test_app_state(db, None);
+    *state.download_clients.write().await = std::sync::Arc::new(crate::DownloadClientPool {
+        clients: std::collections::HashMap::from([(
+            1,
+            std::sync::Arc::new(client)
+                as std::sync::Arc<dyn crate::services::download_client::DownloadClient>,
+        )]),
+        default_torrent_id: None,
+        default_usenet_id: Some(1),
+    });
+    rebuild_indexer_cache(&state).await;
+    let payload = serde_json::json!({
+        "torrent_name": "Test Show - 01 [1080p]", "indexer": "Usenet source", "seeders": 0,
+        "torrent_url": "https://example.test/download/1.nzb"
+    });
+    let (status, body) = post_payload(autobrr_webhook_router(state), &payload.to_string()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("\"status\":\"ok\""), "{body}");
+    assert_eq!(adds.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 async fn requirements_fixture() -> RequirementsFixture {
     let db = in_memory_pool().await;
     seed_autobrr_enabled(&db, KEY).await;
@@ -346,6 +519,7 @@ async fn requirements_fixture() -> RequirementsFixture {
 fn requirements_payload(title: &str) -> String {
     serde_json::json!({
         "torrent_name": title,
+        "seeders": 1,
         "info_hash": "c12fe1c06bba254a9dc9f519b335aa7c1367a88a",
         "magnet_uri": "magnet:?xt=urn:btih:c12fe1c06bba254a9dc9f519b335aa7c1367a88a",
         "indexer": "Nyaa",
@@ -572,6 +746,7 @@ async fn a_push_without_a_hash_records_the_torrents_own() {
 
     let body = serde_json::json!({
         "torrent_name": "Test Show - 01 [1080p]",
+        "seeders": 1,
         "torrent_url": format!("{}/t/1.torrent", tracker.uri()),
         "indexer": "Nyaa",
     })
@@ -597,7 +772,7 @@ async fn a_magnet_push_without_a_hash_takes_the_magnets() {
     );
     rebuild_indexer_cache(&state).await;
     let app = autobrr_webhook_router(state);
-    let body = r#"{"torrent_name": "Test Show - 02", "magnet_uri": "magnet:?xt=urn:btih:C12FE1C06BBA254A9DC9F519B335AA7C1367A88A", "indexer": "Nyaa"}"#;
+    let body = r#"{"torrent_name": "Test Show - 02", "seeders": 1, "magnet_uri": "magnet:?xt=urn:btih:C12FE1C06BBA254A9DC9F519B335AA7C1367A88A", "indexer": "Nyaa"}"#;
     let (status, body) = post_payload(app, body).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     let hash: String = sqlx::query_scalar("SELECT hash FROM grabbed_torrents")
@@ -643,7 +818,7 @@ async fn an_unknown_indexer_grabs_through_the_default_client() {
     rebuild_indexer_cache(&state).await;
     let app = autobrr_webhook_router(state);
 
-    let body = r#"{"torrent_name": "Test Show - 03 [1080p]", "magnet_uri": "magnet:?xt=urn:btih:D12FE1C06BBA254A9DC9F519B335AA7C1367A88A", "indexer": "animebytes"}"#;
+    let body = r#"{"torrent_name": "Test Show - 03 [1080p]", "seeders": 1, "magnet_uri": "magnet:?xt=urn:btih:D12FE1C06BBA254A9DC9F519B335AA7C1367A88A", "indexer": "animebytes"}"#;
     let (status, body) = post_payload(app, body).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert!(body.contains("grabbed"), "body: {body}");
@@ -708,6 +883,7 @@ async fn an_unknown_indexer_push_goes_to_the_torrent_client_only_as_a_torrent() 
 
     let torrent = serde_json::json!({
         "torrent_name": "Test Show - 06 [1080p]",
+        "seeders": 1,
         "torrent_url": format!("{}/t/2.torrent", indexer.uri()),
         "indexer": "animebytes",
     })
@@ -795,7 +971,7 @@ async fn a_nyaa_push_follows_the_built_in_nyaa_client() {
     }
     let app = autobrr_webhook_router(state);
 
-    let body = r#"{"torrent_name": "Test Show - 04 [1080p]", "magnet_uri": "magnet:?xt=urn:btih:E12FE1C06BBA254A9DC9F519B335AA7C1367A88A", "indexer": "nyaa"}"#;
+    let body = r#"{"torrent_name": "Test Show - 04 [1080p]", "seeders": 1, "magnet_uri": "magnet:?xt=urn:btih:E12FE1C06BBA254A9DC9F519B335AA7C1367A88A", "indexer": "nyaa"}"#;
     let (status, body) = post_payload(app, body).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     let client_id: Option<i64> =

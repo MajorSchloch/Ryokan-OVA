@@ -161,6 +161,20 @@ pub async fn record(
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let key = identity(&mut tx, source).await?;
     let prior = reviewed(&mut tx, source, key.as_deref()).await?;
+    let finite_reviewed =
+        crate::models::source_numbering::has_bound_history_in_connection(&mut tx, hash).await?;
+    if finite_reviewed
+        && (prior.is_some() || mapping.is_none_or(|mapping| mapping.bound_source().is_none()))
+    {
+        return Err(fail(
+            "this exact source requires its saved finite numbering decision",
+        ));
+    }
+    if prior.is_some() && mapping.is_some_and(|mapping| mapping.bound_source().is_some()) {
+        return Err(fail(
+            "the source URL already has library migration assignments",
+        ));
+    }
     // Restore may only know an old URL. Retain the identity learned from the
     // saved row when checking for another active job and recording this one.
     let key = key.or_else(|| {

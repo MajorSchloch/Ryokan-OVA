@@ -126,6 +126,7 @@ async fn resolve_dispatch_for_item_returns_some_when_pool_has_default_client() {
     let state = build_test_app_state(db, Some(stub));
     let cfg = Config::default();
     let item = RssItem {
+        seeders: None,
         title: "[Group] Show - 01 [1080p].mkv".into(),
         link: String::new(),
         guid: "guid-1".into(),

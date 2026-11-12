@@ -446,6 +446,7 @@ mod tests {
         let facts = |resolution, subtitles_satisfied| Observed {
             resolution,
             subtitles_satisfied,
+            audio_satisfied: true,
             duration_seconds: None,
         };
         let observations = HashMap::from([

@@ -47,6 +47,8 @@ pub struct AudioStream {
     pub title: Option<String>,
     pub default: bool,
     pub forced: bool,
+    pub commentary: bool,
+    pub audio_description: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -378,6 +380,13 @@ pub fn parse_probe_json(
                 title,
                 default,
                 forced,
+                commentary: disposition(stream, "comment")
+                    || tag(stream, "title")
+                        .is_some_and(|title| title.to_ascii_lowercase().contains("commentary")),
+                audio_description: disposition(stream, "visual_impaired")
+                    || tag(stream, "title").is_some_and(|title| {
+                        title.to_ascii_lowercase().contains("audio description")
+                    }),
             }),
             Some("subtitle") => {
                 // nb_read_packets is normally absent: this is a metadata
@@ -706,6 +715,74 @@ fn visible_text(text: &str) -> bool {
         .any(|c| !c.is_whitespace() && !c.is_control())
 }
 
+/// Evaluate declared dialogue audio. Missing language tags, commentary,
+/// and descriptive tracks never establish a requested dub.
+pub fn evaluate_audio_requirements(
+    info: &MediaInfo,
+    required: &[String],
+    match_mode: &str,
+) -> SubtitleRequirementResult {
+    let mut languages = BTreeSet::new();
+    let mut invalid = BTreeSet::new();
+    for raw in required.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        match normalize_language(raw) {
+            Some(language) => {
+                languages.insert(language);
+            }
+            None => {
+                invalid.insert(raw.to_string());
+            }
+        }
+    }
+    let available: BTreeSet<String> = info
+        .audio
+        .iter()
+        .filter(|stream| {
+            !stream.commentary && !stream.audio_description && stream.channels != Some(0)
+        })
+        .filter_map(|stream| stream.language.as_deref().and_then(normalize_language))
+        .collect();
+    let mut missing: Vec<String> = languages.difference(&available).cloned().collect();
+    missing.extend(invalid.iter().cloned());
+    let enabled = !languages.is_empty() || !invalid.is_empty();
+    let valid_mode = matches!(match_mode, "all" | "any");
+    let satisfied = !enabled
+        || (invalid.is_empty()
+            && valid_mode
+            && if match_mode == "any" {
+                languages
+                    .iter()
+                    .any(|language| available.contains(language))
+            } else {
+                missing.is_empty()
+            });
+    let mut reasons = Vec::new();
+    if !valid_mode && enabled {
+        reasons.push("Choose all or any required audio languages.".into());
+    }
+    if !invalid.is_empty() {
+        reasons.push("Some required audio languages are unrecognised.".into());
+    }
+    if info.audio.iter().any(|stream| stream.language.is_none()) {
+        reasons.push("Some audio tracks have an unknown declared language.".into());
+    }
+    if enabled && !satisfied {
+        reasons.push(format!(
+            "Required dialogue audio is missing ({match_mode}: {}).",
+            missing.join(", ")
+        ));
+    }
+    SubtitleRequirementResult {
+        enabled,
+        satisfied,
+        match_mode: match_mode.to_string(),
+        required_languages: languages.into_iter().chain(invalid).collect(),
+        available_languages: available.into_iter().collect(),
+        missing_languages: missing,
+        reasons,
+    }
+}
+
 /// Evaluate declared full-dialogue languages, keeping unknown/missing
 /// facts explicit. Empty requirements disable this check for upgrades.
 pub fn evaluate_subtitle_requirements(
@@ -874,6 +951,27 @@ mod tests {
                 .satisfied
         );
         assert!(!evaluate_subtitle_requirements(&info, &["xx".to_string()], "any").satisfied);
+    }
+
+    #[test]
+    fn audio_requirements_use_dialogue_tracks_and_explicit_all_any_rules() {
+        let info = info_with(vec![
+            json!({"codec_type":"audio","codec_name":"aac","channels":2,"tags":{"language":"deu"}}),
+            json!({"codec_type":"audio","codec_name":"aac","channels":2,"tags":{"language":"eng","title":"Director commentary"},"disposition":{"comment":1}}),
+            json!({"codec_type":"audio","codec_name":"aac","channels":2,"tags":{"language":"fra"},"disposition":{"visual_impaired":1}}),
+            json!({"codec_type":"audio","codec_name":"aac","channels":2,"tags":{"language":"und"}}),
+        ]);
+        assert!(evaluate_audio_requirements(&info, &["German".into()], "all").satisfied);
+        assert!(!evaluate_audio_requirements(&info, &["de".into(), "en".into()], "all").satisfied);
+        assert!(evaluate_audio_requirements(&info, &["de".into(), "en".into()], "any").satisfied);
+        assert!(!evaluate_audio_requirements(&info, &["fr".into()], "all").satisfied);
+        assert!(!evaluate_audio_requirements(&info, &["ja".into()], "all").satisfied);
+        assert!(!evaluate_audio_requirements(&info, &["de".into()], "invalid").satisfied);
+        assert!(evaluate_audio_requirements(&info, &[], "all").satisfied);
+        let unknown = info_with(vec![
+            json!({"codec_type":"audio","codec_name":"aac","tags":{"language":"und"}}),
+        ]);
+        assert!(!evaluate_audio_requirements(&unknown, &["de".into()], "all").satisfied);
     }
 
     #[test]

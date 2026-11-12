@@ -138,7 +138,7 @@ async fn complete_file(
     source
 }
 
-fn library_videos(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+pub(super) fn library_videos(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut videos = Vec::new();
     let Ok(entries) = std::fs::read_dir(root) else {
         return videos;

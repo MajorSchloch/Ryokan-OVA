@@ -575,6 +575,12 @@ pub struct QualityForm {
     #[serde(default)]
     required_subtitle_languages: Option<String>,
     #[serde(default)]
+    required_audio_languages: Option<String>,
+    #[serde(default)]
+    audio_language_match: Option<String>,
+    #[serde(default)]
+    minimum_torrent_seeders: Option<String>,
+    #[serde(default)]
     subtitle_language_match: Option<String>,
     #[serde(default)]
     media_requirements_enabled: Option<String>,
@@ -1483,6 +1489,18 @@ pub async fn settings_submit(
             .as_ref()
             .map(|c| c.target_subtitle_check)
             .unwrap_or(true),
+        required_audio_languages: existing_cfg
+            .as_ref()
+            .map(|c| c.required_audio_languages.clone())
+            .unwrap_or_default(),
+        audio_language_match: existing_cfg
+            .as_ref()
+            .map(|c| c.audio_language_match.clone())
+            .unwrap_or_else(|| "all".into()),
+        minimum_torrent_seeders: existing_cfg
+            .as_ref()
+            .map(|c| c.minimum_torrent_seeders)
+            .unwrap_or(1),
         required_subtitle_languages: existing_cfg
             .as_ref()
             .map(|c| c.required_subtitle_languages.clone())
@@ -2319,6 +2337,47 @@ pub async fn settings_quality_submit(
             return quality_response(&state, None, None, Some(err), is_htmx).await;
         }
     };
+    let minimum_torrent_seeders = match form.minimum_torrent_seeders.as_deref() {
+        None => existing_cfg.minimum_torrent_seeders,
+        Some(value) => match value.trim().parse::<i32>() {
+            Ok(value) if (0..=10_000).contains(&value) => value,
+            _ => {
+                return quality_response(
+                    &state,
+                    None,
+                    None,
+                    Some("Minimum torrent seeders must be a whole number from 0 to 10000.".into()),
+                    is_htmx,
+                )
+                .await;
+            }
+        },
+    };
+    let required_audio_languages = match form.required_audio_languages.as_deref() {
+        Some(value) => {
+            match crate::services::language_preferences::normalize_languages(value, "audio") {
+                Ok(value) => value,
+                Err(error) => {
+                    return quality_response(&state, None, None, Some(error), is_htmx).await;
+                }
+            }
+        }
+        None => existing_cfg.required_audio_languages.clone(),
+    };
+    let audio_language_match = match form.audio_language_match.as_deref() {
+        Some("all" | "any") => form.audio_language_match.clone().unwrap(),
+        None => existing_cfg.audio_language_match.clone(),
+        _ => {
+            return quality_response(
+                &state,
+                None,
+                None,
+                Some("Choose all or any required audio languages.".into()),
+                is_htmx,
+            )
+            .await;
+        }
+    };
     let required_subtitle_languages = match form.required_subtitle_languages.as_deref() {
         Some(value) => match normalize_required_subtitle_languages(value) {
             Ok(value) => value,
@@ -2367,12 +2426,20 @@ pub async fn settings_quality_submit(
                 draft.target_subtitle_check = value == "1";
             }
             draft.required_subtitle_languages = required_subtitle_languages;
+            draft.required_audio_languages = required_audio_languages;
+            draft.audio_language_match = audio_language_match;
+            draft.minimum_torrent_seeders = minimum_torrent_seeders;
             draft.subtitle_language_match = subtitle_language_match;
             draft.preferred_groups = form.preferred_groups;
             draft.blocked_groups = form.blocked_groups;
             return quality_response(&state, Some(draft), None, Some(error), is_htmx).await;
         }
     };
+    let language_choices_changed = required_audio_languages
+        != existing_cfg.required_audio_languages
+        || audio_language_match != existing_cfg.audio_language_match
+        || required_subtitle_languages != existing_cfg.required_subtitle_languages
+        || subtitle_language_match != existing_cfg.subtitle_language_match;
     let cfg = config::Config {
         media_requirements_enabled: requirements.enabled,
         minimum_resolution: requirements.minimum_resolution,
@@ -2399,6 +2466,9 @@ pub async fn settings_quality_submit(
             _ => "prefer_bd".to_string(),
         },
         prefer_subs: form.prefer_subs == "1",
+        required_audio_languages,
+        audio_language_match,
+        minimum_torrent_seeders,
         required_subtitle_languages,
         subtitle_language_match,
         upgrade_search_enabled: form.upgrade_search_enabled.is_some(),
@@ -2431,6 +2501,10 @@ pub async fn settings_quality_submit(
     }
     // See `settings_general_submit` for the lock-drop rationale.
     drop(_guard);
+
+    if language_choices_changed {
+        crate::services::interactive_search_cache::clear(&state.interactive_search_cache);
+    }
 
     logger::info(
         &state.db,

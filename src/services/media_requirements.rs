@@ -26,12 +26,15 @@ pub struct Policy {
     pub target_subtitle_check: bool,
     pub required_languages: Vec<String>,
     pub language_match: String,
+    pub required_audio_languages: Vec<String>,
+    pub audio_language_match: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct Observed {
     pub resolution: Resolution,
     pub subtitles_satisfied: bool,
+    pub audio_satisfied: bool,
     pub duration_seconds: Option<f64>,
 }
 
@@ -44,6 +47,7 @@ pub struct Status {
     pub minimum_resolution: &'static str,
     pub target_resolution: &'static str,
     pub selectable_subtitles_satisfied: bool,
+    pub audio_languages_satisfied: bool,
     pub minimum_subtitle_check: bool,
     pub target_subtitle_check: bool,
     pub reasons: Vec<String>,
@@ -65,6 +69,14 @@ impl Policy {
                 .map(str::to_owned)
                 .collect(),
             language_match: cfg.subtitle_language_match.clone(),
+            required_audio_languages: cfg
+                .required_audio_languages
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            audio_language_match: cfg.audio_language_match.clone(),
         }
     }
 
@@ -89,6 +101,12 @@ impl Policy {
         Observed {
             resolution,
             subtitles_satisfied: subtitles.satisfied,
+            audio_satisfied: media_info::evaluate_audio_requirements(
+                info,
+                &self.required_audio_languages,
+                &self.audio_language_match,
+            )
+            .satisfied,
             duration_seconds: info.duration_seconds.filter(|d| d.is_finite() && *d > 0.0),
         }
     }
@@ -97,10 +115,17 @@ impl Policy {
         self.minimum_resolution != Resolution::Unknown
             && self.target_resolution != Resolution::Unknown
             && self.target_resolution.rank() >= self.minimum_resolution.rank()
+            && (self.required_audio_languages.is_empty()
+                || (matches!(self.audio_language_match.as_str(), "all" | "any")
+                    && self
+                        .required_audio_languages
+                        .iter()
+                        .all(|language| media_info::normalize_language(language).is_some())))
     }
 
     pub fn minimum_met(&self, observed: &Observed) -> bool {
         self.valid()
+            && observed.audio_satisfied
             && observed.resolution != Resolution::Unknown
             && observed.resolution.rank() >= self.minimum_resolution.rank()
             && (!self.minimum_subtitle_check || observed.subtitles_satisfied)
@@ -108,6 +133,7 @@ impl Policy {
 
     pub fn target_met(&self, observed: &Observed) -> bool {
         self.valid()
+            && observed.audio_satisfied
             && observed.resolution != Resolution::Unknown
             && observed.resolution.rank() >= self.target_resolution.rank()
             && (!(self.target_subtitle_check || self.minimum_subtitle_check)
@@ -135,6 +161,9 @@ impl Policy {
         {
             reasons.push("Required selectable subtitle languages could not be verified. Burned-in captions are not detectable by this check.".into());
         }
+        if !observed.audio_satisfied {
+            reasons.push("Required audio languages could not be verified.".into());
+        }
         Status {
             enabled: self.enabled,
             minimum_met: self.minimum_met(&observed),
@@ -143,6 +172,7 @@ impl Policy {
             minimum_resolution: self.minimum_resolution.as_str(),
             target_resolution: self.target_resolution.as_str(),
             selectable_subtitles_satisfied: observed.subtitles_satisfied,
+            audio_languages_satisfied: observed.audio_satisfied,
             minimum_subtitle_check: self.minimum_subtitle_check,
             target_subtitle_check: self.target_subtitle_check,
             reasons,
@@ -150,6 +180,15 @@ impl Policy {
     }
 
     pub fn validate_minimum(&self, info: &MediaInfo) -> Result<(), String> {
+        // A chosen dub remains required in advanced quality mode too.
+        let audio = media_info::evaluate_audio_requirements(
+            info,
+            &self.required_audio_languages,
+            &self.audio_language_match,
+        );
+        if !audio.satisfied {
+            return Err(format!("Media requirement: {}", audio.reasons.join("; ")));
+        }
         if !self.enabled {
             return Ok(());
         }
@@ -183,6 +222,27 @@ impl Policy {
     /// justifies searching another release. Invalid settings and unknown
     /// video facts must stay available for review instead of causing retries.
     pub fn minimum_failure_is_content_rejection(&self, info: &MediaInfo) -> bool {
+        if self.enabled && !self.valid() {
+            return false;
+        }
+        if !self.required_audio_languages.is_empty() {
+            let audio = media_info::evaluate_audio_requirements(
+                info,
+                &self.required_audio_languages,
+                &self.audio_language_match,
+            );
+            if !matches!(self.audio_language_match.as_str(), "all" | "any")
+                || self
+                    .required_audio_languages
+                    .iter()
+                    .any(|language| media_info::normalize_language(language).is_none())
+            {
+                return false;
+            }
+            if !audio.satisfied && info.audio.iter().all(|stream| stream.language.is_some()) {
+                return true;
+            }
+        }
         if !self.enabled
             || !self.valid()
             || ((self.minimum_subtitle_check || self.target_subtitle_check)
@@ -250,7 +310,9 @@ impl Policy {
             && !self.required_languages.is_empty()
             && !existing.subtitles_satisfied
             && !claims_hardsub;
-        if resolution_gain || possible_subtitle_gain {
+        let possible_audio_gain =
+            !self.required_audio_languages.is_empty() && !existing.audio_satisfied;
+        if resolution_gain || possible_subtitle_gain || possible_audio_gain {
             Ok(UpgradeKind::Requirements)
         } else {
             Err(UpgradeRejection::RequirementsNoImprovement)
@@ -290,6 +352,9 @@ impl Policy {
             || (old.subtitles_satisfied
                 && !new.subtitles_satisfied
                 && !self.required_languages.is_empty())
+            || (old.audio_satisfied
+                && !new.audio_satisfied
+                && !self.required_audio_languages.is_empty())
         {
             return Err(UpgradeRejection::RequirementsDowngrade.message());
         }
@@ -298,7 +363,10 @@ impl Policy {
         let subtitle_gain = (self.target_subtitle_check || self.minimum_subtitle_check)
             && !old.subtitles_satisfied
             && new.subtitles_satisfied;
-        if !resolution_gain && !subtitle_gain {
+        let audio_gain = !self.required_audio_languages.is_empty()
+            && !old.audio_satisfied
+            && new.audio_satisfied;
+        if !resolution_gain && !subtitle_gain && !audio_gain {
             return Err(UpgradeRejection::RequirementsNoImprovement.message());
         }
         Ok(())
@@ -359,6 +427,7 @@ pub async fn observe_files(
                                 old.resolution = value.resolution;
                             }
                             old.subtitles_satisfied &= value.subtitles_satisfied;
+                            old.audio_satisfied &= value.audio_satisfied;
                         })
                         .or_insert(value);
                 }
@@ -435,6 +504,7 @@ mod tests {
         Observed {
             resolution,
             subtitles_satisfied,
+            audio_satisfied: true,
             duration_seconds: None,
         }
     }
@@ -810,5 +880,49 @@ mod tests {
                 .await
                 .contains_key(&1)
         );
+    }
+
+    #[test]
+    fn actual_audio_is_part_of_the_finite_target_and_replacement_minimum() {
+        let cfg = Config {
+            media_requirements_enabled: true,
+            required_audio_languages: "de".into(),
+            ..Default::default()
+        };
+        let policy = Policy::from_config(&cfg);
+        let info = |language| {
+            media_info::parse_probe_json(
+                &serde_json::json!({"streams":[
+                    {"codec_type":"video","codec_name":"h264","width":1920,"height":1080},
+                    {"codec_type":"audio","codec_name":"aac","tags":{"language":language}}
+                ]})
+                .to_string(),
+                media_info::FileIdentity {
+                    size: 100,
+                    mtime_ns: "1".into(),
+                    device: None,
+                    inode: None,
+                },
+                false,
+            )
+            .unwrap()
+        };
+        let german = info("deu");
+        assert!(policy.minimum_met(&policy.observe(&german)));
+        assert!(policy.target_met(&policy.observe(&german)));
+        let candidate =
+            crate::services::source::classify_release_sync("Release [2160p] German Dub", None);
+        assert_eq!(
+            policy
+                .judge_candidate(&policy.observe(&german), &candidate, "Release German Dub")
+                .unwrap_err(),
+            UpgradeRejection::RequirementsTargetMet
+        );
+        for language in ["jpn", "und"] {
+            let missing = info(language);
+            assert!(!policy.minimum_met(&policy.observe(&missing)));
+            assert!(!policy.target_met(&policy.observe(&missing)));
+            assert!(policy.validate_minimum(&missing).is_err());
+        }
     }
 }

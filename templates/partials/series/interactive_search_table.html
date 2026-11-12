@@ -24,7 +24,7 @@
             <th>Group</th>
             <th class="col-quality">Quality</th>
             <th class="col-size">Size</th>
-            <th class="col-seeds">Seeds</th>
+            <th class="col-seeds">Availability</th>
             <th class="col-grab">Grab</th>
         </tr>
     </thead>
@@ -57,13 +57,19 @@
                 <a class="isearch-release-link" href="{{ r.result.safe_link() }}" target="_blank" rel="noopener">{{ r.result.title }}</a>
                 {% if r.result.is_batch %}<span class="tag tag-batch" style="margin-left:4px">batch</span>{% endif %}
                 {% if r.result.is_trusted %}<span class="tag tag-trusted" style="margin-left:4px">trusted</span>{% endif %}
+                {% if let Some(url) = r.numbering_review_url %}<div><a href="{{ url }}" class="form-hint">Review numbering</a></div>{% endif %}
             </td>
             <td class="col-indexer" style="color:var(--text-dim)">{{ r.indexer_display }}</td>
             <td style="color:var(--text-dim)">{{ r.result.group }}</td>
             <td class="col-quality">{{ r.result.quality_label }}</td>
             <td class="col-size" style="color:var(--text-dim)">{{ r.result.size }}</td>
             <td class="col-seeds">
-                <span class="seed-count">{{ r.result.seeders }}</span><span class="peer-sep">/</span><span class="leech-count">{{ r.result.leechers }}</span>
+                {% if r.protocol == "torrent" %}
+                <span class="seed-count" title="Seeders">{{ r.result.seeders }} S</span><span class="peer-sep"> / </span><span class="leech-count" title="Leechers">{{ r.result.leechers }} L</span>
+                {% else %}
+                <span class="tag tag-res">{% if r.protocol == "usenet" %}Usenet{% else %}Not reported{% endif %}</span>
+                {% if !r.result.upload_date.is_empty() %}<div class="form-hint" title="Posted {{ r.result.upload_date }} UTC">Posted {{ r.result.upload_date_short() }}</div>{% endif %}
+                {% endif %}
             </td>
             <td class="col-grab">
                 {# `r.grab_episode` is the partial's episode in the

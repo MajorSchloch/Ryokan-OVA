@@ -344,6 +344,11 @@ pub(super) fn parse_feed(xml: &str, source: RssSource) -> Vec<RssItem> {
         let is_batch = detect_batch(&title);
 
         items.push(RssItem {
+            seeders: extract_tag(block, "nyaa:seeders")
+                .trim()
+                .parse::<i32>()
+                .ok()
+                .filter(|n| *n >= 0),
             title,
             link,
             guid,
@@ -362,7 +367,7 @@ pub(super) fn parse_feed(xml: &str, source: RssSource) -> Vec<RssItem> {
 
 /// Pre-compiled regexes keyed by RSS tag name. Populated lazily on first
 /// feed parse so we don't re-compile six regexes per item across thousands
-/// of items per sync. Only the six tags `parse_feed` actually reads are
+/// of items per sync. Only the tags `parse_feed` actually reads are
 /// included; `extract_tag` returns an empty string for any other tag,
 /// matching the old behavior of `Regex::new(...).unwrap()` silently
 /// returning no captures for an unmatched pattern.
@@ -375,6 +380,7 @@ static RE_EXTRACT_TAGS: LazyLock<HashMap<&'static str, Regex>> = LazyLock::new(|
         "nyaa:downloadurl",
         "nyaa:magneturi",
         "nyaa:infohash",
+        "nyaa:seeders",
     ] {
         let pattern = format!(r"(?is)<{tag}[^>]*>(.*?)</{tag}>", tag = tag);
         m.insert(
@@ -694,6 +700,21 @@ mod parser_tests {
     use super::*;
 
     #[test]
+    fn automatic_availability_feed_distinguishes_zero_missing_and_positive_seeders() {
+        for (tag, expected) in [
+            ("<nyaa:seeders>0</nyaa:seeders>", Some(0)),
+            ("<nyaa:seeders>12</nyaa:seeders>", Some(12)),
+            ("", None),
+            ("<nyaa:seeders>unknown</nyaa:seeders>", None),
+            ("<nyaa:seeders>-1</nyaa:seeders>", None),
+        ] {
+            let xml = format!("<item><title>Example Show - 01</title>{tag}</item>");
+            let items = parse_feed(&xml, RssSource::Nyaa);
+            assert_eq!(items[0].seeders, expected, "{tag}");
+        }
+    }
+
+    #[test]
     fn nyaa_rss_uses_the_feed_hash_for_the_client() {
         let hash = "abcdef0123abcdef0123abcdef0123abcdef0123";
         let xml = format!(
@@ -924,6 +945,7 @@ mod parser_tests {
 
     fn make_item(info_hash: &str, guid: &str, link: &str, title: &str) -> RssItem {
         RssItem {
+            seeders: None,
             title: title.into(),
             link: link.into(),
             guid: guid.into(),

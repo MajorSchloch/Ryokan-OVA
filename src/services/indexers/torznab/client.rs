@@ -181,7 +181,7 @@ impl TorznabIndexer {
     /// Other filters (size cap, date floor) live in the search
     /// pipeline since they're not per-indexer concerns.
     fn apply_min_seeders(&self, releases: Vec<Release>) -> Vec<Release> {
-        if self.min_seeders <= 0 {
+        if self.kind == model::KIND_NEWZNAB || self.min_seeders <= 0 {
             return releases;
         }
         releases
@@ -484,6 +484,15 @@ mod tests {
         let releases = vec![sample_release(0), sample_release(5)];
         let kept = idx.apply_min_seeders(releases);
         assert_eq!(kept.len(), 2, "min_seeders=0 keeps everything");
+    }
+
+    #[test]
+    fn apply_min_seeders_never_filters_usenet_peer_placeholders() {
+        let mut row = sample_row();
+        row.kind = model::KIND_NEWZNAB.into();
+        row.min_seeders = 50;
+        let idx = TorznabIndexer::from_row(&row).unwrap();
+        assert_eq!(idx.apply_min_seeders(vec![sample_release(0)]).len(), 1);
     }
 
     fn sample_release(seeders: i32) -> Release {

@@ -305,6 +305,73 @@ pub fn offset_for(anilist_id: i64, mal_id: Option<i64>) -> Option<Offset> {
     INDEX.lookup(anilist_id, mal_id)
 }
 
+/// Complete finite redirects from one explicit AniList source namespace.
+/// This is separate from the legacy maximum-offset index. Unknown/open or
+/// unequal ranges cannot establish a finite source-numbering decision.
+pub fn finite_source_rules(
+    root_anilist_id: i64,
+) -> Result<Vec<crate::services::episode_mapping::MappingRule>, String> {
+    use crate::services::episode_mapping::MappingRule;
+    if root_anilist_id <= 0 {
+        return Err("Episode mapping: a source root needs an AniList identity".into());
+    }
+    let mut rules = Vec::new();
+    for rule in parse(RULES_TEXT)
+        .rules
+        .into_iter()
+        .filter(|rule| rule.src.anilist == Some(root_anilist_id))
+    {
+        // Episode-zero specials are not part of this main-episode domain.
+        if rule.src_range.start <= 0 || rule.dst_range.start <= 0 {
+            continue;
+        }
+        let (Some(source_last), Some(target_last), Some(target_entry)) =
+            (rule.src_range.end, rule.dst_range.end, rule.dst.anilist)
+        else {
+            return Err("Episode mapping: source domain has an unknown or open range".into());
+        };
+        if source_last - rule.src_range.start != target_last - rule.dst_range.start {
+            return Err("Episode mapping: source domain has unequal episode ranges".into());
+        }
+        let mapped = MappingRule {
+            source_first: rule.src_range.start,
+            source_last,
+            target_entry,
+            target_first: rule.dst_range.start,
+        };
+        crate::services::episode_mapping::resolve_episode(&[mapped], source_last)
+            .map_err(|error| error.to_string())?;
+        rules.push(mapped);
+    }
+    rules.sort_by_key(|rule| {
+        (
+            rule.source_first,
+            rule.source_last,
+            rule.target_entry,
+            rule.target_first,
+        )
+    });
+    rules.dedup();
+    Ok(rules)
+}
+
+/// Candidate source roots are metadata identities, never guessed offsets.
+pub fn finite_source_roots(target_anilist_id: i64) -> Vec<i64> {
+    let mut roots: Vec<_> = parse(RULES_TEXT)
+        .rules
+        .into_iter()
+        .filter(|rule| rule.dst.anilist == Some(target_anilist_id))
+        .filter_map(|rule| rule.src.anilist)
+        .filter(|root| *root > 0)
+        .collect();
+    if target_anilist_id > 0 {
+        roots.push(target_anilist_id);
+    }
+    roots.sort_unstable();
+    roots.dedup();
+    roots
+}
+
 /// The `last_modified` date of the vendored snapshot, for the Credits
 /// tab and logs.
 pub fn snapshot_date() -> String {

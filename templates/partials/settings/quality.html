@@ -1,6 +1,6 @@
         <div class="cf-section" id="media-requirements-settings">
             <h3>Minimum &amp; good enough</h3>
-            <p class="form-hint">Accept a usable file first. Stop automatic upgrades when its actual resolution and subtitle tracks meet your target.</p>
+            <p class="form-hint">Accept a usable file first. Stop automatic upgrades when its actual resolution, audio and subtitles meet your target.</p>
             <div class="form-group">
                 <label for="media_requirements_enabled">Upgrade rules</label>
                 <select name="media_requirements_enabled" id="media_requirements_enabled" aria-describedby="media-rules-hint">
@@ -35,12 +35,26 @@
             </div>
             <div class="form-row">
                 <div class="form-group">
-                    <label for="required_subtitle_languages">Subtitle languages</label>
+                    <label for="required_audio_languages">Default audio languages</label>
+                    <input type="text" name="required_audio_languages" id="required_audio_languages" value="{{ config.required_audio_languages }}" placeholder="Language names or codes" aria-describedby="audio-requirements-hint">
+                    <span class="form-hint" id="audio-requirements-hint">Leave empty to accept any audio language. Chosen languages must be present in a dialogue audio track. Unknown language tags do not qualify.</span>
+                </div>
+                <div class="form-group">
+                    <label for="audio_language_match">Audio language match</label>
+                    <select name="audio_language_match" id="audio_language_match">
+                        <option value="all" {% if config.audio_language_match != "any" %}selected{% endif %}>All listed languages</option>
+                        <option value="any" {% if config.audio_language_match == "any" %}selected{% endif %}>Any listed language</option>
+                    </select>
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="required_subtitle_languages">Default subtitle languages</label>
                     <input type="text" name="required_subtitle_languages" id="required_subtitle_languages" value="{{ config.required_subtitle_languages }}" placeholder="English, Spanish or language codes" aria-describedby="subtitle-requirements-hint">
                     <span class="form-hint" id="subtitle-requirements-hint">Use names or codes, such as en, es or de. Leave empty when subtitles are not required. Forced and signs-only tracks do not count.</span>
                 </div>
                 <div class="form-group">
-                    <label for="subtitle_language_match">Language match</label>
+                    <label for="subtitle_language_match">Subtitle language match</label>
                     <select name="subtitle_language_match" id="subtitle_language_match">
                         <option value="all" {% if config.subtitle_language_match != "any" %}selected{% endif %}>All listed languages</option>
                         <option value="any" {% if config.subtitle_language_match == "any" %}selected{% endif %}>Any listed language</option>
@@ -65,7 +79,7 @@
                     <span class="form-hint">Burned-in or unknown captions stay below a selectable-subtitle target. Replacements preserve known resolution and required subtitles.</span>
                 </div>
             </div>
-            <p class="form-hint">Ryokan checks actual files before replacement and keeps the old file if checks fail. Matching subtitle files travel with the video. Burned-in captions and translation quality cannot be verified. Advanced mode retains the existing selectable subtitle import check.</p>
+            <p class="form-hint">Each release can use these language defaults or its own choices. Audio requirements apply in both upgrade modes. Ryokan checks actual files before replacement and keeps the old file if checks fail. Language tags are declarations; speech and translation quality cannot be verified.</p>
         </div>
 
         <div class="cf-section">
@@ -165,6 +179,11 @@
 
         <div class="cf-section">
             <h3>Scoring &amp; boosts</h3>
+            <div class="form-group">
+                <label for="minimum_torrent_seeders">Minimum torrent seeders</label>
+                <input type="number" name="minimum_torrent_seeders" id="minimum_torrent_seeders" value="{{ config.minimum_torrent_seeders }}" min="0" max="10000" step="1">
+                <span class="form-hint">Automatic torrent downloads need this many seeders. The default is 1. Set 0 to disable this check. NZB downloads and manual choices are unaffected.</span>
+            </div>
             <div class="form-group">
                 <label for="prefer_subs">Audio Preference</label>
                 <select name="prefer_subs" id="prefer_subs">

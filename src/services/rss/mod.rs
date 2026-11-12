@@ -72,6 +72,33 @@ async fn resolve_dispatch_for_item(
     }
 }
 
+async fn record_availability_hold(
+    state: &AppState,
+    item: &RssItem,
+    item_key: &str,
+    found: &MatchResult,
+    reason: &str,
+) {
+    let (source, source_id) = source_dedup_key(&item.source);
+    let _ = rss::record_decision(
+        &state.db,
+        rss::DecisionRecord {
+            item_key,
+            title: &item.title,
+            link: &item.link,
+            series_id: Some(found.series.id),
+            series_title: &found.series.title,
+            group_name: &item.group,
+            is_batch: item.is_batch,
+            decision: "rejected",
+            reason,
+            source,
+            source_id,
+        },
+    )
+    .await;
+}
+
 static RSS_SYNC_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 
@@ -220,6 +247,9 @@ impl RssSource {
 
 #[derive(Debug, Clone)]
 pub struct RssItem {
+    /// Known torrent seeders. None means the feed omitted the statistic;
+    /// Usenet sources do not use this field.
+    pub seeders: Option<i32>,
     pub title: String,
     pub link: String,
     pub guid: String,
@@ -237,7 +267,7 @@ pub struct RssItem {
 }
 
 impl RssItem {
-    fn grab_url(&self) -> &str {
+    pub(crate) fn grab_url(&self) -> &str {
         if !self.torrent.is_empty() {
             &self.torrent
         } else if !self.magnet.is_empty() {
@@ -294,6 +324,82 @@ struct MatchResult {
     family_key: String,
     alias_score: f32,
     resolution_mode: &'static str,
+}
+
+fn exact_item_hash(item: &RssItem) -> Result<String, String> {
+    let declared = crate::services::download_client::normalize_info_hash(&item.info_hash)
+        .filter(|hash| hash.len() == 40);
+    let url_hash = [item.magnet.as_str(), item.grab_url()]
+        .into_iter()
+        .map(crate::services::nyaa::extract_hash)
+        .find(|hash| hash.len() == 40);
+    if declared
+        .as_ref()
+        .zip(url_hash.as_ref())
+        .is_some_and(|(left, right)| left != right)
+    {
+        return Err("Episode mapping: feed and source URL identify different torrents".into());
+    }
+    Ok(declared.or(url_hash).unwrap_or_default())
+}
+
+/// Exact reviewed content can identify a tracked entry before title/offset
+/// heuristics. Multiple reviewed owners remain a hold, not an arbitrary winner.
+async fn exact_source_match(
+    db: &sqlx::SqlitePool,
+    item: &RssItem,
+    all_meta: &[SeriesMeta],
+) -> Result<
+    Option<(
+        MatchResult,
+        crate::services::release_numbering::ReleaseMapping,
+    )>,
+    String,
+> {
+    let hash = exact_item_hash(item)?;
+    if hash.is_empty() {
+        return Ok(None);
+    }
+    let migration: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM grabbed_torrents WHERE hash=? COLLATE NOCASE AND library_migration_bridge IS NOT NULL)")
+        .bind(&hash).fetch_one(db).await.map_err(|error| error.to_string())?;
+    if migration {
+        if !crate::models::source_numbering::lookup_hash(db, &hash)
+            .await?
+            .is_empty()
+        {
+            return Err(
+                "Episode mapping: migration replay conflicts with a source-numbering review".into(),
+            );
+        }
+        return Ok(None);
+    }
+    let mut selected = None;
+    for saved in crate::models::source_numbering::lookup_hash(db, &hash).await? {
+        let Some(meta) = all_meta
+            .iter()
+            .find(|meta| meta.series.anilist_id == saved.proof.target_anilist_id)
+        else {
+            continue;
+        };
+        if selected.is_some() {
+            return Err("Episode mapping: reviewed torrent has multiple tracked owners; select its release explicitly".into());
+        }
+        let mapping =
+            crate::services::release_numbering::ReleaseMapping::from_bound_source(&saved.proof)?;
+        let resolved_eps = mapping.episodes().into_iter().collect();
+        let family = related_family(meta, all_meta);
+        let found = MatchResult {
+            series: meta.series.clone(),
+            parsed: parse_release(item),
+            canonical_abs_eps: canonical_absolute_numbers(meta, &family, &resolved_eps),
+            family_key: canonical_family_key(&family),
+            resolved_eps,
+            alias_score: 1.0,
+            resolution_mode: "bound_source_files",
+        };
+        selected = Some((found, mapping));
+    }
+    Ok(selected)
 }
 
 struct CandidateDecision {
@@ -713,11 +819,28 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
     let tracked = series::get_all(&state.db)
         .await
         .map_err(|e| e.to_string())?;
+    let per_release_languages = crate::models::series_language_preferences::get_all(&state.db)
+        .await
+        .map_err(|_| {
+            "Language requirement: could not read release language settings.".to_string()
+        })?;
+    let inherited_languages =
+        crate::models::series_language_preferences::LanguagePreferences::default();
+    let mut fetch_cfg = cfg.clone();
+    for release in &tracked {
+        let effective = crate::services::language_preferences::apply(
+            &cfg,
+            per_release_languages
+                .get(&release.id)
+                .unwrap_or(&inherited_languages),
+        )?;
+        fetch_cfg.allow_non_english |= auto_search::allows_non_english(&effective);
+    }
     let has_music_series = tracked.iter().any(|s| s.format == "MUSIC");
     let indexer_categories = crate::services::indexers::rss_categories(
         tracked.iter().map(|s| (s.format.as_str(), s.is_adult)),
     );
-    let items = fetch_all_sources(state, &cfg, has_music_series, &indexer_categories).await;
+    let items = fetch_all_sources(state, &fetch_cfg, has_music_series, &indexer_categories).await;
     for row in &tracked {
         let _ = monitoring_service::ensure_series_monitoring_rows(&state.db, row).await;
     }
@@ -796,7 +919,6 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
     // policy, and the Custom Format cutoff / increment, read once per
     // sync. `now_secs` anchors the RSS revision window.
     let policy = source::UpgradePolicy::from_config(&cfg);
-    let requirements = crate::services::media_requirements::Policy::from_config(&cfg);
     let pt_indexer_ids: HashSet<i64> = state
         .indexers
         .read()
@@ -832,7 +954,9 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         .await
         .map_err(|e| e.to_string())?;
 
-    for item in items {
+    let availability =
+        crate::services::release_availability::Policy::load(&cfg, &state.indexers).await;
+    for mut item in items {
         items_seen += 1;
         let item_key = build_item_key(&item);
         let (src_str, src_id) = source_dedup_key(&item.source);
@@ -858,7 +982,40 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             continue;
         }
 
-        let Some(mut found) = best_series_match(&item, &all_meta) else {
+        let exact = match exact_source_match(&state.db, &item, &all_meta).await {
+            Ok(value) => value,
+            Err(reason) => {
+                skipped += 1;
+                let _ = rss::record_decision(
+                    &state.db,
+                    rss::DecisionRecord {
+                        item_key: &item_key,
+                        title: &item.title,
+                        link: &item.link,
+                        series_id: None,
+                        series_title: "",
+                        group_name: &item.group,
+                        is_batch: item.is_batch,
+                        decision: "rejected",
+                        reason: &reason,
+                        source: src_str,
+                        source_id: src_id,
+                    },
+                )
+                .await;
+                continue;
+            }
+        };
+        let (found, bound_mapping) = match exact {
+            Some((found, mapping)) => {
+                item.is_batch |= mapping
+                    .bound_source()
+                    .is_some_and(|proof| proof.selected_files.len() > 1);
+                (Some(found), Some(mapping))
+            }
+            None => (best_series_match(&item, &all_meta), None),
+        };
+        let Some(mut found) = found else {
             skipped += 1;
             let diag = build_match_diag(&item, None, 0);
             let reason = format!("No tracked series match | {}", diag);
@@ -881,6 +1038,13 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             .await;
             continue;
         };
+        let cfg = crate::services::language_preferences::apply(
+            &cfg,
+            per_release_languages
+                .get(&found.series.id)
+                .unwrap_or(&inherited_languages),
+        )?;
+        let requirements = crate::services::media_requirements::Policy::from_config(&cfg);
 
         // Automatic paths take a release only when its title names the
         // series (a title or alias contained verbatim, or the same words);
@@ -946,6 +1110,16 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             found.series.anilist_id,
         )
         .await;
+        let reviewed = reviewed.and_then(|value| {
+            if value.is_some() && bound_mapping.is_some() {
+                Err(
+                    "Episode mapping: migration replay conflicts with a source-numbering review"
+                        .into(),
+                )
+            } else {
+                Ok(value)
+            }
+        });
         let replay_episodes = match reviewed {
             Ok(value) => value,
             Err(reason) => {
@@ -978,6 +1152,8 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                 canonical_absolute_numbers(&meta, &family, &found.resolved_eps);
             found.resolution_mode = "reviewed_source_files";
             None
+        } else if let Some(mapping) = bound_mapping {
+            Some(mapping)
         } else if single_entry {
             None
         } else {
@@ -1321,6 +1497,20 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             continue;
         }
 
+        // Resolve missing peer data only for an otherwise actionable release.
+        // This still precedes scoring/bucket selection, so a stalled preferred
+        // result cannot hide a healthy torrent or a Usenet alternative.
+        let available_client =
+            resolve_dispatch_for_item(state, &cfg, &item, &direct_feed_pins).await;
+        let client_protocol = available_client
+            .as_ref()
+            .map(|(client, _)| client.protocol())
+            .unwrap_or("unknown");
+        if let Err(reason) = availability.check_rss(&mut item, client_protocol).await {
+            skipped += 1;
+            record_availability_hold(state, &item, &item_key, &found, &reason).await;
+            continue;
+        }
         pending.push(PendingCandidate {
             item,
             item_key,
@@ -1342,12 +1532,18 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         auto_search::seadex_hashes_for_rss(&state.db, seadex_needs_lookup, &pending_anilist_ids)
             .await;
     for cand in &mut pending {
+        let effective_cfg = crate::services::language_preferences::apply(
+            &cfg,
+            per_release_languages
+                .get(&cand.found.series.id)
+                .unwrap_or(&inherited_languages),
+        )?;
         let hashes = seadex_hashes
             .get(&cand.found.series.anilist_id)
             .unwrap_or(&no_seadex_hashes);
         cand.score = score_candidate(
             &state.db,
-            &cfg,
+            &effective_cfg,
             &cand.item,
             &cand.found.series,
             &cand.found.resolved_eps,
@@ -1464,7 +1660,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         });
     }
 
-    for (idx, cand) in pending.into_iter().enumerate() {
+    for (idx, mut cand) in pending.into_iter().enumerate() {
         let (cand_src_str, cand_src_id) = source_dedup_key(&cand.item.source);
         let bucket = logical_bucket_key(&cand);
         if bucket_best.get(&bucket).copied() != Some(idx) {
@@ -1493,12 +1689,34 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             continue;
         }
 
+        let available_client =
+            resolve_dispatch_for_item(state, &cfg, &cand.item, &direct_feed_pins).await;
+        let client_protocol = available_client
+            .as_ref()
+            .map(|(client, _)| client.protocol())
+            .unwrap_or("unknown");
+        if let Err(reason) = availability
+            .check_rss(&mut cand.item, client_protocol)
+            .await
+        {
+            skipped += 1;
+            record_availability_hold(state, &cand.item, &cand.item_key, &cand.found, &reason).await;
+            continue;
+        }
         let grab_url = cand.item.grab_url();
 
         // Keep the original source URL for reviewed release mappings.
         let magnet = cand.item.nyaa_dispatch_magnet();
         let client_url = magnet.as_deref().unwrap_or(grab_url);
-        let info_hash = crate::services::nyaa::extract_hash(client_url);
+        let info_hash = match exact_item_hash(&cand.item) {
+            Ok(hash) => hash,
+            Err(reason) => {
+                skipped += 1;
+                record_availability_hold(state, &cand.item, &cand.item_key, &cand.found, &reason)
+                    .await;
+                continue;
+            }
+        };
         // multi-rss commit F — resolve the dispatch client per-item
         // based on the source's pin (Nyaa pin / indexer pin /
         // direct-feed pin). A pin pointing at a deleted client
@@ -1574,12 +1792,32 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             .await;
             continue;
         }
-        match client
-            .add_torrent_returning_id(client_url, &info_hash)
-            .await
+        let mut prepared_bound = None;
+        let dispatch = if let Some(mapping) = cand
+            .release_mapping
+            .as_ref()
+            .filter(|mapping| mapping.bound_source().is_some())
         {
-            Ok((_outcome, canonical_id)) => {
-                grabbed += 1;
+            crate::services::source_numbering_grab::add_bound(
+                client.as_ref(),
+                client_url,
+                &info_hash,
+                mapping,
+            )
+            .await
+            .map(|prepared| {
+                let id = prepared.info_hash.clone();
+                prepared_bound = Some(prepared);
+                id
+            })
+        } else {
+            client
+                .add_torrent_returning_id(client_url, &info_hash)
+                .await
+                .map(|(_, id)| id)
+        };
+        match dispatch {
+            Ok(canonical_id) => {
                 let action = if cand.is_upgrade { "upgrade" } else { "new" };
                 let reason = if cand.item.is_batch {
                     format!(
@@ -1596,24 +1834,6 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                         build_match_diag(&cand.item, Some(&cand.found), cand.score)
                     )
                 };
-                canonical_history.insert(&cand.found, cand.item.is_batch, &cand.item.title);
-                let _ = rss::record_decision(
-                    &state.db,
-                    rss::DecisionRecord {
-                        item_key: &cand.item_key,
-                        title: &cand.item.title,
-                        link: &cand.item.link,
-                        series_id: Some(cand.found.series.id),
-                        series_title: &cand.found.series.title,
-                        group_name: &cand.item.group,
-                        is_batch: cand.item.is_batch,
-                        decision: "grabbed",
-                        reason: &reason,
-                        source: cand_src_str,
-                        source_id: cand_src_id,
-                    },
-                )
-                .await;
                 // Record for post-processing. Persist the canonical
                 // id returned by the client (BT: matches info_hash;
                 // SAB: nzo_id) so post-processing's match-by-hash
@@ -1653,6 +1873,47 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                         continue;
                     }
                 };
+                if let Some(prepared) = &prepared_bound {
+                    if prepared.newly_added && saved.is_none() {
+                        logger::error(
+                            &state.db,
+                            LogCategory::Grab,
+                            "RSS source held: episode decision was not saved",
+                            "New torrent remains paused",
+                        )
+                        .await;
+                        continue;
+                    }
+                    if let Err(reason) = prepared.resume_after_record(client.as_ref()).await {
+                        logger::error(
+                            &state.db,
+                            LogCategory::Grab,
+                            "RSS source held after episode decision was saved",
+                            &reason,
+                        )
+                        .await;
+                        continue;
+                    }
+                }
+                grabbed += 1;
+                canonical_history.insert(&cand.found, cand.item.is_batch, &cand.item.title);
+                let _ = rss::record_decision(
+                    &state.db,
+                    rss::DecisionRecord {
+                        item_key: &cand.item_key,
+                        title: &cand.item.title,
+                        link: &cand.item.link,
+                        series_id: Some(cand.found.series.id),
+                        series_title: &cand.found.series.title,
+                        group_name: &cand.item.group,
+                        is_batch: cand.item.is_batch,
+                        decision: "grabbed",
+                        reason: &reason,
+                        source: cand_src_str,
+                        source_id: cand_src_id,
+                    },
+                )
+                .await;
                 let grab_id = saved.as_ref().map(|s| s.id);
                 let replayed = saved.as_ref().is_some_and(|s| s.replayed);
                 let ep_list = saved.map(|s| s.episodes).unwrap_or_default();
@@ -1887,6 +2148,7 @@ pub async fn match_library_title(
     // here because this path is title-only matching for the
     // post-grab attribution helper, not a sync-time fetch.
     let pseudo = RssItem {
+        seeders: None,
         title: title.to_string(),
         link: String::new(),
         guid: String::new(),
@@ -1941,6 +2203,7 @@ impl CanonicalHistory {
         // Same synthetic-item pattern as `find_series_for_title` —
         // matcher inputs only, no real grab.
         let pseudo = RssItem {
+            seeders: None,
             title: title.to_string(),
             link: String::new(),
             guid: String::new(),
@@ -2216,7 +2479,10 @@ async fn score_candidate(
         score = score.saturating_add(crate::services::seadex::SEADEX_SCORE_BOOST);
     }
 
-    score
+    score.saturating_add(crate::services::language_preferences::audio_hint_bonus(
+        cfg,
+        &item.title,
+    ))
 }
 
 fn resolution_rank(value: &str) -> i32 {

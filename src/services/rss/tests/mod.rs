@@ -9,5 +9,6 @@ mod parse_release;
 mod provider_aliases;
 mod queue;
 mod source;
+mod source_numbering;
 
 mod title_identity;

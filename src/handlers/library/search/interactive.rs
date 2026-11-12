@@ -16,6 +16,7 @@ use axum::{
     response::{Html, IntoResponse, Json, Response},
 };
 use axum_htmx::HxRequest;
+use std::collections::HashMap;
 
 use crate::AppState;
 use crate::models::log::LogCategory;
@@ -43,6 +44,9 @@ struct InteractiveSearchRow {
     /// `indexer_name` falls back to "Nyaa" when empty so the column
     /// always renders a source attribution.
     indexer_display: String,
+    /// Explicitly resolved from the configured indexer, never inferred from
+    /// the presence of an info hash (private torrents can omit their hash).
+    protocol: &'static str,
     /// Pre-serialized JSON of `result`. Embedded into the Grab button's
     /// `data-result` attribute; the JS click handler reads it via
     /// `JSON.parse(btn.dataset.result)` instead of the previous
@@ -55,6 +59,26 @@ struct InteractiveSearchRow {
     grab_episode: Option<i32>,
     /// `E03` / `E05-E06` in the episode-set flow, empty elsewhere.
     episode_label: String,
+    numbering_review_url: Option<String>,
+}
+
+type IndexerProtocols = HashMap<i64, &'static str>;
+
+async fn indexer_protocols(state: &AppState) -> IndexerProtocols {
+    state
+        .indexers
+        .read()
+        .await
+        .iter()
+        .map(|indexer| {
+            let protocol = match indexer.kind() {
+                "torznab" => "torrent",
+                "newznab" => "usenet",
+                _ => "unknown",
+            };
+            (indexer.id(), protocol)
+        })
+        .collect()
 }
 
 /// Which page asked for the partial. The Wanted page renders the same
@@ -99,6 +123,7 @@ fn build_interactive_search_partial(
     results: Vec<crate::services::nyaa::SearchResult>,
     grab_episode_number: Option<i32>,
     wanted: bool,
+    protocols: &IndexerProtocols,
 ) -> InteractiveSearchTablePartial {
     let rows = results
         .into_iter()
@@ -110,19 +135,33 @@ fn build_interactive_search_partial(
             } else {
                 "score-low"
             };
-            let indexer_display = if result.indexer_name.is_empty() {
-                "Nyaa".to_string()
-            } else {
+            let indexer_display = if !result.indexer_name.is_empty() {
                 result.indexer_name.clone()
+            } else if result.indexer_id.is_none() {
+                "Nyaa".into()
+            } else {
+                "Unknown indexer".into()
             };
-            let data_result_json = serde_json::to_string(&result).unwrap_or_else(|_| "{}".into());
+            let protocol = result.indexer_id.map_or("torrent", |id| {
+                protocols.get(&id).copied().unwrap_or("unknown")
+            });
+            let mut data_result = serde_json::to_value(&result).unwrap_or_default();
+            data_result["protocol"] = protocol.into();
+            if protocol != "torrent" {
+                data_result["seeders"] = serde_json::Value::Null;
+                data_result["leechers"] = serde_json::Value::Null;
+            }
+            let data_result_json =
+                serde_json::to_string(&data_result).unwrap_or_else(|_| "{}".into());
             InteractiveSearchRow {
                 result,
                 score_class,
                 indexer_display,
+                protocol,
                 data_result_json,
                 grab_episode: grab_episode_number,
                 episode_label: String::new(),
+                numbering_review_url: None,
             }
         })
         .collect();
@@ -153,14 +192,16 @@ fn build_interactive_search_partial(
 fn build_episode_set_partial(
     hits: Vec<auto_search::EpisodeSetHit>,
     wanted: bool,
+    protocols: &IndexerProtocols,
 ) -> InteractiveSearchTablePartial {
     let rows = hits
         .into_iter()
         .map(|hit| {
-            let mut row = build_interactive_search_partial(vec![hit.result], None, wanted)
-                .rows
-                .pop()
-                .expect("one result in, one row out");
+            let mut row =
+                build_interactive_search_partial(vec![hit.result], None, wanted, protocols)
+                    .rows
+                    .pop()
+                    .expect("one result in, one row out");
             row.episode_label = episode_range_label(&hit.episodes);
             row.grab_episode = hit.episodes.first().copied();
             row
@@ -191,16 +232,55 @@ fn episode_range_label(episodes: &[i32]) -> String {
     }
 }
 
-fn render_interactive_partial(
+async fn render_interactive_partial(
+    state: &AppState,
+    request_id: i64,
     results: Vec<crate::services::nyaa::SearchResult>,
     grab_episode_number: Option<i32>,
     wanted: bool,
 ) -> Result<Response, (StatusCode, String)> {
-    let partial = build_interactive_search_partial(results, grab_episode_number, wanted);
+    let protocols = indexer_protocols(state).await;
+    let mut partial =
+        build_interactive_search_partial(results, grab_episode_number, wanted, &protocols);
+    add_numbering_review_links(state, request_id, &mut partial).await?;
     let html = partial
         .render()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Html(html).into_response())
+}
+
+async fn add_numbering_review_links(
+    state: &AppState,
+    request_id: i64,
+    partial: &mut InteractiveSearchTablePartial,
+) -> Result<(), (StatusCode, String)> {
+    let tracked = crate::models::series::get_by_id(&state.db, request_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let Some(tracked) = tracked else {
+        return Ok(());
+    };
+    if tracked.cumulative_prior_episodes == 0 {
+        return Ok(());
+    }
+    for row in &mut partial.rows {
+        let result = &row.result;
+        if row.protocol != "torrent"
+            || result.info_hash.len() != 40
+            || !result.info_hash.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            continue;
+        }
+        if let Some(link) = crate::services::nyaa::view_page_url(&result.link) {
+            row.numbering_review_url = Some(format!(
+                "/api/library/series/{}/numbering-review?hash={}&link={}",
+                tracked.id,
+                result.info_hash,
+                urlencoding::encode(&link),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Test-only seam for the partial builder. The underlying fn + struct
@@ -214,20 +294,29 @@ pub(super) mod test_helpers {
         grab_episode_number: Option<i32>,
         wanted: bool,
     ) -> super::InteractiveSearchTablePartial {
-        super::build_interactive_search_partial(results, grab_episode_number, wanted)
+        super::build_interactive_search_partial(
+            results,
+            grab_episode_number,
+            wanted,
+            &Default::default(),
+        )
     }
 
     pub fn build_episode_set_partial_for_test(
         hits: Vec<crate::services::auto_search::EpisodeSetHit>,
         wanted: bool,
     ) -> super::InteractiveSearchTablePartial {
-        super::build_episode_set_partial(hits, wanted)
+        super::build_episode_set_partial(hits, wanted, &Default::default())
     }
 
     pub fn episode_range_label(episodes: &[i32]) -> String {
         super::episode_range_label(episodes)
     }
 }
+
+#[cfg(test)]
+#[path = "interactive_protocol_tests.rs"]
+mod protocol_availability_tests;
 
 /// `?episodes=3,4,5` for the episode-set search.
 #[derive(Debug, Default, serde::Deserialize)]
@@ -335,7 +424,10 @@ pub async fn interactive_search_episodes(
     let hits = auto_search::select_episode_set(&state.db, &detail, &cfg, results, &episodes).await;
 
     if is_htmx {
-        let html = build_episode_set_partial(hits, wanted)
+        let protocols = indexer_protocols(&state).await;
+        let mut partial = build_episode_set_partial(hits, wanted, &protocols);
+        add_numbering_review_links(&state, request_id, &mut partial).await?;
+        let html = partial
             .render()
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         Ok(Html(html).into_response())
@@ -481,6 +573,14 @@ pub async fn search_batch_releases(
             Err((axum::http::StatusCode::NOT_FOUND, message))
         }
         Some(result) => {
+            let availability =
+                crate::services::release_availability::Policy::load(&cfg, &state.indexers).await;
+            if let Err(reason) = availability.check_result(&result) {
+                if let Some(h) = &progress_handle {
+                    h.emit("done", "warn", &reason, None, true).await;
+                }
+                return Err((StatusCode::CONFLICT, reason));
+            }
             // Per-release client routing: resolve through the indexer
             // pin so an NZB result from a newznab (SAB-pinned)
             // indexer dispatches to SAB, not to the torrent default.
@@ -540,26 +640,52 @@ pub async fn search_batch_releases(
                 )
                 .await;
             }
-            let (_, canonical_id) = qbit
-                .add_torrent_returning_id(&url, &result.info_hash)
+            let mut prepared_bound = None;
+            let dispatch = if let Some(mapping) = result
+                .release_mapping
+                .as_ref()
+                .filter(|mapping| mapping.bound_source().is_some())
+            {
+                if series_id_for_grab.is_none() {
+                    return Err((
+                        axum::http::StatusCode::BAD_REQUEST,
+                        "A reviewed source needs a tracked library release".into(),
+                    ));
+                }
+                crate::services::source_numbering_grab::add_bound(
+                    qbit.as_ref(),
+                    &url,
+                    &result.info_hash,
+                    mapping,
+                )
                 .await
-                .map_err(|e| {
-                    if let Some(h) = &progress_handle {
-                        let h = h.clone();
-                        let err = e.clone();
-                        tokio::spawn(async move {
-                            h.emit(
-                                "error",
-                                "error",
-                                "qBittorrent rejected the torrent",
-                                Some(err),
-                                true,
-                            )
-                            .await;
-                        });
-                    }
-                    (axum::http::StatusCode::BAD_GATEWAY, e)
-                })?;
+                .map(|prepared| {
+                    let id = prepared.info_hash.clone();
+                    prepared_bound = Some(prepared);
+                    id
+                })
+            } else {
+                qbit.add_torrent_returning_id(&url, &result.info_hash)
+                    .await
+                    .map(|(_, id)| id)
+            };
+            let canonical_id = dispatch.map_err(|e| {
+                if let Some(h) = &progress_handle {
+                    let h = h.clone();
+                    let err = e.clone();
+                    tokio::spawn(async move {
+                        h.emit(
+                            "error",
+                            "error",
+                            "qBittorrent rejected the torrent",
+                            Some(err),
+                            true,
+                        )
+                        .await;
+                    });
+                }
+                (axum::http::StatusCode::BAD_GATEWAY, e)
+            })?;
             let classification = crate::services::source::classify_release(
                 &state.db,
                 &result.title,
@@ -577,21 +703,6 @@ pub async fn search_batch_releases(
             )
             .await;
             let tier_label = classification.label();
-            logger::info(
-                &state.db,
-                LogCategory::Grab,
-                &format!("Grabbed batch: {}", result.title),
-                &format!(
-                    "group={}, score={}, tier={}{}",
-                    result.group,
-                    result.score,
-                    tier_label,
-                    crate::services::auto_search::MatchProvenance::log_suffix(
-                        result.match_provenance.as_ref()
-                    )
-                ),
-            )
-            .await;
             if let Some(sid) = series_id_for_grab {
                 // Preserve the automatic source-file decision through import,
                 // including entry-relative packs whose numbers overlap the
@@ -620,6 +731,18 @@ pub async fn search_batch_releases(
                 )
                 .await
                 .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e.to_string()))?;
+                if let Some(prepared) = &prepared_bound {
+                    if prepared.newly_added && saved.is_none() {
+                        return Err((
+                            axum::http::StatusCode::BAD_GATEWAY,
+                            "The source decision was not saved; the torrent remains paused".into(),
+                        ));
+                    }
+                    prepared
+                        .resume_after_record(qbit.as_ref())
+                        .await
+                        .map_err(|reason| (axum::http::StatusCode::BAD_GATEWAY, reason))?;
+                }
                 let grab_id = saved.as_ref().map(|s| s.id);
                 let replayed = saved.as_ref().is_some_and(|s| s.replayed);
                 let ep_nums = saved.map(|s| s.episodes).unwrap_or_default();
@@ -668,6 +791,21 @@ pub async fn search_batch_releases(
                     .await;
                 }
             }
+            logger::info(
+                &state.db,
+                LogCategory::Grab,
+                &format!("Grabbed batch: {}", result.title),
+                &format!(
+                    "group={}, score={}, tier={}{}",
+                    result.group,
+                    result.score,
+                    tier_label,
+                    crate::services::auto_search::MatchProvenance::log_suffix(
+                        result.match_provenance.as_ref()
+                    )
+                ),
+            )
+            .await;
             if let Some(h) = &progress_handle {
                 h.emit(
                     "done",
@@ -730,7 +868,14 @@ pub async fn interactive_search_episode(
     ) {
         let cached_vec: Vec<_> = (*cached).clone();
         return if is_htmx {
-            render_interactive_partial(cached_vec, Some(episode_number), origin.wanted())
+            render_interactive_partial(
+                &state,
+                request_id,
+                cached_vec,
+                Some(episode_number),
+                origin.wanted(),
+            )
+            .await
         } else {
             Ok(Json(cached_vec).into_response())
         };
@@ -775,7 +920,14 @@ pub async fn interactive_search_episode(
         results.clone(),
     );
     if is_htmx {
-        render_interactive_partial(results, Some(episode_number), origin.wanted())
+        render_interactive_partial(
+            &state,
+            request_id,
+            results,
+            Some(episode_number),
+            origin.wanted(),
+        )
+        .await
     } else {
         Ok(Json(results).into_response())
     }
@@ -815,7 +967,7 @@ pub async fn interactive_search_batches(
     ) {
         let cached_vec: Vec<_> = (*cached).clone();
         return if is_htmx {
-            render_interactive_partial(cached_vec, None, origin.wanted())
+            render_interactive_partial(&state, request_id, cached_vec, None, origin.wanted()).await
         } else {
             Ok(Json(cached_vec).into_response())
         };
@@ -851,7 +1003,7 @@ pub async fn interactive_search_batches(
         results.clone(),
     );
     if is_htmx {
-        render_interactive_partial(results, None, origin.wanted())
+        render_interactive_partial(&state, request_id, results, None, origin.wanted()).await
     } else {
         Ok(Json(results).into_response())
     }

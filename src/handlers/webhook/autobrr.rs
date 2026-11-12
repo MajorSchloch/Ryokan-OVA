@@ -185,6 +185,9 @@ async fn requirements_gate(
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct AutobrrPayload {
     pub torrent_name: String,
+    /// Optional current torrent availability. Usenet pushes do not use peers.
+    #[serde(default)]
+    pub seeders: Option<i32>,
     #[serde(default)]
     pub info_hash: String,
     #[serde(default)]
@@ -494,6 +497,18 @@ pub async fn webhook_autobrr(
             );
         }
     };
+    let cfg =
+        match crate::services::language_preferences::effective_config(&state.db, &cfg, series.id)
+            .await
+        {
+            Ok(value) => value,
+            Err(_) => {
+                return err_json(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Release language settings are unavailable.",
+                );
+            }
+        };
     if let Err(reason) =
         requirements_gate(&state.db, &cfg, &series, &ep_nums, &payload.torrent_name).await
     {
@@ -595,6 +610,76 @@ pub async fn webhook_autobrr(
         && grabbed_torrents::is_known_hash(&state.db, &info_hash_lc).await
     {
         return skipped("duplicate hash already grabbed");
+    }
+    // Exact reviewed torrents require the strict paused/selected acquisition
+    // path. A push cannot fall back to a whole job and then fail attribution.
+    if client.protocol() == "torrent" {
+        match crate::models::source_numbering::has_bound_history(&state.db, &info_hash_lc).await {
+            Ok(false) => {}
+            Ok(true) => {
+                return skipped(
+                    "This reviewed source needs its saved episode selection. Use the release page or file picker.",
+                );
+            }
+            Err(_) => {
+                return skipped(
+                    "The source review could not be checked. Use the release page or file picker before downloading.",
+                );
+            }
+        }
+    }
+    // Pushes are automatic acquisitions too. An omitted statistic is unknown,
+    // not a healthy torrent. Only the existing restricted Nyaa listing fetch
+    // may fill it; an arbitrary publisher download URL is never probed here.
+    let availability =
+        crate::services::release_availability::Policy::load(&cfg, &state.indexers).await;
+    let availability_source = if as_builtin_nyaa {
+        rss::RssSource::Nyaa
+    } else if let Some(id) = indexer_id {
+        let snapshot = state.indexers.read().await.clone();
+        rss::RssSource::Indexer {
+            id,
+            name: payload.indexer.clone(),
+            kind: snapshot
+                .iter()
+                .find(|i| i.id() == id)
+                .map(|i| i.kind())
+                .unwrap_or("unknown")
+                .to_string(),
+        }
+    } else {
+        // The existing unmatched-source guard already established a torrent
+        // via its magnet, hash, or parsed .torrent before this point.
+        rss::RssSource::UserFeed {
+            id: 0,
+            name: payload.indexer.clone(),
+        }
+    };
+    let mut availability_item = rss::RssItem {
+        seeders: payload.seeders.filter(|n| *n >= 0),
+        title: payload.torrent_name.clone(),
+        link: payload.torrent_url.clone(),
+        torrent: payload.torrent_url.clone(),
+        magnet: payload.magnet_uri.clone(),
+        guid: String::new(),
+        info_hash: info_hash_lc.clone(),
+        group: String::new(),
+        resolution: String::new(),
+        is_batch: ep_nums.len() > 1,
+        source: availability_source,
+    };
+    if let Err(reason) = availability
+        .check_rss(&mut availability_item, client.protocol())
+        .await
+    {
+        logger::info(
+            &state.db,
+            LogCategory::Grab,
+            &format!("autobrr: skipping {safe_release}: {reason}"),
+            &safe_release,
+        )
+        .await;
+        return skipped(reason);
     }
     // `add_torrent_returning_id` returns the canonical client-
     // side id alongside the outcome. For BT clients the returned id

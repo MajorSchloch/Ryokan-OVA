@@ -5,6 +5,8 @@ pub mod migration_replay;
 mod numbering;
 #[cfg(test)]
 mod requirements_failure_tests;
+#[cfg(test)]
+mod source_proof_tests;
 pub mod source_replay;
 pub use import_policy::{
     ensure_migration_replay_allowed, get_replacement_episode, legacy_imported_name_for_series,
@@ -184,6 +186,54 @@ async fn record_grab_with_policy(
     Ok(result)
 }
 
+async fn validate_release_mapping(
+    db: &mut sqlx::SqliteConnection,
+    hash: &str,
+    series_id: i64,
+    mapping: &crate::services::release_numbering::ReleaseMapping,
+) -> Result<(), sqlx::Error> {
+    mapping
+        .validate()
+        .map_err(|e| sqlx::Error::Decode(e.into()))?;
+    let owner: i64 = sqlx::query_scalar("SELECT anilist_id FROM series WHERE id = ?")
+        .bind(series_id)
+        .fetch_one(&mut *db)
+        .await?;
+    if mapping.anilist_id != owner {
+        return Err(sqlx::Error::Decode(
+            "Episode mapping: release decision belongs to another entry".into(),
+        ));
+    }
+    if let Some(proof) = mapping.bound_source() {
+        if !proof.info_hash.eq_ignore_ascii_case(hash) {
+            return Err(sqlx::Error::Decode(
+                "Episode mapping: client source differs from the reviewed torrent".into(),
+            ));
+        }
+        let saved: Option<String> = sqlx::query_scalar(
+            "SELECT proof_json FROM source_numbering_decisions WHERE info_hash=? COLLATE NOCASE AND target_anilist_id=?",
+        )
+        .bind(hash)
+        .bind(owner)
+        .fetch_optional(&mut *db)
+        .await?;
+        let saved = saved.ok_or_else(|| {
+            sqlx::Error::Decode("Episode mapping: the source decision is no longer saved".into())
+        })?;
+        let saved: crate::services::source_numbering::BoundSourceProof =
+            serde_json::from_str(&saved).map_err(|error| sqlx::Error::Decode(error.into()))?;
+        saved
+            .validate()
+            .map_err(|reason| sqlx::Error::Decode(reason.into()))?;
+        if !proof.is_within_review(&saved) {
+            return Err(sqlx::Error::Decode(
+                "Episode mapping: the grab differs from the saved source decision".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn record_grab_in_connection(
     db: &mut sqlx::SqliteConnection,
@@ -195,6 +245,16 @@ async fn record_grab_in_connection(
     mapping: Option<&crate::services::release_numbering::ReleaseMapping>,
     replacement_episode: Option<i32>,
 ) -> Result<Option<i64>, sqlx::Error> {
+    let source_reviewed =
+        crate::models::source_numbering::has_bound_history_in_connection(db, hash).await?;
+    if source_reviewed && mapping.is_none_or(|mapping| mapping.bound_source().is_none()) {
+        return Err(sqlx::Error::Decode(
+            "Episode mapping: this source requires its saved numbering decision".into(),
+        ));
+    }
+    if let Some(mapping) = mapping {
+        validate_release_mapping(db, hash, series_id, mapping).await?;
+    }
     // A migrated source reuses its reviewed per-file decision. Keep the old
     // parent, claims and routes intact; the requested slot cannot remap files.
     let migrated = sqlx::query(
@@ -205,6 +265,11 @@ async fn record_grab_in_connection(
     .fetch_all(&mut *db)
     .await?;
     if !migrated.is_empty() {
+        if mapping.is_some_and(|mapping| mapping.bound_source().is_some()) {
+            return Err(sqlx::Error::Decode(
+                "Episode mapping: this source already has library migration assignments".into(),
+            ));
+        }
         if migrated.len() != 1 {
             return Err(sqlx::Error::Decode(
                 "Episode mapping: multiple migrated records for this source require review".into(),
@@ -248,20 +313,6 @@ async fn record_grab_in_connection(
         .execute(&mut *db)
         .await?;
         return Ok(Some(id));
-    }
-    if let Some(mapping) = mapping {
-        mapping
-            .validate()
-            .map_err(|e| sqlx::Error::Decode(e.into()))?;
-        let owner: i64 = sqlx::query_scalar("SELECT anilist_id FROM series WHERE id = ?")
-            .bind(series_id)
-            .fetch_one(&mut *db)
-            .await?;
-        if mapping.anilist_id != owner {
-            return Err(sqlx::Error::Decode(
-                "Episode mapping: release decision belongs to another entry".into(),
-            ));
-        }
     }
     let canonical_eps = mapping.map(|m| m.episodes());
     let eps_json = serde_json::to_string(canonical_eps.as_deref().unwrap_or(episode_numbers))
@@ -359,6 +410,18 @@ async fn record_grab_in_connection(
     .fetch_optional(&mut *db)
     .await?
     .flatten();
+    if let Some(old) = &previous_mapping {
+        let old: crate::services::release_numbering::ReleaseMapping =
+            serde_json::from_str(old).map_err(|error| sqlx::Error::Decode(error.into()))?;
+        if old.bound_source().is_some() {
+            if previous_series != Some(series_id) {
+                return Err(sqlx::Error::Decode(
+                    "Episode mapping: this source belongs to another reviewed release".into(),
+                ));
+            }
+            validate_release_mapping(db, hash, series_id, &old).await?;
+        }
+    }
     if previous_series == Some(series_id)
         && let (Some(old), Some(new)) = (&previous_mapping, &mapping_json)
         && old != new
