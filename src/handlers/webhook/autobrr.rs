@@ -656,6 +656,7 @@ pub async fn webhook_autobrr(
         }
     };
     let mut availability_item = rss::RssItem {
+        published_at: None,
         seeders: payload.seeders.filter(|n| *n >= 0),
         title: payload.torrent_name.clone(),
         link: payload.torrent_url.clone(),

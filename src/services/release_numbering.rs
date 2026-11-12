@@ -13,6 +13,10 @@ use crate::services::anilist::MAX_PLAUSIBLE_EPISODES;
 use crate::services::episode_mapping::{self, MappedFile, MappingRule};
 use crate::services::{auto_search, media};
 
+#[path = "release_numbering_publication.rs"]
+mod publication;
+pub(crate) use publication::PremiereBound;
+
 // Positive source evidence is narrower than the search parser's season
 // rejection hints. In particular, bare Romans and Part/Cour are not seasons.
 static SOURCE_EPISODE: LazyLock<Regex> = LazyLock::new(|| {
@@ -909,6 +913,18 @@ pub(crate) async fn filter_automatic_candidates_with_pack_mappings(
     let mut accepted = Vec::new();
     let automatic_sources = crate::services::source_numbering::loader::Resolver::default();
     for mut candidate in candidates {
+        if let Some(bound) = PremiereBound::from_detail(detail)
+            && let Err(reason) = bound.check(candidate.published_at)
+        {
+            crate::services::logger::warn(
+                db,
+                crate::models::log::LogCategory::Grab,
+                &format!("Automatic grab held: {}", candidate.title),
+                &reason,
+            )
+            .await;
+            continue;
+        }
         match apply_reviewed_source(db, detail.id, target, &mut candidate).await {
             Ok(true) => {
                 if candidate

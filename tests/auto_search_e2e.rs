@@ -25,6 +25,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 mod automatic_numbering_compat;
 #[path = "auto_search_e2e/automatic_source_numbering.rs"]
 mod automatic_source_numbering;
+#[path = "auto_search_e2e/publication_date.rs"]
+mod publication_date;
 #[path = "auto_search_e2e/unmarked_packs.rs"]
 mod unmarked_packs;
 

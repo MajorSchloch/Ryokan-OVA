@@ -93,6 +93,25 @@ static SINGLE_EP_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
     .expect("SINGLE_EP_RE parses")
 });
 
+fn publication_timestamp(attribute: Option<&str>, display: &str) -> Option<i64> {
+    attribute
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|timestamp| {
+            *timestamp > 0
+                && chrono::DateTime::<chrono::Utc>::from_timestamp(*timestamp, 0).is_some()
+        })
+        .or_else(|| {
+            let display = display
+                .trim()
+                .strip_suffix(" UTC")
+                .unwrap_or(display.trim());
+            chrono::NaiveDateTime::parse_from_str(display, "%Y-%m-%d %H:%M")
+                .ok()
+                .map(|date| date.and_utc().timestamp())
+                .filter(|timestamp| *timestamp > 0)
+        })
+}
+
 pub(super) fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResult>, bool) {
     let document = Html::parse_document(html);
     let base = nyaa_base();
@@ -159,9 +178,11 @@ pub(super) fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResu
 
         // Upload date (td index 4) — Nyaa renders "YYYY-MM-DD HH:MM"
         // in UTC. Some cells also carry a `data-timestamp` attribute
-        // with the Unix epoch; we prefer the text since it's already
-        // display-ready.
+        // with the Unix epoch. Keep the text for display, and prefer the
+        // precise timestamp when recording the publication fact.
         let upload_date = tds[4].text().collect::<String>().trim().to_string();
+        let published_at =
+            publication_timestamp(tds[4].value().attr("data-timestamp"), &upload_date);
 
         // Seeders, leechers, downloads (td indices 5, 6, 7).
         let seeders = parse_int(&tds[5].text().collect::<String>());
@@ -207,6 +228,7 @@ pub(super) fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResu
             info_hash,
             score_breakdown: Vec::new(),
             upload_date: upload_date.clone(),
+            published_at,
             indexer_id: None,
             indexer_name: String::new(),
         };
@@ -449,6 +471,8 @@ pub(super) fn parse_view_page(
     let mut leechers = 0i32;
     let mut downloads = 0i32;
     let mut size = String::new();
+    let mut published_at = None;
+    let mut date_seen = false;
     // Availability must come from the listing's own header grid. Later
     // description/comment panels and nested user markup may contain the same
     // Bootstrap classes and labels, but cannot overwrite tracker statistics.
@@ -470,15 +494,24 @@ pub(super) fn parse_view_page(
                     .classes()
                     .any(|class| class.starts_with("col-md-"))
             })
-            .map(|el| el.text().collect::<String>().trim().to_string())
-            .filter(|s| !s.is_empty())
+            .map(|el| {
+                (
+                    el.text().collect::<String>().trim().to_string(),
+                    el.value().attr("data-timestamp"),
+                )
+            })
+            .filter(|(text, _)| !text.is_empty())
             .collect();
         // We want pairs: each "Label:" should be followed by its value.
         let mut i = 0;
         while i + 1 < cols.len() {
-            let label = cols[i].trim_end_matches(':').trim().to_ascii_lowercase();
-            let value = cols[i + 1].trim().to_string();
+            let label = cols[i].0.trim_end_matches(':').trim().to_ascii_lowercase();
+            let value = cols[i + 1].0.trim().to_string();
             match label.as_str() {
+                "date" if !date_seen => {
+                    date_seen = true;
+                    published_at = publication_timestamp(cols[i + 1].1, &value);
+                }
                 "seeders" => seeders = parse_int(&value),
                 "leechers" => leechers = parse_int(&value),
                 "completed" => downloads = parse_int(&value),
@@ -552,6 +585,7 @@ pub(super) fn parse_view_page(
         // The view page doesn't render the listing-table date column.
         // Callers on this path (SeaDex-bypass) get an empty string.
         upload_date: String::new(),
+        published_at,
         indexer_id: None,
         indexer_name: String::new(),
     };
@@ -568,6 +602,122 @@ pub(super) fn parse_view_page(
 mod tests {
     use super::super::enrich_results_with_group_map;
     use super::*;
+
+    fn dated_row(attribute: &str, display: &str) -> SearchResult {
+        let html = format!(
+            "<table class=\"torrent-list\"><tbody><tr><td>Anime</td>\
+             <td><a href=\"/view/1\">[Fixture] Black Clover - 01 [1080p WEB-DL]</a></td>\
+             <td><a href=\"magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\">Magnet</a></td>\
+             <td>500 MiB</td><td {attribute}>{display}</td><td>12</td><td>0</td><td>1</td>\
+             </tr></tbody></table>"
+        );
+        let (mut results, _) = parse_results(&html, &SearchOptions::default());
+        assert_eq!(results.len(), 1);
+        results.remove(0)
+    }
+
+    #[test]
+    fn publication_date_nyaa_timestamp_is_typed_and_preserves_display_text() {
+        let result = dated_row("data-timestamp=\"1546300807\"", "2019-01-01 00:00");
+        assert_eq!(result.published_at, Some(1_546_300_807));
+        assert_eq!(result.upload_date, "2019-01-01 00:00");
+        assert_eq!(
+            serde_json::to_value(result).unwrap()["published_at"],
+            1_546_300_807_i64
+        );
+    }
+
+    #[test]
+    fn publication_date_nyaa_utc_text_is_a_fallback_for_missing_or_invalid_timestamp() {
+        for attribute in [
+            "",
+            "data-timestamp=\"invalid\"",
+            "data-timestamp=\"0\"",
+            "data-timestamp=\"9223372036854775807\"",
+        ] {
+            assert_eq!(
+                dated_row(attribute, "2019-01-01 00:00").published_at,
+                Some(1_546_300_800),
+                "{attribute}"
+            );
+        }
+    }
+
+    #[test]
+    fn publication_date_nyaa_unknown_and_legacy_json_stay_absent() {
+        for (attribute, text) in [
+            ("", ""),
+            ("", "not a date"),
+            ("data-timestamp=\"-1\"", "unknown"),
+            ("data-timestamp=\"9223372036854775807\"", "unknown"),
+            ("data-timestamp=\"9223372036854775808\"", "unknown"),
+        ] {
+            let result = dated_row(attribute, text);
+            assert_eq!(result.published_at, None);
+            assert!(
+                serde_json::to_value(result)
+                    .unwrap()
+                    .get("published_at")
+                    .is_none()
+            );
+        }
+        let mut old_json = serde_json::to_value(dated_row("", "2019-01-01 00:00")).unwrap();
+        old_json.as_object_mut().unwrap().remove("published_at");
+        let old: SearchResult = serde_json::from_value(old_json).unwrap();
+        assert_eq!(old.published_at, None);
+        assert_eq!(old.upload_date, "2019-01-01 00:00");
+    }
+
+    #[test]
+    fn publication_date_unknown_view_does_not_invent_a_timestamp() {
+        let html = SMOL_VIEW_FIXTURE
+            .replace(" data-timestamp=\"1694025140\"", "")
+            .replace("2023-09-06 18:32 UTC", "Unknown");
+        let result = parse_view_page(
+            &html,
+            "https://nyaa.si/view/1713886",
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(result.published_at, None);
+        assert!(result.upload_date.is_empty());
+    }
+
+    #[test]
+    fn publication_date_view_uses_only_the_first_listing_header_date() {
+        let known = SMOL_VIEW_FIXTURE
+            .replace("1694025140", "1546300807")
+            .replace("2023-09-06 18:32 UTC", "2019-01-01 00:00 UTC");
+        let forged = "<div class=\"panel\"><div class=\"panel-body\"><div class=\"row\">\
+                      <div class=\"col-md-1\">Date:</div>\
+                      <div class=\"col-md-5\" data-timestamp=\"1798761600\">2027-01-01 00:00 UTC</div>\
+                      </div></div></div>";
+        for (header, expected) in [
+            (known.clone(), Some(1_546_300_807)),
+            (
+                known.replace(" data-timestamp=\"1546300807\"", ""),
+                Some(1_546_300_800),
+            ),
+            (
+                known
+                    .replace("1546300807", "invalid")
+                    .replace("2019-01-01 00:00 UTC", "Unknown"),
+                None,
+            ),
+        ] {
+            let result = parse_view_page(
+                &format!("{header}{forged}"),
+                "https://nyaa.si/view/1713886",
+                &SearchOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(result.published_at, expected);
+            assert!(
+                result.upload_date.is_empty(),
+                "display behavior stays unchanged"
+            );
+        }
+    }
 
     // ── sanitize_query_for_nyaa ──────────────────────────────────────────
     //
@@ -1096,6 +1246,7 @@ mod tests {
             info_hash: String::new(),
             score_breakdown: Vec::new(),
             upload_date: String::new(),
+            published_at: None,
             indexer_id: None,
             indexer_name: String::new(),
         }];
@@ -1145,6 +1296,7 @@ mod tests {
             info_hash: String::new(),
             score_breakdown: Vec::new(),
             upload_date: String::new(),
+            published_at: None,
             indexer_id: None,
             indexer_name: String::new(),
         }];

@@ -67,6 +67,7 @@ fn search_result(seeders: i32, title: &str) -> SearchResult {
         info_hash: String::new(),
         score_breakdown: Vec::new(),
         upload_date: String::new(),
+        published_at: None,
         indexer_id: None,
         indexer_name: String::new(),
     }
