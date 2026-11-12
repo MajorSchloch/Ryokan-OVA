@@ -101,13 +101,9 @@
             + (hint ? '<p class="isearch-empty-hint">' + hint + '</p>' : '') + '</div>';
     }
 
-    // Only the latest request may touch the modal. Each menu load and
-    // each search takes a sequence number and an AbortController; a
-    // newer one aborts the older and a late answer for a superseded
-    // request is dropped, so switching picks mid-search never flashes
-    // the earlier pick's results, and closing the modal stops both.
+    // Only the latest menu load may touch the modal. The shared search
+    // helper applies the same rule to episode, episode-set and batch results.
     var menuReq = { seq: 0, ctrl: null };
-    var searchReq = { seq: 0, ctrl: null };
 
     function supersede(req) {
         req.seq += 1;
@@ -133,7 +129,7 @@
         isearch.pickEpisodes = [];
         titleEl.textContent = 'Interactive search: ' + isearch.title;
         closeDropdowns();
-        supersede(searchReq);
+        window.ryokanInteractiveSearch.cancel(body);
         var req = supersede(menuReq);
         pick.innerHTML = '';
         body.innerHTML = loadingHtml('Loading');
@@ -203,28 +199,7 @@
 
     function loadWantedSearch(url, message) {
         var body = document.getElementById('wanted-isearch-body');
-        if (!body) return;
-        var req = supersede(searchReq);
-        body.innerHTML = loadingHtml(message);
-        // A plain fetch with the HTMX header (the handler then answers
-        // with the rendered table partial) rather than htmx.ajax, so
-        // the request can be aborted and a stale answer dropped; see
-        // `supersede`.
-        fetch(url, { headers: { 'HX-Request': 'true' }, signal: req.signal })
-            .then(async function (resp) {
-                var html = await resp.text();
-                if (req.seq !== searchReq.seq) return;
-                if (!resp.ok) {
-                    body.innerHTML = emptyHtml('Search failed.', html && html.trim() ? escapeText(html.trim()) : 'Check System &rarr; Logs for the indexer error.');
-                    return;
-                }
-                body.innerHTML = html;
-                if (window.htmx && typeof window.htmx.process === 'function') window.htmx.process(body);
-            })
-            .catch(function (err) {
-                if (req.seq !== searchReq.seq || (err && err.name === 'AbortError')) return;
-                body.innerHTML = emptyHtml('Search failed.', 'Check System &rarr; Logs for the indexer error.');
-            });
+        window.ryokanInteractiveSearch.load(body, url, message);
     }
 
     // ── Dropdown (the server-rendered menu recipe) ────────────────
@@ -299,7 +274,7 @@
         closeDropdowns();
         // Stop whatever is in flight; nothing may land in a closed modal.
         supersede(menuReq);
-        supersede(searchReq);
+        window.ryokanInteractiveSearch.cancel(document.getElementById('wanted-isearch-body'));
         var modal = isearchModal();
         if (modal) modal.style.display = 'none';
     }
