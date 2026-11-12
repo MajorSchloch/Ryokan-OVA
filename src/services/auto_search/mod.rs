@@ -878,7 +878,10 @@ async fn collect_scored_batches_for_target_filtered(
     let fuzzy_rejected = std::sync::Mutex::new(Vec::new());
     let indexer_categories =
         crate::services::indexers::search_categories(&detail.format, detail.is_adult);
+    let automatic_sources = crate::services::source_numbering::loader::Resolver::default();
     let ctx = AutoQueryCtx {
+        automatic_sources: &automatic_sources,
+        numbering_target: target,
         availability: require_verbatim.then_some(&availability),
         db,
         anilist_id: detail.id,
@@ -975,6 +978,23 @@ async fn collect_scored_batches_for_target_filtered(
         .await;
     }
 
+    if require_verbatim && !series_ctx.franchise_aliases.is_empty() {
+        let root_queries = append_custom_tokens(
+            quality::batch_probe_queries(&series_ctx.franchise_aliases),
+            &series_ctx.custom_tokens,
+        );
+        run_queries(
+            &root_queries,
+            AutoQueryCtx {
+                phase: MatchPhase::Franchise,
+                ..ctx
+            },
+            &mut seen,
+            &mut candidates,
+        )
+        .await;
+    }
+
     // Curated seeds did not pass run_queries' reviewed-source lookup. A
     // reviewed file mapping is the exception for a genuine multi-season pack.
     let mut identity_checked = Vec::with_capacity(candidates.len());
@@ -983,14 +1003,7 @@ async fn collect_scored_batches_for_target_filtered(
             .match_provenance
             .as_ref()
             .is_some_and(|p| p.kind == MatchKind::SeadexCurated)
-            && crate::services::release_numbering::apply_reviewed_source(
-                db,
-                detail.id,
-                target,
-                &mut candidate,
-            )
-            .await
-            .is_err()
+            && ctx.apply_source(&mut candidate).await.is_err()
         {
             continue;
         }
@@ -1221,6 +1234,7 @@ async fn collect_scored_for_target_filtered(
     let sibling_precompute = SiblingRejectPrecompute::build(&aliases, &sibling_aliases);
     let mut seen = HashSet::new();
     let mut candidates: Vec<SearchResult> = Vec::new();
+    let automatic_sources = crate::services::source_numbering::loader::Resolver::default();
 
     // Seed with SeaDex-curated candidates fetched directly from their
     // view URLs — this is how the smol Kizumonogatari pack (titled
@@ -1240,6 +1254,40 @@ async fn collect_scored_for_target_filtered(
         if !availability.allows_result(&result) {
             continue;
         }
+        if config.media_requirements_enabled
+            && !passes_presearch_requirements(
+                &result,
+                Some(Resolution::from_str(&config.minimum_resolution)),
+                None,
+            )
+        {
+            continue;
+        }
+        let bound = match crate::services::release_numbering::apply_reviewed_source(
+            db,
+            detail.id,
+            target,
+            &mut result,
+        )
+        .await
+        {
+            Ok(true) => true,
+            Ok(false) if require_verbatim => match automatic_sources
+                .apply(db, detail.id, target, &mut result)
+                .await
+            {
+                Ok(value) => value,
+                Err(reason) => {
+                    tracing::warn!(%reason,"automatic seed held by source evidence");
+                    continue;
+                }
+            },
+            Ok(false) => false,
+            Err(reason) => {
+                tracing::warn!(%reason,"automatic seed held by saved source evidence");
+                continue;
+            }
+        };
         if !allow_batch && result.is_batch {
             continue;
         }
@@ -1258,7 +1306,23 @@ async fn collect_scored_for_target_filtered(
             result.title.to_lowercase()
         };
         if seen.insert(dedupe_key) {
-            result.match_provenance = Some(MatchProvenance::seadex(MatchPhase::SeadexSeed));
+            result.match_provenance = Some(if bound {
+                if result
+                    .release_mapping
+                    .as_ref()
+                    .and_then(|m| m.bound_source())
+                    .is_some_and(|p| {
+                        p.origin()
+                            == Ok(crate::services::source_numbering::ProofOrigin::AutomaticUnique)
+                    })
+                {
+                    MatchProvenance::automatic_source(MatchPhase::SeadexSeed)
+                } else {
+                    MatchProvenance::reviewed_source(MatchPhase::SeadexSeed)
+                }
+            } else {
+                MatchProvenance::seadex(MatchPhase::SeadexSeed)
+            });
             candidates.push(result);
         }
     }
@@ -1271,6 +1335,8 @@ async fn collect_scored_for_target_filtered(
     let indexer_categories =
         crate::services::indexers::search_categories(&detail.format, detail.is_adult);
     let ctx = AutoQueryCtx {
+        automatic_sources: &automatic_sources,
+        numbering_target: target,
         availability: Some(&availability),
         db,
         anilist_id: detail.id,
@@ -1553,6 +1619,49 @@ async fn collect_scored_for_target_filtered(
 /// Phase 1.5 alias override can reuse most fields via
 /// `AutoQueryCtx { aliases: &all_aliases, ..ctx }`.
 impl AutoQueryCtx<'_> {
+    async fn apply_source(&self, result: &mut SearchResult) -> Result<bool, String> {
+        if crate::services::release_numbering::apply_reviewed_source(
+            self.db,
+            self.anilist_id,
+            self.numbering_target,
+            result,
+        )
+        .await?
+        {
+            return Ok(true);
+        }
+        if self.require_verbatim {
+            let normalized = normalize_title(&result.title);
+            if sibling_match_rejects(
+                &normalized,
+                &token_set(&normalized),
+                self.sibling_precompute,
+            ) {
+                return Ok(false);
+            }
+            self.automatic_sources
+                .apply(self.db, self.anilist_id, self.numbering_target, result)
+                .await
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn source_provenance(&self, result: &SearchResult) -> MatchProvenance {
+        if result
+            .release_mapping
+            .as_ref()
+            .and_then(|m| m.bound_source())
+            .is_some_and(|p| {
+                p.origin() == Ok(crate::services::source_numbering::ProofOrigin::AutomaticUnique)
+            })
+        {
+            MatchProvenance::automatic_source(self.phase)
+        } else {
+            MatchProvenance::reviewed_source(self.phase)
+        }
+    }
+
     /// Remember a release the verbatim gate turned away, once. The same
     /// release comes back from every query and category of a sweep,
     /// and the report lists these titles.
@@ -1566,6 +1675,8 @@ impl AutoQueryCtx<'_> {
 
 #[derive(Clone, Copy)]
 struct AutoQueryCtx<'a> {
+    automatic_sources: &'a crate::services::source_numbering::loader::Resolver,
+    numbering_target: &'a SearchTarget,
     availability: Option<&'a crate::services::release_availability::Policy>,
     minimum_resolution: Option<Resolution>,
     eligible: Option<CandidateFilter<'a>>,
@@ -1846,26 +1957,28 @@ async fn run_queries(
             // silently letting SeaDex-curated batches through would
             // bypass that setting. SeaDex bypasses *heuristic* title
             // matching, not the user's batch-allowed policy.
-            if !passes_presearch_requirements(&result, ctx.minimum_resolution, ctx.eligible) {
+            if !passes_presearch_requirements(&result, ctx.minimum_resolution, None) {
                 continue;
             }
-            if !ctx.allow_batch && result.is_batch {
+            if !ctx.require_verbatim && !ctx.allow_batch && result.is_batch {
                 continue;
             }
-            let reviewed = match crate::services::release_numbering::apply_reviewed_source(
-                ctx.db,
-                ctx.anilist_id,
-                ctx.target,
-                &mut result,
-            )
-            .await
-            {
+            let reviewed = match ctx.apply_source(&mut result).await {
                 Ok(value) => value,
                 Err(reason) => {
-                    tracing::warn!(%reason, "automatic search held a reviewed source");
+                    logger::warn(
+                        ctx.db,
+                        LogCategory::Grab,
+                        &format!("Automatic grab held: {}", result.title),
+                        &reason,
+                    )
+                    .await;
                     continue;
                 }
             };
+            if !passes_presearch_requirements(&result, ctx.minimum_resolution, ctx.eligible) {
+                continue;
+            }
             if !ctx.allow_batch && result.is_batch {
                 continue;
             }
@@ -1875,7 +1988,7 @@ async fn run_queries(
                 continue;
             }
             let provenance = if reviewed {
-                MatchProvenance::reviewed_source(ctx.phase)
+                ctx.source_provenance(&result)
             } else if is_seadex_match(&result.info_hash, ctx.seadex_hashes) {
                 tracing::debug!(
                     "seadex: bypassing heuristic filters for SeaDex-best release title={:?} hash={}",
@@ -1948,26 +2061,28 @@ async fn run_queries(
         if seen.contains(&dedupe_key) || rejected_here.contains(&dedupe_key) {
             continue;
         }
-        if !passes_presearch_requirements(&result, ctx.minimum_resolution, ctx.eligible) {
+        if !passes_presearch_requirements(&result, ctx.minimum_resolution, None) {
             continue;
         }
-        if !ctx.allow_batch && result.is_batch {
+        if !ctx.require_verbatim && !ctx.allow_batch && result.is_batch {
             continue;
         }
-        let reviewed = match crate::services::release_numbering::apply_reviewed_source(
-            ctx.db,
-            ctx.anilist_id,
-            ctx.target,
-            &mut result,
-        )
-        .await
-        {
+        let reviewed = match ctx.apply_source(&mut result).await {
             Ok(value) => value,
             Err(reason) => {
-                tracing::warn!(%reason, "automatic search held a reviewed source");
+                logger::warn(
+                    ctx.db,
+                    LogCategory::Grab,
+                    &format!("Automatic grab held: {}", result.title),
+                    &reason,
+                )
+                .await;
                 continue;
             }
         };
+        if !passes_presearch_requirements(&result, ctx.minimum_resolution, ctx.eligible) {
+            continue;
+        }
         if !ctx.allow_batch && result.is_batch {
             continue;
         }
@@ -1977,7 +2092,7 @@ async fn run_queries(
             continue;
         }
         let provenance = if reviewed {
-            MatchProvenance::reviewed_source(ctx.phase)
+            ctx.source_provenance(&result)
         } else if is_seadex_match(&result.info_hash, ctx.seadex_hashes) {
             MatchProvenance::seadex(ctx.phase)
         } else {

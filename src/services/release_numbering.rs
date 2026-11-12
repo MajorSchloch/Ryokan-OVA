@@ -30,6 +30,8 @@ static SOURCE_SXXEXX: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 struct SourceHeading {
+    name_prefix: String,
+    raw_name_prefix: String,
     season: Option<i32>,
     payload_span: Option<media::EpisodeSpan>,
     batch_payload: Option<String>,
@@ -214,7 +216,11 @@ fn source_heading(title: &str, marked_batch: bool) -> Result<SourceHeading, Stri
                 format!("Source - {}", &masked[number.start()..payload.end()])
             }),
     };
+    let prefix = boundary.map_or(masked.as_str(), |start| &masked[..start]);
+    let name_prefix = SOURCE_SEASON.replace_all(prefix, " ").into_owned();
     Ok(SourceHeading {
+        name_prefix,
+        raw_name_prefix: title[..prefix.len()].to_string(),
         season,
         payload_span,
         batch_payload,
@@ -241,6 +247,55 @@ pub(crate) fn validated_source_file_span(
         return Err("Episode mapping: source filename has conflicting episode evidence".into());
     }
     Ok((span, heading.season))
+}
+
+/// Preserve every title word before the strict episode payload. Anitomy may
+/// shorten a foreign installment at a dash; that is insufficient for an
+/// automatic canonical identity. Human review keeps its existing contract.
+pub(crate) fn source_identity_name(title: &str, require_episode: bool) -> Result<String, String> {
+    let heading = source_heading(title, false)?;
+    if require_episode && heading.first_episode.is_none() {
+        return Err("Episode mapping: source file has no strict title/episode boundary".into());
+    }
+    // Only the initial square-bracket release group is out of band. Other
+    // pre-episode bracket text can name an installment; retain its words even
+    // though the episode parser masks them to locate structural numbers.
+    let mut qualifiers = Vec::new();
+    let mut content = String::new();
+    let mut depth = 0;
+    let mut release_group = false;
+    for (index, ch) in heading.raw_name_prefix.char_indices() {
+        match ch {
+            '[' | '(' | '{' => {
+                if depth == 0 {
+                    content.clear();
+                    release_group = require_episode
+                        && ch == '['
+                        && heading.raw_name_prefix[..index].trim().is_empty();
+                } else {
+                    content.push(' ');
+                }
+                depth += 1;
+            }
+            ']' | ')' | '}' => {
+                depth -= 1;
+                if depth == 0 && !release_group {
+                    qualifiers.push(auto_search::normalize_title(&content));
+                }
+            }
+            _ if depth > 0 => content.push(ch),
+            _ => {}
+        }
+    }
+    let name = auto_search::normalize_title(&format!(
+        "{} {}",
+        auto_search::normalize_title(&heading.name_prefix),
+        qualifiers.join(" ")
+    ));
+    if name.is_empty() {
+        return Err("Episode mapping: source file has no complete canonical heading".into());
+    }
+    Ok(name)
 }
 
 pub(crate) fn validated_source_folder_season(folder: &str) -> Result<Option<i32>, String> {
@@ -512,7 +567,11 @@ impl NumberingContext {
         if explicit_season.is_some_and(|season| season != self.expected_season) {
             return Err("Episode mapping: release names another source season".into());
         }
-        if self.cumulative_offset != 0 && explicit_season.is_none() {
+        if explicit_season.is_none()
+            && (self.cumulative_offset != 0
+                || (self.tv_series
+                    && crate::services::anime_relations::has_source_namespace(self.anilist_id)))
+        {
             return Err("Episode mapping: entry-relative and continuous numbering are both possible; identify the source scheme".into());
         }
         // The broad pack parser accepts spaced ranges. A single video's
@@ -597,6 +656,14 @@ impl NumberingContext {
         source_episodes: &[i32],
         source_season: Option<i32>,
     ) -> Result<ReleaseMapping, String> {
+        if source_season.is_none()
+            && self.tv_series
+            && crate::services::anime_relations::has_source_namespace(self.anilist_id)
+        {
+            return Err(
+                "Episode mapping: a curated continuous source needs an exact source proof".into(),
+            );
+        }
         let count = self
             .episode_count
             .filter(|n| (2..=MAX_PLAUSIBLE_EPISODES).contains(n))
@@ -699,6 +766,16 @@ pub(crate) async fn apply_reviewed_source(
             }
             return Ok(false);
         };
+        let automatic = mapping.bound_source().is_some_and(|proof| {
+            proof.origin() == Ok(crate::services::source_numbering::ProofOrigin::AutomaticUnique)
+        });
+        let mapping = if let Some(proof) = mapping.bound_source().filter(|_| automatic) {
+            let narrowed =
+                crate::services::source_numbering::loader::narrow_for_target(proof, target)?;
+            ReleaseMapping::from_bound_source(&narrowed)?
+        } else {
+            mapping
+        };
         if required_bound.as_ref().is_some_and(|old| *old != mapping)
             || matches!(target, auto_search::SearchTarget::Episode(number) if !mapping.contains_episode(*number))
         {
@@ -707,9 +784,14 @@ pub(crate) async fn apply_reviewed_source(
                     .into(),
             );
         }
-        candidate.is_batch |= mapping
+        let multiple = mapping
             .bound_source()
             .is_some_and(|proof| proof.selected_files.len() > 1);
+        candidate.is_batch = if automatic {
+            multiple
+        } else {
+            candidate.is_batch || multiple
+        };
         candidate.release_mapping = Some(mapping);
         return Ok(true);
     };
@@ -745,10 +827,31 @@ pub async fn bound_mapping_for_source(
     info_hash: &str,
     anilist_id: i64,
 ) -> Result<Option<ReleaseMapping>, String> {
-    crate::models::source_numbering::lookup_exact(db, info_hash, anilist_id)
-        .await?
-        .map(|saved| ReleaseMapping::from_bound_source(&saved.proof))
-        .transpose()
+    let all = crate::models::source_numbering::lookup_hash(db, info_hash).await?;
+    let projected = if !all.is_empty()
+        && !all.iter().any(|s| s.proof.target_anilist_id == anilist_id)
+        && all.iter().all(|s| {
+            s.proof.origin() == Ok(crate::services::source_numbering::ProofOrigin::AutomaticUnique)
+        }) {
+        let proof = crate::services::source_numbering::loader::additional_owner(
+            db,
+            &all[0].proof,
+            anilist_id,
+        )
+        .await?;
+        Some(crate::models::source_numbering::save_automatic(db, &proof).await?)
+    } else {
+        None
+    };
+    let saved = match projected {
+        Some(saved) => Some(saved),
+        None => crate::models::source_numbering::lookup_exact(db, info_hash, anilist_id).await?,
+    };
+    let Some(saved) = saved else {
+        return Ok(None);
+    };
+    crate::services::source_numbering::loader::refresh(db, &saved.proof).await?;
+    ReleaseMapping::from_bound_source(&saved.proof).map(Some)
 }
 
 /// The final automatic gate also covers SeaDex candidates. Curation confirms
@@ -804,9 +907,26 @@ pub(crate) async fn filter_automatic_candidates_with_pack_mappings(
     )
     .await;
     let mut accepted = Vec::new();
+    let automatic_sources = crate::services::source_numbering::loader::Resolver::default();
     for mut candidate in candidates {
         match apply_reviewed_source(db, detail.id, target, &mut candidate).await {
             Ok(true) => {
+                if candidate
+                    .release_mapping
+                    .as_ref()
+                    .and_then(|m| m.bound_source())
+                    .is_some_and(|p| {
+                        p.origin()
+                            == Ok(crate::services::source_numbering::ProofOrigin::AutomaticUnique)
+                    })
+                {
+                    let phase = candidate
+                        .match_provenance
+                        .as_ref()
+                        .map_or(auto_search::MatchPhase::Primary, |p| p.phase);
+                    candidate.match_provenance =
+                        Some(auto_search::MatchProvenance::automatic_source(phase));
+                }
                 accepted.push(candidate);
                 continue;
             }
@@ -815,6 +935,32 @@ pub(crate) async fn filter_automatic_candidates_with_pack_mappings(
                     db,
                     crate::models::log::LogCategory::Grab,
                     "Automatic grab held: reviewed source",
+                    &reason,
+                )
+                .await;
+                continue;
+            }
+            Ok(false) => {}
+        }
+        match automatic_sources
+            .apply(db, detail.id, target, &mut candidate)
+            .await
+        {
+            Ok(true) => {
+                let phase = candidate
+                    .match_provenance
+                    .as_ref()
+                    .map_or(auto_search::MatchPhase::Primary, |p| p.phase);
+                candidate.match_provenance =
+                    Some(auto_search::MatchProvenance::automatic_source(phase));
+                accepted.push(candidate);
+                continue;
+            }
+            Err(reason) => {
+                crate::services::logger::warn(
+                    db,
+                    crate::models::log::LogCategory::Grab,
+                    "Automatic grab held: source evidence",
                     &reason,
                 )
                 .await;
@@ -1174,6 +1320,28 @@ mod tests {
             assert_eq!(mapping.source_season, Some(season));
             assert_eq!(mapping.resolve_named_file(&name).unwrap().first, 3);
         }
+    }
+
+    #[test]
+    fn missing_source_cache_cannot_restore_ambiguous_root_relative_fallback() {
+        let mut ctx = context(0);
+        ctx.anilist_id = 889;
+        ctx.episode_count = Some(12);
+        for title in ["Black Lagoon - 03", "Black Lagoon Complete"] {
+            assert!(ctx.choose(title, title.contains("Complete")).is_err());
+        }
+        assert!(
+            ctx.choose_published_entry_pack(&(1..=12).collect::<Vec<_>>(), None)
+                .is_err()
+        );
+        assert_eq!(
+            ctx.choose("Black Lagoon S01E03", false).unwrap().episodes(),
+            [3]
+        );
+        assert!(
+            ctx.choose_published_entry_pack(&(1..=12).collect::<Vec<_>>(), Some(1))
+                .is_ok()
+        );
     }
 
     #[test]
