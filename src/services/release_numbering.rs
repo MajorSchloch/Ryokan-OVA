@@ -1024,7 +1024,29 @@ pub(crate) async fn filter_automatic_candidates_with_pack_mappings(
             }
         }
     }
-    accepted
+    let mut compatible = Vec::with_capacity(accepted.len());
+    for candidate in accepted {
+        match crate::models::grabbed_torrents::ensure_automatic_compatibility(
+            db,
+            &candidate.info_hash,
+            detail.id,
+            candidate.release_mapping.as_ref(),
+        )
+        .await
+        {
+            Ok(()) => compatible.push(candidate),
+            Err(reason) => {
+                crate::services::logger::warn(
+                    db,
+                    crate::models::log::LogCategory::Grab,
+                    "Automatic candidate held: existing source assignment",
+                    &reason,
+                )
+                .await;
+            }
+        }
+    }
+    compatible
 }
 
 #[cfg(test)]
