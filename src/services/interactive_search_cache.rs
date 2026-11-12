@@ -70,6 +70,11 @@ pub fn insert(cache: &InteractiveSearchCache, key: Key, results: Vec<SearchResul
     guard.insert(key, (Instant::now(), Arc::new(results)));
 }
 
+/// Language changes can change Nyaa categories, not only score order.
+pub fn clear(cache: &InteractiveSearchCache) {
+    cache.lock().unwrap().clear();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

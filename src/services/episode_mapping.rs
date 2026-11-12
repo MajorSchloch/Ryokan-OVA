@@ -14,7 +14,9 @@ use crate::services::media::MAX_FILE_SPAN;
 
 /// One verified, inclusive range in a single source numbering scheme.
 /// Source episode zero is valid. Library episodes always start at one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
+)]
 #[serde(deny_unknown_fields)]
 pub struct MappingRule {
     pub source_first: i32,

@@ -24,7 +24,9 @@ pub mod scheduled_tasks;
 pub mod series;
 pub mod series_custom_lists;
 pub mod series_genres;
+pub mod series_language_preferences;
 pub mod session;
+pub mod source_numbering;
 pub mod sync_exclusions;
 pub mod user;
 

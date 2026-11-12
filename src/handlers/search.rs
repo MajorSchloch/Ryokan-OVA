@@ -331,11 +331,27 @@ pub async fn grab_release(
         "Download client not configured".to_string(),
     ))?;
 
+    if let Some(magnet_hash) = crate::services::torrent_file::magnet_info_hash(&form.url)
+        && !form_hash.is_empty()
+        && form_hash != magnet_hash
+    {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "The magnet and supplied source hash do not match.".into(),
+        ));
+    }
     let info_hash = if !form_hash.is_empty() {
         form_hash
     } else {
         crate::services::nyaa::extract_hash(&form.url)
     };
+    if crate::models::source_numbering::has_bound_history(&state.db, &info_hash)
+        .await
+        .map_err(|reason| (axum::http::StatusCode::SERVICE_UNAVAILABLE, reason))?
+    {
+        return Err((axum::http::StatusCode::CONFLICT,
+            "This torrent has reviewed episode numbering. Open its release page and use the file picker.".into()));
+    }
     let (_outcome, canonical_id) = client
         .add_torrent_returning_id(&form.url, &info_hash)
         .await
@@ -766,6 +782,80 @@ pub async fn get_torrents(
 mod tests {
     use super::*;
     use crate::test_support::{build_test_app_state, in_memory_pool};
+
+    #[tokio::test]
+    async fn reviewed_source_standalone_grab_holds_current_and_historical_proofs_before_client_io()
+    {
+        let server = wiremock::MockServer::start().await;
+        for historical in [false, true] {
+            let db = in_memory_pool().await;
+            let proof = crate::services::source_numbering::tests::lagoon_proof();
+            crate::models::source_numbering::save_reviewed(&db, &proof)
+                .await
+                .unwrap();
+            if historical {
+                let id =
+                    crate::test_support::seed_series(&db, 1519, "Black Lagoon: The Second Barrage")
+                        .await;
+                let mapping =
+                    crate::services::release_numbering::ReleaseMapping::from_bound_source(&proof)
+                        .unwrap();
+                crate::models::grabbed_torrents::record_grab_with_release_mapping(
+                    &db,
+                    &proof.info_hash,
+                    "Reviewed source",
+                    id,
+                    &mapping.episodes(),
+                    true,
+                    Some(&mapping),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                sqlx::query("UPDATE grabbed_torrents SET state='removed' WHERE hash=?")
+                    .bind(&proof.info_hash)
+                    .execute(&db)
+                    .await
+                    .unwrap();
+                sqlx::query("DELETE FROM source_numbering_decisions")
+                    .execute(&db)
+                    .await
+                    .unwrap();
+            }
+            let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM grabbed_torrents")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+            let client = crate::services::download_client::qbittorrent::QbitClient::new(
+                &server.uri(),
+                "fixture",
+                "fixture",
+                "test",
+            );
+            let state = build_test_app_state(db.clone(), Some(std::sync::Arc::new(client)));
+            let error = grab_release(
+                State(state),
+                Json(GrabForm {
+                    url: format!("magnet:?xt=urn:btih:{}", proof.info_hash),
+                    title: Some("Black Lagoon".into()),
+                    info_hash: None,
+                    is_batch: Some(true),
+                    indexer_id: None,
+                    source_guid: String::new(),
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.0, axum::http::StatusCode::CONFLICT);
+            assert!(error.1.contains("file picker"));
+            assert!(server.received_requests().await.unwrap().is_empty());
+            let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM grabbed_torrents")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+            assert_eq!(after, before);
+        }
+    }
 
     #[tokio::test]
     async fn a_grab_with_an_info_hash_that_is_not_a_hash_is_refused() {

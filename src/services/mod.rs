@@ -13,6 +13,7 @@ pub mod indexer_catalog;
 pub mod indexers;
 pub mod jikan;
 pub mod kitsu;
+pub mod language_preferences;
 pub mod library_guard;
 pub mod library_move;
 pub mod mal;
@@ -76,8 +77,11 @@ pub mod source_dir;
 pub mod source_ffprobe;
 pub mod source_filename;
 pub mod source_groups;
+pub mod source_numbering;
+pub(crate) mod source_numbering_grab;
 pub mod source_temporal;
 
 pub mod user_score;
 
+pub mod release_availability;
 pub mod release_follows;

@@ -599,11 +599,35 @@ pub async fn grab_preview_status(
             .unwrap_or((0, true)),
         None => (0, true),
     };
+    let bound = if let Some(id) = row.series_id {
+        let owner = crate::models::series::get_by_id(&state.db, id)
+            .await
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        match owner {
+            Some(owner) => crate::models::source_numbering::lookup_exact(
+                &state.db,
+                &row.info_hash,
+                owner.anilist_id,
+            )
+            .await
+            .map_err(|reason| (StatusCode::CONFLICT, reason))?
+            .map(|saved| saved.proof),
+            None => None,
+        }
+    } else {
+        None
+    };
     // One regex pass plus an anitomy parse per file; a BD pack has
     // hundreds, so keep it off the async worker.
     let file_list = tokio::task::spawn_blocking(move || {
         for f in &mut file_list {
-            f.episodes = file_episodes(&f.name, cumulative_prior_episodes, tv_series);
+            f.episodes = match &bound {
+                Some(proof) => proof
+                    .resolve_file(&f.name)
+                    .map(|file| (file.first..=file.last).collect())
+                    .unwrap_or_default(),
+                None => file_episodes(&f.name, cumulative_prior_episodes, tv_series),
+            };
         }
         file_list
     })
@@ -799,6 +823,42 @@ pub async fn grab_confirm(
     }
     let unwanted: Vec<usize> = (0..total).filter(|i| !wanted_set.contains(i)).collect();
 
+    let bound_mapping = if let Some(series_id) = row.series_id {
+        let names: Vec<_> = files
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| wanted_set.contains(index))
+            .map(|(_, file)| file.name.clone())
+            .collect();
+        crate::services::source_numbering_grab::mapping_for_selection(
+            &state.db,
+            series_id,
+            &row.info_hash,
+            &names,
+        )
+        .await
+        .map_err(|reason| (StatusCode::CONFLICT, reason))?
+    } else {
+        None
+    };
+    if let Some(mapping) = &bound_mapping {
+        let names: Vec<_> = files.iter().map(|file| file.name.clone()).collect();
+        crate::services::source_numbering_grab::validate_preview_manifest(
+            client.as_ref(),
+            &row.info_hash,
+            mapping,
+            &names,
+        )
+        .await
+        .map_err(|reason| (StatusCode::CONFLICT, reason))?;
+    }
+
+    if bound_mapping.is_some() {
+        client
+            .pause(&row.info_hash)
+            .await
+            .map_err(|reason| (StatusCode::BAD_GATEWAY, reason))?;
+    }
     let mut file_priority_errors: Vec<String> = Vec::new();
     if !unwanted.is_empty()
         && let Err(e) = client
@@ -812,10 +872,29 @@ pub async fn grab_confirm(
     {
         file_priority_errors.push(format!("mark wanted: {}", e));
     }
+    if let Some(mapping) = &bound_mapping {
+        if !file_priority_errors.is_empty() {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                "The file selection could not be applied. The reviewed source stays paused.".into(),
+            ));
+        }
+        crate::services::source_numbering_grab::verify_client_selection(
+            client.as_ref(),
+            &row.info_hash,
+            mapping,
+        )
+        .await
+        .map_err(|reason| (StatusCode::CONFLICT, reason))?;
+    }
     // Resume starts downloading on Deluge / Transmission / rTorrent
     // (they were added paused). On qBit the torrent is already
     // running — resume is idempotent.
-    let resume_error = client.resume(&row.info_hash).await.err();
+    let mut resume_error = if bound_mapping.is_none() {
+        client.resume(&row.info_hash).await.err()
+    } else {
+        None
+    };
 
     // Library attribution. Writes the `grabbed_torrents` row
     // and kicks off sibling auto-expand on the user-selected files —
@@ -845,6 +924,31 @@ pub async fn grab_confirm(
         is_batch,
     )
     .await;
+
+    if let Some(mapping) = &bound_mapping {
+        if new_grab_id.is_none() {
+            let reason =
+                "The episode decision could not be saved. The reviewed source stays paused.";
+            let _ = pending_grabs::set_error(
+                &state.db,
+                &row.preview_id,
+                &format!(
+                    "{}{reason}",
+                    crate::services::source_numbering_grab::HOLD_PREFIX
+                ),
+            )
+            .await;
+            return Err((StatusCode::CONFLICT, reason.into()));
+        }
+        crate::services::source_numbering_grab::verify_client_selection(
+            client.as_ref(),
+            &row.info_hash,
+            mapping,
+        )
+        .await
+        .map_err(|reason| (StatusCode::CONFLICT, reason))?;
+        resume_error = client.resume(&row.info_hash).await.err();
+    }
 
     // Inline unblock (plan decision #12). When the user clicked
     // "Unblock and continue" on the blocklisted-release warning,
@@ -956,6 +1060,10 @@ pub async fn grab_cancel(
 
     Ok(Json(serde_json::json!({"ok": true})))
 }
+
+#[cfg(test)]
+#[path = "grab_bound_tests.rs"]
+mod bound_tests;
 
 #[cfg(test)]
 mod tests {

@@ -759,6 +759,18 @@ pub async fn series_detail(
         .await
         .ok()
         .flatten();
+    let language_preferences = if let Some(id) = db_id {
+        let defaults = cfg.clone().unwrap_or_default();
+        Some(
+            super::languages::load_view(&state.db, &defaults, id)
+                .await
+                .unwrap_or_else(|_| {
+                    super::languages::LanguagePreferencesView::unavailable(id, &defaults)
+                }),
+        )
+    } else {
+        None
+    };
     let template = SeriesTemplate {
         page: "library".to_string(),
         route_id: db_id.unwrap_or(provider_id),
@@ -797,6 +809,7 @@ pub async fn series_detail(
         all_monitored,
         allow_upgrades,
         allow_pt_upgrades,
+        language_preferences,
         custom_query_tokens,
         restrict_to_uploader,
         alternate_titles,

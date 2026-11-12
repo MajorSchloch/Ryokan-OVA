@@ -149,12 +149,35 @@ pub async fn commit_grab_and_expand(
                 )
             })
             .unwrap_or((0, true));
-    let ep_nums = episode_numbers_for_commit(
+    let mut ep_nums = episode_numbers_for_commit(
         release_title,
         &filenames,
         cumulative_prior_episodes,
         tv_series,
     );
+    let mapping = match crate::services::source_numbering_grab::mapping_for_selection(
+        &state.db,
+        series_id,
+        &row.info_hash,
+        &filenames,
+    )
+    .await
+    {
+        Ok(mapping) => mapping,
+        Err(reason) => {
+            logger::error(
+                &state.db,
+                LogCategory::Grab,
+                "Grab held: selected files differ from the source numbering review",
+                &reason,
+            )
+            .await;
+            return None;
+        }
+    };
+    if let Some(mapping) = &mapping {
+        ep_nums = mapping.episodes();
+    }
 
     let metadata: serde_json::Value =
         serde_json::from_str(&row.release_metadata_json).unwrap_or_default();
@@ -171,7 +194,7 @@ pub async fn commit_grab_and_expand(
         series_id,
         &ep_nums,
         is_batch,
-        None,
+        mapping.as_ref(),
         None,
         grabbed_torrents::source_replay::SourceRef {
             url: source_url,
@@ -283,7 +306,7 @@ pub async fn commit_grab_and_expand(
     // A failed fetch or panic inside the spawn drops the auto-expand
     // silently; the import-time call in `services::post_processing`
     // is the safety net that guarantees siblings land eventually.
-    if !replayed && !filenames.is_empty() {
+    if !replayed && mapping.is_none() && !filenames.is_empty() {
         let db_task = state.db.clone();
         let title_task = release_title.to_string();
         let ep_nums_task = ep_nums.clone();

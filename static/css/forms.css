@@ -1,5 +1,16 @@
 /* forms.css — auto-split from style.css. */
 
+/* Release language choices work without JavaScript. Unsupported :has()
+   browsers show every choice, and the server still honors the mode. */
+#release-languages summary { cursor: pointer; }
+#release-languages summary .form-hint { display: block; margin-top: 4px; }
+#release-languages .language-choice-row { padding: 14px; min-width: 0; border: 1px solid var(--border); border-radius: var(--radius); }
+#release-languages .language-choice-options { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+#release-languages .language-choice-row:not(:has(select[data-language-mode] option[value="require"]:checked)) .language-choice-options { display: none; }
+#release-languages .language-options-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+#release-languages .language-options-grid label { display: flex; align-items: center; gap: 8px; text-transform: none; letter-spacing: normal; }
+#release-languages .language-options-grid input[type="checkbox"] { flex: 0 0 auto; width: auto; margin: 0; }
+
 @media (max-width: 640px) {
     .form-group input,
     .form-group select,

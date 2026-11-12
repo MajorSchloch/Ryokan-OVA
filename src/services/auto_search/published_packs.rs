@@ -37,7 +37,13 @@ pub(super) fn identity_allows(
     aliases: &[String],
     siblings: &SiblingRejectPrecompute,
 ) -> bool {
-    if !episodic(detail) || candidate.replay_episodes.is_some() {
+    if !episodic(detail)
+        || candidate.replay_episodes.is_some()
+        || candidate
+            .release_mapping
+            .as_ref()
+            .is_some_and(|mapping| mapping.bound_source().is_some())
+    {
         return true;
     }
     if !super::canonical_owner_supports_release(

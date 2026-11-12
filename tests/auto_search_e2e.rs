@@ -964,6 +964,7 @@ struct AutoSearchRecordingClient {
     add_gate: StdMutex<Option<std::sync::Arc<AddTorrentGate>>>,
     completed_for_import: StdMutex<Vec<(DownloadItem, Vec<DownloadFile>)>>,
     import_file_gate: StdMutex<Option<std::sync::Arc<ImportFileGate>>>,
+    supports_selection: std::sync::atomic::AtomicBool,
 }
 
 struct AddTorrentGate {
@@ -983,6 +984,7 @@ impl AutoSearchRecordingClient {
             add_gate: StdMutex::new(None),
             completed_for_import: StdMutex::new(Vec::new()),
             import_file_gate: StdMutex::new(None),
+            supports_selection: std::sync::atomic::AtomicBool::new(false),
         }
     }
     fn add_calls(&self) -> Vec<(String, String)> {
@@ -1011,14 +1013,37 @@ impl DownloadClient for AutoSearchRecordingClient {
         &self,
         url: &str,
         hash: &str,
-        _pick: &mut (dyn for<'a> FnMut(&'a [String]) -> Option<Vec<usize>> + Send),
+        pick: &mut (dyn for<'a> FnMut(&'a [String]) -> Option<Vec<usize>> + Send),
     ) -> Result<SelectiveOutcome, String> {
         // Both dispatch routes are client additions. Record once and
         // preserve the same optional add gate for race tests.
         self.add_torrent(url, hash).await?;
+        if self
+            .supports_selection
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            let mut downloads = self.completed_for_import.lock().unwrap();
+            let (_, files) = downloads
+                .iter_mut()
+                .find(|(item, _)| item.hash == hash)
+                .ok_or("fixture metadata missing")?;
+            let names: Vec<_> = files.iter().map(|file| file.name.clone()).collect();
+            let selected = pick(&names).ok_or("fixture expected a strict selection")?;
+            for (index, file) in files.iter_mut().enumerate() {
+                file.wanted = selected.contains(&index);
+            }
+            return Ok(SelectiveOutcome::Filtered(selected));
+        }
         Ok(SelectiveOutcome::FullDownload)
     }
     async fn list_scoped(&self) -> Result<Vec<DownloadItem>, String> {
+        if self
+            .supports_selection
+            .load(std::sync::atomic::Ordering::SeqCst)
+            && self.add_calls.lock().unwrap().is_empty()
+        {
+            return Ok(Vec::new());
+        }
         Ok(self
             .completed_for_import
             .lock()
@@ -1053,10 +1078,26 @@ impl DownloadClient for AutoSearchRecordingClient {
     }
     async fn set_file_wanted(
         &self,
-        _hash: &str,
-        _files: &[usize],
-        _wanted: bool,
+        hash: &str,
+        indices: &[usize],
+        wanted: bool,
     ) -> Result<(), String> {
+        if self
+            .supports_selection
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            for (_, files) in self
+                .completed_for_import
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .filter(|(item, _)| item.hash == hash)
+            {
+                for &index in indices {
+                    files[index].wanted = wanted;
+                }
+            }
+        }
         Ok(())
     }
     fn sonarr_impl_name(&self) -> &'static str {
@@ -2233,3 +2274,6 @@ async fn an_untracked_series_page_searches_by_its_anilist_id() {
 
     unset_nyaa_base();
 }
+
+#[path = "auto_search_e2e/source_bound_numbering.rs"]
+mod source_bound_numbering;

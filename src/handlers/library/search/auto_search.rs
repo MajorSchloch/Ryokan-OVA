@@ -333,12 +333,18 @@ async fn run_auto_search_targets_with_upgrades(
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .unwrap_or_default();
-    let upgrade_policy = crate::services::source::UpgradePolicy::from_config(&cfg);
-    let requirements = crate::services::media_requirements::Policy::from_config(&cfg);
-
     let (tracked, _, detail) = resolve_series_context_by(&state.db, request_id, by_anilist)
         .await
         .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+    let cfg = if let Some(release) = &tracked {
+        crate::services::language_preferences::effective_config(&state.db, &cfg, release.id)
+            .await
+            .map_err(|error| (axum::http::StatusCode::SERVICE_UNAVAILABLE, error))?
+    } else {
+        cfg
+    };
+    let upgrade_policy = crate::services::source::UpgradePolicy::from_config(&cfg);
+    let requirements = crate::services::media_requirements::Policy::from_config(&cfg);
     // Every automatic entry point, including the per-episode button, reads
     // the same actual files. An empty caller context must not bypass targets.
     if requirements.enabled
@@ -598,6 +604,13 @@ async fn run_auto_search_targets_with_upgrades(
         .await;
         match best_pick {
             Some(result) => {
+                let availability =
+                    crate::services::release_availability::Policy::load(&cfg, &state.indexers)
+                        .await;
+                if let Err(reason) = availability.check_result(&result) {
+                    skipped.push(format!("{label}: {reason}"));
+                    continue;
+                }
                 // Classify up front so both upgrade-verification and log labels
                 // read the same result.
                 let incoming_classification = crate::services::source::classify_release(
@@ -751,8 +764,37 @@ async fn run_auto_search_targets_with_upgrades(
                 // capture, SAB-routed grabs land with `hash=""` and the
                 // post-processing reconcile loop marks them removed after
                 // 30s when `list_scoped` can't match them.
+                if series_id.is_none()
+                    && result
+                        .release_mapping
+                        .as_ref()
+                        .is_some_and(|mapping| mapping.bound_source().is_some())
+                {
+                    skipped.push(format!(
+                        "{label}: add this release before using its reviewed source"
+                    ));
+                    continue;
+                }
+                let mut bound_prepared = None;
                 let selective_outcome: Result<(Option<Vec<usize>>, String), String> =
-                    if wants_selective && qbit.protocol() == "torrent" {
+                    if let Some(mapping) = result
+                        .release_mapping
+                        .as_ref()
+                        .filter(|mapping| mapping.bound_source().is_some())
+                    {
+                        crate::services::source_numbering_grab::add_bound(
+                            &*qbit,
+                            &url,
+                            &result.info_hash,
+                            mapping,
+                        )
+                        .await
+                        .map(|prepared| {
+                            let outcome = (prepared.kept.clone(), prepared.info_hash.clone());
+                            bound_prepared = Some(prepared);
+                            outcome
+                        })
+                    } else if wants_selective && qbit.protocol() == "torrent" {
                         let detail_clone = detail.clone();
                         let info_hash_clone = result.info_hash.clone();
                         let mut pick = move |files: &[String]| {
@@ -884,6 +926,18 @@ async fn run_auto_search_targets_with_upgrades(
                                     continue;
                                 }
                             };
+                            if let Some(prepared) = &bound_prepared {
+                                if prepared.newly_added && saved.is_none() {
+                                    skipped.push(format!("{label}: reviewed source stayed paused because its ownership could not be saved"));
+                                    continue;
+                                }
+                                if let Err(reason) = prepared.resume_after_record(&*qbit).await {
+                                    skipped.push(format!(
+                                        "{label}: reviewed source stayed paused: {reason}"
+                                    ));
+                                    continue;
+                                }
+                            }
                             let grab_id = saved.as_ref().map(|s| s.id);
                             let replayed = saved.as_ref().is_some_and(|s| s.replayed);
                             let ep_nums = saved.map(|s| s.episodes).unwrap_or_default();
@@ -983,7 +1037,12 @@ async fn run_auto_search_targets_with_upgrades(
                             // (selective filter timed out → full
                             // download) still auto-expands because the
                             // whole pack is actually downloading.
-                            let selective_narrowed = wants_selective && kept.is_some();
+                            let selective_narrowed = kept.is_some()
+                                && (wants_selective
+                                    || result
+                                        .release_mapping
+                                        .as_ref()
+                                        .is_some_and(|mapping| mapping.bound_source().is_some()));
                             if result.is_batch
                                 && !replayed
                                 && !selective_narrowed
@@ -1193,6 +1252,13 @@ pub async fn auto_search_series(
         }
     };
     let tracked = maybe_hydrate_cumulative_offset(&state.db, tracked, &detail).await;
+    let cfg = if let Some(release) = &tracked {
+        crate::services::language_preferences::effective_config(&state.db, &cfg, release.id)
+            .await
+            .map_err(|error| (axum::http::StatusCode::SERVICE_UNAVAILABLE, error))?
+    } else {
+        cfg
+    };
     let folder_name = tracked
         .as_ref()
         .map(|s| s.folder_name.clone())

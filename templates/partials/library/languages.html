@@ -1,0 +1,60 @@
+<div id="release-languages">
+    <details class="cf-section"{% if languages.message.is_some() || languages.error.is_some() %} open{% endif %}>
+        <summary>Languages <span class="form-hint">{{ languages.summary }}</span></summary>
+        {% if let Some(message) = languages.message %}<p class="alert alert-success" role="status">{{ message }}</p>{% endif %}
+        {% if let Some(error) = languages.error %}<p class="alert alert-error" role="alert">{{ error }}</p>{% endif %}
+        <p class="form-hint">Choose the audio and subtitles you want for this release. These choices do not enable upgrades or start a download.</p>
+        <form method="post" action="/api/library/languages" hx-post="/api/library/languages" hx-target="#release-languages" hx-swap="outerHTML" hx-disable="find button[type='submit']">
+            <input type="hidden" name="series_id" value="{{ languages.series_id }}">
+            <fieldset class="form-group language-choice-row">
+                <legend>Audio / dub</legend>
+                <label for="release-audio-mode">Audio choice</label>
+                <select id="release-audio-mode" name="audio_mode" data-language-mode>
+                    <option value="inherit"{% if languages.audio.mode == "inherit" %} selected{% endif %}>Use library default: {{ languages.audio.default_summary }}</option>
+                    <option value="any"{% if languages.audio.mode == "any" %} selected{% endif %}>Any audio language</option>
+                    <option value="require"{% if languages.audio.mode == "require" %} selected{% endif %}>Choose audio languages</option>
+                </select>
+                <div class="language-choice-options">
+                    <div class="language-options-grid">
+                        {% for option in languages.audio.options %}
+                        <label><input type="checkbox" name="audio_lang_{{ option.code }}"{% if option.selected %} checked{% endif %}> {{ option.name }}</label>
+                        {% endfor %}
+                    </div>
+                    <label for="release-audio-other">Other audio languages (optional)</label>
+                    <input id="release-audio-other" name="audio_other" type="text" value="{{ languages.audio.other }}" placeholder="Language names or codes, separated by commas">
+                    <label for="release-audio-match">For multiple audio languages</label>
+                    <select id="release-audio-match" name="audio_match">
+                        <option value="all"{% if languages.audio.match_mode != "any" %} selected{% endif %}>Require all selected languages</option>
+                        <option value="any"{% if languages.audio.match_mode == "any" %} selected{% endif %}>Accept any one selected language</option>
+                    </select>
+                    <p class="form-hint">The file must contain a dialogue audio track in your selected language. Unknown tags and commentary do not count.</p>
+                </div>
+            </fieldset>
+            <fieldset class="form-group language-choice-row">
+                <legend>Subtitles</legend>
+                <label for="release-subtitle-mode">Subtitle choice</label>
+                <select id="release-subtitle-mode" name="subtitle_mode" data-language-mode>
+                    <option value="inherit"{% if languages.subtitles.mode == "inherit" %} selected{% endif %}>Use library default: {{ languages.subtitles.default_summary }}</option>
+                    <option value="any"{% if languages.subtitles.mode == "any" %} selected{% endif %}>Subtitles not required</option>
+                    <option value="require"{% if languages.subtitles.mode == "require" %} selected{% endif %}>Choose subtitle languages</option>
+                </select>
+                <div class="language-choice-options">
+                    <div class="language-options-grid">
+                        {% for option in languages.subtitles.options %}
+                        <label><input type="checkbox" name="subtitle_lang_{{ option.code }}"{% if option.selected %} checked{% endif %}> {{ option.name }}</label>
+                        {% endfor %}
+                    </div>
+                    <label for="release-subtitle-other">Other subtitle languages (optional)</label>
+                    <input id="release-subtitle-other" name="subtitle_other" type="text" value="{{ languages.subtitles.other }}" placeholder="Language names or codes, separated by commas">
+                    <label for="release-subtitle-match">For multiple subtitle languages</label>
+                    <select id="release-subtitle-match" name="subtitle_match">
+                        <option value="all"{% if languages.subtitles.match_mode != "any" %} selected{% endif %}>Require all selected languages</option>
+                        <option value="any"{% if languages.subtitles.match_mode == "any" %} selected{% endif %}>Accept any one selected language</option>
+                    </select>
+                    <p class="form-hint">Selectable full dialogue subtitles count. Forced and signs-only tracks do not count. Library minimum and target rules still apply.</p>
+                </div>
+            </fieldset>
+            <button class="btn btn-primary" type="submit"{% if !languages.available %} disabled{% endif %}>Save languages</button>
+        </form>
+    </details>
+</div>

@@ -16,6 +16,66 @@ use crate::services::{auto_expand::AutoExpandGrabContext, auto_search, logger};
 use super::super::reconcile::resolve_series_context;
 use super::auto_search::{auto_expand_library_from_pack, batch_episode_numbers};
 
+/// A magnet and its separately posted hash must describe the same source.
+/// An omitted hash on a magnet cannot bypass a saved exact-source decision.
+fn source_info_hash(raw: &str, url: &str) -> Result<String, (axum::http::StatusCode, String)> {
+    let supplied = match raw.trim() {
+        "" => None,
+        raw => Some(
+            crate::services::download_client::normalize_info_hash(raw).ok_or((
+                axum::http::StatusCode::BAD_REQUEST,
+                "info_hash must be a 40- or 64-character hex info-hash".to_string(),
+            ))?,
+        ),
+    };
+    let from_magnet = url
+        .trim()
+        .get(..7)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("magnet:"))
+        .then(|| {
+            crate::services::download_client::normalize_info_hash(
+                &crate::services::nyaa::extract_hash(url),
+            )
+        })
+        .flatten();
+    if supplied
+        .as_ref()
+        .zip(from_magnet.as_ref())
+        .is_some_and(|(left, right)| left != right)
+    {
+        return Err((
+            axum::http::StatusCode::CONFLICT,
+            "The magnet and source hash differ. Open a fresh search result.".to_string(),
+        ));
+    }
+    Ok(from_magnet.or(supplied).unwrap_or_default())
+}
+
+async fn saved_source_mapping(
+    db: &sqlx::SqlitePool,
+    tracked: Option<&crate::models::series::Series>,
+    hash: &str,
+    episode: Option<i32>,
+) -> Result<
+    Option<crate::services::release_numbering::ReleaseMapping>,
+    (axum::http::StatusCode, String),
+> {
+    let Some(tracked) = tracked else {
+        return Ok(None);
+    };
+    let mapping =
+        crate::services::release_numbering::bound_mapping_for_source(db, hash, tracked.anilist_id)
+            .await
+            .map_err(|reason| (axum::http::StatusCode::CONFLICT, reason))?;
+    if let (Some(mapping), Some(episode)) = (&mapping, episode)
+        && mapping.episodes() != [episode]
+    {
+        return Err((axum::http::StatusCode::CONFLICT,
+            "This reviewed source covers a different episode selection. Use the file picker to choose its verified files.".to_string()));
+    }
+    Ok(mapping)
+}
+
 /// Grab a specific batch release chosen from interactive batch search.
 ///
 /// Mirrors `grab_interactive_result` but without an episode number —
@@ -54,13 +114,7 @@ pub async fn grab_batch_result(
     let title = body["title"].as_str().unwrap_or("").to_string();
     let group = body["group"].as_str().unwrap_or("").to_string();
     let resolution = body["resolution"].as_str().unwrap_or("").to_string();
-    let info_hash = match body["info_hash"].as_str().unwrap_or("").trim() {
-        "" => String::new(),
-        raw => crate::services::download_client::normalize_info_hash(raw).ok_or((
-            axum::http::StatusCode::BAD_REQUEST,
-            "info_hash must be a 40- or 64-character hex info-hash".to_string(),
-        ))?,
-    };
+    let info_hash = source_info_hash(body["info_hash"].as_str().unwrap_or(""), &url)?;
     let size_bytes = body["size_bytes"].as_i64().unwrap_or(0);
     // Multi-client routing — the search-result row carries `indexer_id`
     // (None for Nyaa-direct, Some for torznab/newznab fan-out). The
@@ -75,6 +129,11 @@ pub async fn grab_batch_result(
             "No URL provided".to_string(),
         ));
     }
+
+    // Only server-owned saved evidence can authorize source numbering.
+    // Client-posted release_mapping JSON is intentionally not consulted.
+    let bound_mapping =
+        saved_source_mapping(&state.db, tracked_row.as_ref(), &info_hash, None).await?;
 
     let resolved_client = if indexer_id.is_some() {
         state.client_for_indexer_with_id(indexer_id).await
@@ -109,54 +168,66 @@ pub async fn grab_batch_result(
     // SAB lets you key queue/history ops by — without this capture, SAB grabs
     // got `hash=""` persisted, the episode-progress poller never matched them
     // in `list_scoped`, and after 30s the reconcile loop marked them removed.
-    let (selective_outcome, effective_hash): (Option<Vec<usize>>, String) = if wants_selective {
-        let detail_clone = detail.clone();
-        let mut pick =
-            move |files: &[String]| auto_search::pick_wanted_file_indices(files, &detail_clone);
-        match qbit
-            .add_torrent_with_file_filter(&url, &info_hash, &mut pick)
-            .await
-        {
-            // Selective branch echoes the precomputed info_hash since
-            // `add_torrent_with_file_filter` doesn't return an id. SAB's
-            // file-filter impl no-ops the filter and returns FullDownload,
-            // so SAB grabs that route through here keep the v1 picker-path
-            // limitation (documented in services/download_client/sabnzbd/mod.rs).
-            // Practically rare — SAB grabs require info_hash to be empty
-            // (NZBs have no infohash), and `wants_selective` requires
-            // info_hash to be non-empty, so this branch shouldn't fire for
-            // SAB in the first place.
-            Ok(crate::services::download_client::SelectiveOutcome::Filtered(kept)) => {
-                (Some(kept), info_hash.clone())
-            }
-            Ok(crate::services::download_client::SelectiveOutcome::FullDownload) => {
-                (None, info_hash.clone())
-            }
-            Err(e) => {
-                logger::warn(
-                    &state.db,
-                    LogCategory::Grab,
-                    &format!(
-                        "Selective batch download failed, falling back to full grab: {}",
-                        title
-                    ),
-                    &e,
-                )
-                .await;
-                let (_, hash) = qbit
-                    .add_torrent_returning_id(&url, &info_hash)
-                    .await
-                    .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
-                (None, hash)
-            }
-        }
+    let prepared_bound = if let Some(mapping) = &bound_mapping {
+        Some(
+            crate::services::source_numbering_grab::add_bound(&*qbit, &url, &info_hash, mapping)
+                .await
+                .map_err(|reason| (axum::http::StatusCode::CONFLICT, reason))?,
+        )
     } else {
-        let (_, hash) = qbit
-            .add_torrent_returning_id(&url, &info_hash)
-            .await
-            .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
-        (None, hash)
+        None
     };
+    let (selective_outcome, effective_hash): (Option<Vec<usize>>, String) =
+        if let Some(prepared) = &prepared_bound {
+            (prepared.kept.clone(), prepared.info_hash.clone())
+        } else if wants_selective {
+            let detail_clone = detail.clone();
+            let mut pick =
+                move |files: &[String]| auto_search::pick_wanted_file_indices(files, &detail_clone);
+            match qbit
+                .add_torrent_with_file_filter(&url, &info_hash, &mut pick)
+                .await
+            {
+                // Selective branch echoes the precomputed info_hash since
+                // `add_torrent_with_file_filter` doesn't return an id. SAB's
+                // file-filter impl no-ops the filter and returns FullDownload,
+                // so SAB grabs that route through here keep the v1 picker-path
+                // limitation (documented in services/download_client/sabnzbd/mod.rs).
+                // Practically rare — SAB grabs require info_hash to be empty
+                // (NZBs have no infohash), and `wants_selective` requires
+                // info_hash to be non-empty, so this branch shouldn't fire for
+                // SAB in the first place.
+                Ok(crate::services::download_client::SelectiveOutcome::Filtered(kept)) => {
+                    (Some(kept), info_hash.clone())
+                }
+                Ok(crate::services::download_client::SelectiveOutcome::FullDownload) => {
+                    (None, info_hash.clone())
+                }
+                Err(e) => {
+                    logger::warn(
+                        &state.db,
+                        LogCategory::Grab,
+                        &format!(
+                            "Selective batch download failed, falling back to full grab: {}",
+                            title
+                        ),
+                        &e,
+                    )
+                    .await;
+                    let (_, hash) = qbit
+                        .add_torrent_returning_id(&url, &info_hash)
+                        .await
+                        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+                    (None, hash)
+                }
+            }
+        } else {
+            let (_, hash) = qbit
+                .add_torrent_returning_id(&url, &info_hash)
+                .await
+                .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+            (None, hash)
+        };
 
     // Classify so the log line carries the actual quality tier. Pass the
     // chosen release as a batch in NyaaContext (Layer 4 uses this for the
@@ -203,7 +274,10 @@ pub async fn grab_batch_result(
         // without this, batch grabs leave every episode showing
         // UNKNOWN in the UI, and with post-processing disabled the
         // rows never get created at all.
-        let ep_nums = batch_episode_numbers(&title, &detail);
+        let ep_nums = bound_mapping.as_ref().map_or_else(
+            || batch_episode_numbers(&title, &detail),
+            |mapping| mapping.episodes(),
+        );
         let saved = crate::models::grabbed_torrents::source_replay::record(
             &state.db,
             &effective_hash,
@@ -211,7 +285,7 @@ pub async fn grab_batch_result(
             sid,
             &ep_nums,
             true,
-            None,
+            bound_mapping.as_ref(),
             None,
             crate::models::grabbed_torrents::source_replay::SourceRef {
                 url: &url,
@@ -228,6 +302,10 @@ pub async fn grab_batch_result(
                 format!("Download added but its episode decision could not be saved: {e}"),
             )
         })?;
+        if prepared_bound.is_some() && saved.is_none() {
+            return Err((axum::http::StatusCode::CONFLICT,
+                "The reviewed download could not be recorded. Open the file picker to review it before continuing.".to_string()));
+        }
         let grab_id = saved.as_ref().map(|s| s.id);
         let replayed = saved.as_ref().is_some_and(|s| s.replayed);
         let ep_nums = saved.map(|s| s.episodes).unwrap_or_default();
@@ -278,6 +356,7 @@ pub async fn grab_batch_result(
         // actually downloading.
         let selective_narrowed = wants_selective && selective_outcome.is_some();
         if !replayed
+            && bound_mapping.is_none()
             && !selective_narrowed
             && let Some(grab_id) = grab_id
         {
@@ -316,6 +395,12 @@ pub async fn grab_batch_result(
         }
     }
 
+    if let Some(prepared) = &prepared_bound {
+        prepared
+            .resume_after_record(qbit.as_ref())
+            .await
+            .map_err(|reason| (axum::http::StatusCode::BAD_GATEWAY, reason))?;
+    }
     Ok(Json(serde_json::json!({
         "ok": true,
         "title": title,
@@ -356,13 +441,7 @@ pub async fn grab_interactive_result(
     let title = body["title"].as_str().unwrap_or("").to_string();
     let group = body["group"].as_str().unwrap_or("").to_string();
     let resolution = body["resolution"].as_str().unwrap_or("").to_string();
-    let info_hash = match body["info_hash"].as_str().unwrap_or("").trim() {
-        "" => String::new(),
-        raw => crate::services::download_client::normalize_info_hash(raw).ok_or((
-            axum::http::StatusCode::BAD_REQUEST,
-            "info_hash must be a 40- or 64-character hex info-hash".to_string(),
-        ))?,
-    };
+    let info_hash = source_info_hash(body["info_hash"].as_str().unwrap_or(""), &url)?;
     let size_bytes = body["size_bytes"].as_i64().unwrap_or(0);
     // Multi-client routing — the search-result row carries `indexer_id`
     // (None for Nyaa-direct, Some for torznab/newznab fan-out). The
@@ -383,6 +462,14 @@ pub async fn grab_interactive_result(
             "No URL provided".to_string(),
         ));
     }
+
+    let bound_mapping = saved_source_mapping(
+        &state.db,
+        tracked_row.as_ref(),
+        &info_hash,
+        Some(episode_number),
+    )
+    .await?;
 
     let resolved_client = if indexer_id.is_some() {
         state.client_for_indexer_with_id(indexer_id).await
@@ -414,45 +501,57 @@ pub async fn grab_interactive_result(
     // See `grab_batch_result` above for why `add_torrent_returning_id`
     // matters. Same SAB-nzo_id capture rationale applies to the
     // single-episode interactive grab path.
-    let (selective_outcome, effective_hash): (Option<Vec<usize>>, String) = if wants_selective {
-        let detail_clone = detail.clone();
-        let mut pick =
-            move |files: &[String]| auto_search::pick_wanted_file_indices(files, &detail_clone);
-        match qbit
-            .add_torrent_with_file_filter(&url, &info_hash, &mut pick)
-            .await
-        {
-            Ok(crate::services::download_client::SelectiveOutcome::Filtered(kept)) => {
-                (Some(kept), info_hash.clone())
-            }
-            Ok(crate::services::download_client::SelectiveOutcome::FullDownload) => {
-                (None, info_hash.clone())
-            }
-            Err(e) => {
-                logger::warn(
-                    &state.db,
-                    LogCategory::Grab,
-                    &format!(
-                        "Selective download failed, falling back to full grab: {}",
-                        title
-                    ),
-                    &e,
-                )
-                .await;
-                let (_, hash) = qbit
-                    .add_torrent_returning_id(&url, &info_hash)
-                    .await
-                    .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
-                (None, hash)
-            }
-        }
+    let prepared_bound = if let Some(mapping) = &bound_mapping {
+        Some(
+            crate::services::source_numbering_grab::add_bound(&*qbit, &url, &info_hash, mapping)
+                .await
+                .map_err(|reason| (axum::http::StatusCode::CONFLICT, reason))?,
+        )
     } else {
-        let (_, hash) = qbit
-            .add_torrent_returning_id(&url, &info_hash)
-            .await
-            .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
-        (None, hash)
+        None
     };
+    let (selective_outcome, effective_hash): (Option<Vec<usize>>, String) =
+        if let Some(prepared) = &prepared_bound {
+            (prepared.kept.clone(), prepared.info_hash.clone())
+        } else if wants_selective {
+            let detail_clone = detail.clone();
+            let mut pick =
+                move |files: &[String]| auto_search::pick_wanted_file_indices(files, &detail_clone);
+            match qbit
+                .add_torrent_with_file_filter(&url, &info_hash, &mut pick)
+                .await
+            {
+                Ok(crate::services::download_client::SelectiveOutcome::Filtered(kept)) => {
+                    (Some(kept), info_hash.clone())
+                }
+                Ok(crate::services::download_client::SelectiveOutcome::FullDownload) => {
+                    (None, info_hash.clone())
+                }
+                Err(e) => {
+                    logger::warn(
+                        &state.db,
+                        LogCategory::Grab,
+                        &format!(
+                            "Selective download failed, falling back to full grab: {}",
+                            title
+                        ),
+                        &e,
+                    )
+                    .await;
+                    let (_, hash) = qbit
+                        .add_torrent_returning_id(&url, &info_hash)
+                        .await
+                        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+                    (None, hash)
+                }
+            }
+        } else {
+            let (_, hash) = qbit
+                .add_torrent_returning_id(&url, &info_hash)
+                .await
+                .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+            (None, hash)
+        };
 
     // Interactive grab: the frontend doesn't currently round-trip the Nyaa
     // view URL, so Layer 2 is skipped here. These grabs are user-initiated
@@ -501,7 +600,10 @@ pub async fn grab_interactive_result(
         // so the grab row and the grabbed tags cover the run and every
         // episode shows as downloading. The import writes the final rows
         // from the file name either way.
-        let held = held_episodes(&title, episode_number);
+        let held = bound_mapping.as_ref().map_or_else(
+            || held_episodes(&title, episode_number),
+            |mapping| mapping.episodes(),
+        );
         let saved = crate::models::grabbed_torrents::source_replay::record(
             &state.db,
             &effective_hash,
@@ -509,7 +611,7 @@ pub async fn grab_interactive_result(
             sid,
             &held,
             false,
-            None,
+            bound_mapping.as_ref(),
             Some(episode_number),
             crate::models::grabbed_torrents::source_replay::SourceRef {
                 url: &url,
@@ -526,6 +628,10 @@ pub async fn grab_interactive_result(
                 format!("Download added but its episode decision could not be saved: {e}"),
             )
         })?;
+        if prepared_bound.is_some() && saved.is_none() {
+            return Err((axum::http::StatusCode::CONFLICT,
+                "The reviewed download could not be recorded. Open the file picker to review it before continuing.".to_string()));
+        }
         let grab_id = saved.as_ref().map(|s| s.id);
         let replayed = saved.as_ref().is_some_and(|s| s.replayed);
         let held = saved.map(|s| s.episodes).unwrap_or_default();
@@ -571,6 +677,12 @@ pub async fn grab_interactive_result(
         }
     }
 
+    if let Some(prepared) = &prepared_bound {
+        prepared
+            .resume_after_record(qbit.as_ref())
+            .await
+            .map_err(|reason| (axum::http::StatusCode::BAD_GATEWAY, reason))?;
+    }
     Ok(Json(serde_json::json!({
         "ok": true,
         "selective_files": selective_outcome,
@@ -593,6 +705,269 @@ pub(crate) fn held_episodes(title: &str, episode_number: i32) -> Vec<i32> {
             span.episodes().collect()
         }
         _ => vec![episode_number],
+    }
+}
+
+#[cfg(test)]
+mod bound_source_tests {
+    use super::*;
+    use crate::models::{metadata_cache, series, source_numbering};
+    use crate::services::download_client::{
+        AddOutcome, DownloadClient, DownloadFile, DownloadItem, SelectiveOutcome,
+    };
+    use crate::services::source_numbering::tests::{lagoon_files, lagoon_proof};
+    use crate::test_support::{build_test_app_state, in_memory_pool, seed_series};
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn direct_bound_grab_uses_the_actual_magnet_hash_and_refuses_a_conflicting_posted_hash() {
+        let hash = lagoon_proof().info_hash;
+        let url = format!("magnet:?xt=urn:btih:{}", hash.to_ascii_uppercase());
+        assert_eq!(source_info_hash("", &url).unwrap(), hash);
+        assert_eq!(source_info_hash(&hash, &url).unwrap(), hash);
+        assert_eq!(
+            source_info_hash(&"f".repeat(40), &url).unwrap_err().0,
+            axum::http::StatusCode::CONFLICT
+        );
+        assert_eq!(
+            source_info_hash("", &format!("https://example.test/?btih:{hash}")).unwrap(),
+            ""
+        );
+    }
+
+    #[derive(Default)]
+    struct BoundClient {
+        selections: Mutex<Vec<Vec<usize>>>,
+        resumes: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl DownloadClient for BoundClient {
+        async fn test(&self) -> Result<String, String> {
+            Ok("ok".into())
+        }
+        async fn add_torrent(&self, _: &str, _: &str) -> Result<AddOutcome, String> {
+            panic!("reviewed source must not use a legacy whole grab")
+        }
+        async fn add_torrent_with_file_filter(
+            &self,
+            _: &str,
+            _: &str,
+            _: &mut (dyn for<'a> FnMut(&'a [String]) -> Option<Vec<usize>> + Send),
+        ) -> Result<SelectiveOutcome, String> {
+            panic!("a reviewed source cannot use the legacy optional filter")
+        }
+        async fn add_torrent_paused(&self, _: &str, _: &str) -> Result<AddOutcome, String> {
+            Ok(AddOutcome::Added)
+        }
+        async fn list_scoped(&self) -> Result<Vec<DownloadItem>, String> {
+            Ok(vec![])
+        }
+        async fn get_files(&self, _: &str) -> Result<Vec<DownloadFile>, String> {
+            let selections = self.selections.lock().unwrap();
+            let selected = selections
+                .last()
+                .cloned()
+                .unwrap_or_else(|| (0..lagoon_files().len()).collect());
+            Ok(lagoon_files()
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| DownloadFile {
+                    name,
+                    size: 100,
+                    progress: 0.0,
+                    wanted: selected.contains(&index),
+                })
+                .collect())
+        }
+        async fn pause(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn resume(&self, _: &str) -> Result<(), String> {
+            self.resumes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        async fn delete(&self, _: &str, _: bool) -> Result<(), String> {
+            panic!("a direct reviewed grab must not delete jobs")
+        }
+        async fn set_file_wanted(
+            &self,
+            _: &str,
+            indices: &[usize],
+            wanted: bool,
+        ) -> Result<(), String> {
+            let mut selections = self.selections.lock().unwrap();
+            let mut selected = selections
+                .last()
+                .cloned()
+                .unwrap_or_else(|| (0..lagoon_files().len()).collect());
+            for index in indices {
+                selected.retain(|item| item != index);
+                if wanted {
+                    selected.push(*index);
+                }
+            }
+            selected.sort_unstable();
+            selections.push(selected);
+            Ok(())
+        }
+        fn sonarr_impl_name(&self) -> &'static str {
+            "QBittorrent"
+        }
+    }
+
+    async fn fixture() -> (AppState, i64, Arc<BoundClient>) {
+        let db = in_memory_pool().await;
+        let id = seed_series(&db, 1519, "Black Lagoon: The Second Barrage").await;
+        let detail = serde_json::from_value(serde_json::json!({
+            "id": 1519, "id_mal": null, "title_romaji": "Black Lagoon: The Second Barrage", "title_english": "Black Lagoon: The Second Barrage",
+            "title_native": "", "cover_url": "", "banner_url": "", "format": "TV", "status": "FINISHED",
+            "status_display": "Finished", "episodes": 12, "duration": 24, "season": "FALL", "season_year": 2006,
+            "description": "", "genres": [], "average_score": null, "average_score_display": null,
+            "score_is_ten_point": false, "score_class": "", "next_airing_episode": null, "next_airing_at": null,
+            "synonyms": [], "streaming_episodes": [], "relations": []
+        })).unwrap();
+        metadata_cache::upsert(&db, id, 1519, None, &detail)
+            .await
+            .unwrap();
+        let client = Arc::new(BoundClient::default());
+        (build_test_app_state(db, Some(client.clone())), id, client)
+    }
+
+    fn body() -> serde_json::Value {
+        serde_json::json!({
+            "url": format!("magnet:?xt=urn:btih:{}", lagoon_proof().info_hash),
+            "title": "[Legion] Black Lagoon - 01-29 [BD 1080p]", "resolution": "1080", "group": "Legion",
+            // A stale or forged client decision never supplies the authority.
+            "release_mapping": {"target_first": 99}
+        })
+    }
+
+    #[tokio::test]
+    async fn direct_bound_grab_batch_selects_server_proof_and_records_canonical_coverage() {
+        let (state, id, client) = fixture().await;
+        source_numbering::save_reviewed(&state.db, &lagoon_proof())
+            .await
+            .unwrap();
+        let _ = grab_batch_result(State(state.clone()), Path(id), Json(body()))
+            .await
+            .unwrap();
+        assert_eq!(
+            client.selections.lock().unwrap().last(),
+            Some(&(12..24).collect::<Vec<_>>())
+        );
+        let (episodes, json): (String, String) =
+            sqlx::query_as("SELECT episode_numbers,release_mapping FROM grabbed_torrents")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Vec<i32>>(&episodes).unwrap(),
+            (1..=12).collect::<Vec<_>>()
+        );
+        let mapping: crate::services::release_numbering::ReleaseMapping =
+            serde_json::from_str(&json).unwrap();
+        assert_eq!(mapping.bound_source(), Some(&lagoon_proof()));
+        assert_eq!(
+            series::get_all(&state.db).await.unwrap().len(),
+            1,
+            "bound grabs cannot auto-expand siblings"
+        );
+        assert_eq!(client.resumes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn direct_bound_grab_single_refuses_a_multi_episode_or_outside_selection_before_add() {
+        let (state, id, client) = fixture().await;
+        source_numbering::save_reviewed(&state.db, &lagoon_proof())
+            .await
+            .unwrap();
+        for episode in [3, 13] {
+            let error =
+                grab_interactive_result(State(state.clone()), Path((id, episode)), Json(body()))
+                    .await
+                    .unwrap_err();
+            assert_eq!(error.0, axum::http::StatusCode::CONFLICT);
+            assert!(error.1.contains("file picker"));
+        }
+        assert!(client.selections.lock().unwrap().is_empty());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM grabbed_torrents")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn direct_bound_grab_single_accepts_only_a_server_reviewed_single_episode() {
+        let (state, id, client) = fixture().await;
+        let proof = lagoon_proof()
+            .narrow_to(&[lagoon_files()[14].clone()])
+            .unwrap();
+        source_numbering::save_reviewed(&state.db, &proof)
+            .await
+            .unwrap();
+        let _ = grab_interactive_result(State(state.clone()), Path((id, 3)), Json(body()))
+            .await
+            .unwrap();
+        assert_eq!(client.selections.lock().unwrap().last(), Some(&vec![14]));
+        let episodes: String = sqlx::query_scalar("SELECT episode_numbers FROM grabbed_torrents")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Vec<i32>>(&episodes).unwrap(),
+            vec![3]
+        );
+        assert_eq!(client.resumes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn direct_bound_grab_never_resumes_when_recording_errors_or_deduplicates() {
+        for deduplicated in [false, true] {
+            let (state, id, client) = fixture().await;
+            let proof = lagoon_proof();
+            source_numbering::save_reviewed(&state.db, &proof)
+                .await
+                .unwrap();
+            let mut request = body();
+            if deduplicated {
+                let mapping =
+                    crate::services::release_numbering::ReleaseMapping::from_bound_source(&proof)
+                        .unwrap();
+                crate::models::grabbed_torrents::record_grab_with_release_mapping(
+                    &state.db,
+                    &proof.info_hash,
+                    "Existing pending source",
+                    id,
+                    &mapping.episodes(),
+                    true,
+                    Some(&mapping),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            } else {
+                // The source identity disappears after preparation but before
+                // recording. No successful transaction may be invented.
+                request["indexer_id"] = 999.into();
+                request["source_guid"] = "missing-source".into();
+            }
+            let error = grab_batch_result(State(state.clone()), Path(id), Json(request))
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error.0,
+                axum::http::StatusCode::CONFLICT | axum::http::StatusCode::BAD_GATEWAY
+            ));
+            assert!(!client.selections.lock().unwrap().is_empty());
+            assert_eq!(client.resumes.load(std::sync::atomic::Ordering::SeqCst), 0);
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM grabbed_torrents")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+            assert_eq!(count, i64::from(deduplicated));
+        }
     }
 }
 
