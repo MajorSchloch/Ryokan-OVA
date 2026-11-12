@@ -1494,6 +1494,46 @@ async fn collect_scored_for_target_filtered(
             &mut candidates,
         )
         .await;
+
+        // A complete source pack need not put this episode number in its
+        // heading. Probe only canonical titles from the curated source root,
+        // then require an automatic proof for one exact wanted file. This is
+        // not permission to add a batch during an episode search.
+        if require_verbatim
+            && let Some(rule) =
+                crate::services::anime_relations::offset_for(detail.id, detail.id_mal)
+        {
+            let root_aliases = crate::services::anime_relations::source_titles(db, &rule).await;
+            let root_queries = append_custom_tokens(
+                source_root_pack_queries(&root_aliases),
+                &series_ctx.custom_tokens,
+            );
+            let mut root_seen = seen.clone();
+            let mut root_candidates = Vec::new();
+            run_queries(
+                &root_queries,
+                franchise_ctx,
+                &mut root_seen,
+                &mut root_candidates,
+            )
+            .await;
+            for candidate in root_candidates {
+                let single_automatic = candidate
+                    .release_mapping
+                    .as_ref()
+                    .and_then(|mapping| mapping.bound_source())
+                    .is_some_and(|proof| {
+                        proof.origin()
+                            == Ok(crate::services::source_numbering::ProofOrigin::AutomaticUnique)
+                            && proof.target_anilist_id == detail.id
+                            && proof.selected_files.len() == 1
+                            && proof.episodes() == [*ep]
+                    });
+                if single_automatic && seen.insert(candidate.info_hash.clone()) {
+                    candidates.push(candidate);
+                }
+            }
+        }
     }
 
     // Classify + filter + rescore in one pass. Each candidate is classified
@@ -2784,6 +2824,18 @@ fn build_queries_from_aliases(
     }
 
     dedupe_strings(queries)
+}
+
+const SOURCE_ROOT_PACK_ALIAS_CAP: usize = 2;
+
+/// Two canonical root aliases, with one bare and one BD query each. Full
+/// source proof and ordinary eligibility remain mandatory after discovery.
+fn source_root_pack_queries(aliases: &[String]) -> Vec<String> {
+    dedupe_strings(aliases.to_vec())
+        .into_iter()
+        .take(SOURCE_ROOT_PACK_ALIAS_CAP)
+        .flat_map(|alias| [alias.clone(), format!("{alias} BD")])
+        .collect()
 }
 
 /// Human-readable short label for a series, used in SeaDex lookup log

@@ -9,6 +9,9 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
+#[path = "root_pack_discovery.rs"]
+mod root_pack_discovery;
+
 #[derive(Clone)]
 struct Source {
     hash: String,
