@@ -14,6 +14,8 @@ use sqlx::{Row, SqlitePool};
 
 use super::{custom_formats, group_source_map, media_probe_cache, nyaa_description_cache};
 
+mod source_numbering;
+
 /// Check whether `column` exists on `table`. Used inside [`migrate`] to
 /// gate idempotent ALTER chains whose "ADD COLUMN then RENAME" shape
 /// would otherwise leave vestigial columns on fresh installs (the ADD
@@ -1406,6 +1408,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // Populated after imports land so re-classifications (library scans,
     // upgrade checks) don't re-shell out to ffprobe for the same file.
     media_probe_cache::migrate(db).await?;
+    source_numbering::migrate(db).await?;
 
     // Sonarr-v4-compatible Custom Formats. Two tables: one for CF
     // definitions (raw JSON preserved for byte-perfect re-export) and
@@ -3012,6 +3015,9 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
         for (name, declaration) in [
+            ("required_audio_languages", "TEXT NOT NULL DEFAULT ''"),
+            ("audio_language_match", "TEXT NOT NULL DEFAULT 'all'"),
+            ("minimum_torrent_seeders", "INTEGER NOT NULL DEFAULT 1"),
             ("required_subtitle_languages", "TEXT NOT NULL DEFAULT ''"),
             ("subtitle_language_match", "TEXT NOT NULL DEFAULT 'all'"),
             ("media_requirements_enabled", "INTEGER NOT NULL DEFAULT 0"),
@@ -3266,6 +3272,18 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query(REVIEWED_OFFSET_TRIGGER).execute(db).await?;
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_series_mal_id_lookup ON series (mal_id) WHERE mal_id IS NOT NULL",
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS series_language_preferences (
+            series_id INTEGER PRIMARY KEY REFERENCES series(id) ON DELETE CASCADE,
+            audio_languages TEXT,
+            audio_match TEXT,
+            subtitle_languages TEXT,
+            subtitle_match TEXT
+        )",
     )
     .execute(db)
     .await?;

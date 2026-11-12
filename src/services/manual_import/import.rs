@@ -448,6 +448,8 @@ pub async fn run_import(
         owned_folders.insert(row.folder_name.clone());
         disk.insert(row.folder_name.clone());
         gr.folder_name = row.folder_name.clone();
+        let cfg = crate::services::language_preferences::effective_config(&state.db, &cfg, row.id)
+            .await?;
 
         if created {
             // Imports don't grab: the user brought what they have.

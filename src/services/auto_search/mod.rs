@@ -5,7 +5,9 @@ use futures_util::stream::{self, StreamExt};
 use sqlx::SqlitePool;
 
 use crate::models::config::Config;
+use crate::models::log::LogCategory;
 use crate::services::custom_formats::CompiledCustomFormat;
+use crate::services::logger;
 use crate::services::source::{self, ClassificationResult, Resolution, Source};
 use crate::services::{
     anilist::AnimeDetail,
@@ -126,6 +128,21 @@ async fn find_all_for_target_with_probes(
     // entry points: we clone the inner Arc<Vec<...>> under the read
     // lock and release it before any HTTP work begins so a slow indexer
     // can't pin the lock against a concurrent Settings → Indexers save.
+    let effective =
+        match crate::services::language_preferences::for_provider(db, config, detail.id).await {
+            Ok(value) => value,
+            Err(reason) => {
+                logger::warn(
+                    db,
+                    LogCategory::AutoSearch,
+                    "Search held: language settings unavailable",
+                    &reason,
+                )
+                .await;
+                return Vec::new();
+            }
+        };
+    let config = &effective;
     let indexers_snapshot = indexers.read().await.clone();
     let indexer_slice: &[std::sync::Arc<dyn crate::services::indexers::Indexer>] =
         indexers_snapshot.as_slice();
@@ -397,6 +414,7 @@ async fn find_all_for_target_with_probes(
             c.score = final_score;
             c.score_breakdown.append(&mut auto_parts);
             c.score_breakdown.extend(cf_parts);
+            crate::services::language_preferences::apply_audio_hint(config, &mut c);
             scored.push(c);
         }
     }
@@ -771,6 +789,23 @@ async fn collect_scored_batches_for_target_filtered(
     require_verbatim: bool,
     eligible: Option<CandidateFilter<'_>>,
 ) -> (Vec<SearchResult>, Vec<String>) {
+    let availability =
+        crate::services::release_availability::Policy::load(config, indexers_cache).await;
+    let effective =
+        match crate::services::language_preferences::for_provider(db, config, detail.id).await {
+            Ok(value) => value,
+            Err(reason) => {
+                logger::warn(
+                    db,
+                    LogCategory::AutoSearch,
+                    "Search held: language settings unavailable",
+                    &reason,
+                )
+                .await;
+                return (Vec::new(), Vec::new());
+            }
+        };
+    let config = &effective;
     let (aliases, canonical_aliases, variant_aliases) = collect_aliases_with_variants(detail);
     let series_ctx = resolve_search_overrides(db, detail, config).await;
     let (aliases, canonical_aliases, variant_aliases) = add_alternate_aliases(
@@ -812,6 +847,9 @@ async fn collect_scored_batches_for_target_filtered(
     // text-query sweep can't find batches whose titles don't carry
     // the target's alias tokens.
     for mut result in seadex_payload.candidates {
+        if require_verbatim && !availability.allows_result(&result) {
+            continue;
+        }
         if require_verbatim
             && config.media_requirements_enabled
             && !passes_presearch_requirements(
@@ -841,6 +879,7 @@ async fn collect_scored_batches_for_target_filtered(
     let indexer_categories =
         crate::services::indexers::search_categories(&detail.format, detail.is_adult);
     let ctx = AutoQueryCtx {
+        availability: require_verbatim.then_some(&availability),
         db,
         anilist_id: detail.id,
         phase: MatchPhase::Primary,
@@ -1056,6 +1095,7 @@ async fn collect_scored_batches_for_target_filtered(
             c.score = final_score;
             c.score_breakdown.append(&mut auto_parts);
             c.score_breakdown.extend(cf_parts);
+            crate::services::language_preferences::apply_audio_hint(config, &mut c);
             scored.push(c);
         }
     }
@@ -1118,7 +1158,24 @@ async fn collect_scored_for_target_filtered(
     indexers_cache: &crate::IndexerCache,
     eligible: Option<CandidateFilter<'_>>,
 ) -> (Vec<SearchResult>, Vec<String>) {
+    let availability =
+        crate::services::release_availability::Policy::load(config, indexers_cache).await;
     let require_verbatim = true;
+    let effective =
+        match crate::services::language_preferences::for_provider(db, config, detail.id).await {
+            Ok(value) => value,
+            Err(reason) => {
+                logger::warn(
+                    db,
+                    LogCategory::AutoSearch,
+                    "Search held: language settings unavailable",
+                    &reason,
+                )
+                .await;
+                return (Vec::new(), Vec::new());
+            }
+        };
+    let config = &effective;
     let (aliases, canonical_aliases, variant_aliases) = collect_aliases_with_variants(detail);
     let series_ctx = resolve_search_overrides(db, detail, config).await;
     let (aliases, canonical_aliases, variant_aliases) = add_alternate_aliases(
@@ -1180,6 +1237,9 @@ async fn collect_scored_for_target_filtered(
     // user's batch-allowed policy; it only overrides the heuristic
     // title-matching gate inside `run_queries`.
     for mut result in seadex_payload.candidates {
+        if !availability.allows_result(&result) {
+            continue;
+        }
         if !allow_batch && result.is_batch {
             continue;
         }
@@ -1211,6 +1271,7 @@ async fn collect_scored_for_target_filtered(
     let indexer_categories =
         crate::services::indexers::search_categories(&detail.format, detail.is_adult);
     let ctx = AutoQueryCtx {
+        availability: Some(&availability),
         db,
         anilist_id: detail.id,
         phase: MatchPhase::Primary,
@@ -1439,6 +1500,7 @@ async fn collect_scored_for_target_filtered(
             config.custom_format_minimum_score,
         ) {
             c.score = final_score;
+            crate::services::language_preferences::apply_audio_hint(config, &mut c);
             classified.insert((c.info_hash.clone(), c.title.clone()), classification);
             scored.push(c);
         }
@@ -1504,6 +1566,7 @@ impl AutoQueryCtx<'_> {
 
 #[derive(Clone, Copy)]
 struct AutoQueryCtx<'a> {
+    availability: Option<&'a crate::services::release_availability::Policy>,
     minimum_resolution: Option<Resolution>,
     eligible: Option<CandidateFilter<'a>>,
     db: &'a sqlx::SqlitePool,
@@ -1713,7 +1776,10 @@ async fn run_queries(
         for (query, outcomes) in outcome_streams {
             for outcome in outcomes {
                 match outcome.result {
-                    Ok(rs) => releases.extend(rs),
+                    Ok(rs) => releases.extend(rs.into_iter().filter(|release| {
+                        ctx.availability
+                            .is_none_or(|policy| policy.check_indexer_release(release).is_ok())
+                    })),
                     Err(e) => {
                         tracing::debug!(
                             "indexer fan-out failed for '{}' on indexer #{} ({}): {}",
@@ -1751,6 +1817,12 @@ async fn run_queries(
             Err(_) => continue,
         };
         for mut result in results {
+            if ctx
+                .availability
+                .is_some_and(|policy| !policy.allows_result(&result))
+            {
+                continue;
+            }
             let dedupe_key = if !result.info_hash.is_empty() {
                 result.info_hash.clone()
             } else {
@@ -1794,6 +1866,9 @@ async fn run_queries(
                     continue;
                 }
             };
+            if !ctx.allow_batch && result.is_batch {
+                continue;
+            }
             if !reviewed && ctx.reject_specials && media::is_special_release(&result.title) {
                 tracing::debug!("auto-search: skipping special release {:?}", result.title);
                 rejected_here.insert(dedupe_key);
@@ -1859,6 +1934,12 @@ async fn run_queries(
     // surfacing a release Nyaa already returned via Prowlarr's
     // Nyaa indexer — no double-counting.
     for mut result in indexer_responses {
+        if ctx
+            .availability
+            .is_some_and(|policy| !policy.allows_result(&result))
+        {
+            continue;
+        }
         let dedupe_key = if !result.info_hash.is_empty() {
             result.info_hash.clone()
         } else {
@@ -1887,6 +1968,9 @@ async fn run_queries(
                 continue;
             }
         };
+        if !ctx.allow_batch && result.is_batch {
+            continue;
+        }
         if !reviewed && ctx.reject_specials && media::is_special_release(&result.title) {
             tracing::debug!("auto-search: skipping special release {:?}", result.title);
             rejected_here.insert(dedupe_key);
@@ -2370,6 +2454,11 @@ fn nyaa_search_categories(config: &Config, format: &str) -> Vec<String> {
 /// English-only category. Legacy categories remain unchanged otherwise.
 pub fn allows_non_english(config: &Config) -> bool {
     config.allow_non_english
+        || config
+            .required_audio_languages
+            .split(',')
+            .filter_map(crate::services::media_info::normalize_language)
+            .any(|language| language != "en")
         || (config.media_requirements_enabled
             && (config.minimum_subtitle_check || config.target_subtitle_check)
             && config
@@ -4086,6 +4175,7 @@ mod episode_set_tests {
         let old = Observed {
             resolution: Resolution::R720p,
             subtitles_satisfied: false,
+            audio_satisfied: true,
             duration_seconds: Some(1364.676),
         };
         let aliases = vec![
@@ -4203,6 +4293,7 @@ mod episode_set_tests {
         let observed = Observed {
             resolution: Resolution::R1080p,
             subtitles_satisfied: false,
+            audio_satisfied: true,
             duration_seconds: None,
         };
         let judge = |result: &SearchResult| {

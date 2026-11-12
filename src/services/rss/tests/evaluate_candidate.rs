@@ -39,6 +39,7 @@ fn series(status: &str) -> series::Series {
 
 fn item_with(title: &str, is_batch: bool) -> RssItem {
     RssItem {
+        seeders: None,
         title: title.to_string(),
         link: String::new(),
         guid: String::new(),
@@ -482,6 +483,7 @@ fn observation(
     crate::services::media_requirements::Observed {
         resolution,
         subtitles_satisfied,
+        audio_satisfied: true,
         duration_seconds: None,
     }
 }

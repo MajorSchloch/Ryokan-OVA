@@ -262,6 +262,10 @@
                 </div>
             </div>
         </div>
+        {% if let Some(languages) = language_preferences %}
+        <div class="monitoring-divider"></div>
+        {% include "partials/library/languages.html" %}
+        {% endif %}
         {# #23 — Per-series search overrides. Both fields are blank by
            default; leaving them blank inherits the global defaults from
            Settings → Quality (rendered as placeholders here). #}

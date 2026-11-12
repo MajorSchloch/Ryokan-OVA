@@ -44,7 +44,9 @@ pub(crate) fn required_languages(cfg: &Config) -> Vec<String> {
 }
 
 pub(crate) fn required(cfg: &Config) -> bool {
-    cfg.media_requirements_enabled || !required_languages(cfg).is_empty()
+    cfg.media_requirements_enabled
+        || !required_languages(cfg).is_empty()
+        || !cfg.required_audio_languages.trim().is_empty()
 }
 
 /// Preflight the actual video and the exact sidecars the importer will
@@ -442,6 +444,211 @@ mod tests {
 
     async fn seed_probe(db: &SqlitePool, path: &Path, subtitles: bool) {
         seed_probe_dimensions(db, path, subtitles, 1280, 720).await;
+    }
+
+    async fn seed_audio_probe(
+        db: &SqlitePool,
+        path: &Path,
+        language: &str,
+        width: u32,
+        height: u32,
+    ) {
+        let canonical = tokio::fs::canonicalize(path).await.unwrap();
+        let identity =
+            FileIdentity::from_metadata(&tokio::fs::metadata(&canonical).await.unwrap()).unwrap();
+        crate::models::media_probe_cache::upsert_identified(db, canonical.to_str().unwrap(), &identity.cache_key(), identity.size as i64,
+            &serde_json::json!({"streams":[
+                {"index":0,"codec_type":"video","codec_name":"h264","width":width,"height":height},
+                {"index":1,"codec_type":"audio","codec_name":"aac","channels":2,"tags":{"language":language}}
+            ]}).to_string()).await;
+    }
+
+    #[tokio::test]
+    async fn audio_requirement_refuses_missing_or_unknown_dub_before_retirement() {
+        for language in ["eng", "jpn", "und", "deu"] {
+            let db = crate::test_support::in_memory_pool().await;
+            let temp = tempfile::tempdir().unwrap();
+            let source = temp.path().join("Release German Dub [1080p].mkv");
+            let old = temp.path().join("old.mkv");
+            let old_subtitle = temp.path().join("old.de.srt");
+            tokio::fs::write(&source, "new video bundle").await.unwrap();
+            tokio::fs::write(&old, "original German video")
+                .await
+                .unwrap();
+            tokio::fs::write(
+                &old_subtitle,
+                "1\n00:00:01,000 --> 00:00:02,000\nOriginal\n",
+            )
+            .await
+            .unwrap();
+            seed_audio_probe(&db, &old, "deu", 1280, 720).await;
+            seed_audio_probe(&db, &source, language, 1920, 1080).await;
+            let cfg = Config {
+                media_requirements_enabled: true,
+                required_audio_languages: "de".into(),
+                required_subtitle_languages: String::new(),
+                ..Default::default()
+            };
+            let result = import_required(
+                &db,
+                &cfg,
+                "copy",
+                &source,
+                &old,
+                std::slice::from_ref(&old),
+                34,
+                "Release",
+                &[],
+                None,
+                1,
+                true,
+            )
+            .await;
+            if language == "deu" {
+                result.unwrap();
+                assert_eq!(
+                    tokio::fs::read_to_string(&old).await.unwrap(),
+                    "new video bundle"
+                );
+            } else {
+                let reason = result.unwrap_err();
+                assert!(reason.contains("audio"), "{reason}");
+                assert_eq!(
+                    is_content_rejection(&reason),
+                    language != "und",
+                    "unknown tags need review, not a guessed rejection"
+                );
+                assert_eq!(
+                    tokio::fs::read_to_string(&old).await.unwrap(),
+                    "original German video"
+                );
+                assert!(old_subtitle.exists());
+            }
+            assert_eq!(
+                tokio::fs::read_to_string(&source).await.unwrap(),
+                "new video bundle"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn audio_only_rule_applies_without_enabling_resolution_gates() {
+        let db = crate::test_support::in_memory_pool().await;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.mkv");
+        let dest = temp.path().join("dest.mkv");
+        tokio::fs::write(&source, "Spanish audio fixture")
+            .await
+            .unwrap();
+        seed_audio_probe(&db, &source, "spa", 854, 480).await;
+        let cfg = Config {
+            media_requirements_enabled: false,
+            required_audio_languages: "es".into(),
+            ..Default::default()
+        };
+        assert!(required(&cfg));
+        import_required(
+            &db,
+            &cfg,
+            "copy",
+            &source,
+            &dest,
+            &[],
+            1,
+            "Release",
+            &[],
+            None,
+            1,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tokio::fs::read_to_string(&dest).await.unwrap(),
+            "Spanish audio fixture"
+        );
+    }
+
+    #[tokio::test]
+    async fn routed_release_language_rule_is_independent_of_parent_subtitles() {
+        use crate::models::series_language_preferences::{self, LanguagePreferences};
+        let db = crate::test_support::in_memory_pool().await;
+        let parent = crate::test_support::seed_series(&db, 100, "Parent").await;
+        let sibling = crate::test_support::seed_series(&db, 101, "Sibling").await;
+        series_language_preferences::save(
+            &db,
+            sibling,
+            &LanguagePreferences {
+                audio_languages: Some("de".into()),
+                audio_match: Some("all".into()),
+                subtitle_languages: Some(String::new()),
+                subtitle_match: Some("all".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let global = Config {
+            media_requirements_enabled: true,
+            required_subtitle_languages: "en".into(),
+            ..Default::default()
+        };
+        let parent_cfg =
+            crate::services::language_preferences::effective_config(&db, &global, parent)
+                .await
+                .unwrap();
+        let sibling_cfg =
+            crate::services::language_preferences::effective_config(&db, &global, sibling)
+                .await
+                .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.mkv");
+        let dest = temp.path().join("old.mkv");
+        tokio::fs::write(&source, "German source").await.unwrap();
+        tokio::fs::write(&dest, "Old German source").await.unwrap();
+        seed_audio_probe(&db, &source, "deu", 1920, 1080).await;
+        seed_audio_probe(&db, &dest, "deu", 1280, 720).await;
+        assert!(
+            import_required(
+                &db,
+                &parent_cfg,
+                "copy",
+                &source,
+                &dest,
+                std::slice::from_ref(&dest),
+                parent,
+                "Parent",
+                &[],
+                None,
+                1,
+                true
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(&dest).await.unwrap(),
+            "Old German source"
+        );
+        import_required(
+            &db,
+            &sibling_cfg,
+            "copy",
+            &source,
+            &dest,
+            std::slice::from_ref(&dest),
+            sibling,
+            "Sibling",
+            &[],
+            None,
+            1,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tokio::fs::read_to_string(&dest).await.unwrap(),
+            "German source"
+        );
     }
 
     async fn seed_probe_dimensions(

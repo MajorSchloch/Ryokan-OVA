@@ -515,7 +515,7 @@ function mediaSubtitleRequirementKind(status, subtitles) {
     return status.target_subtitle_check ? 'preferred' : 'none';
 }
 
-function renderMediaRequirements(status, subtitles, upgradesAllowed) {
+function renderMediaRequirements(status, subtitles, upgradesAllowed, audio) {
     if (!status || !status.enabled) return '';
     const known = typeof status.resolution === 'string' && status.resolution.trim() !== ''
         && status.resolution.toLowerCase() !== 'unknown';
@@ -532,6 +532,11 @@ function renderMediaRequirements(status, subtitles, upgradesAllowed) {
         + requirement('Actual resolution', known ? status.resolution : 'Unknown — cannot verify the minimum or target')
         + requirement('Minimum resolution', status.minimum_resolution || 'Unknown')
         + requirement('Target resolution', status.target_resolution || 'Unknown');
+    if (audio && audio.enabled) {
+        html += requirement('Required audio', (audio.match_mode === 'any' ? 'Any of: ' : 'All of: ')
+            + (audio.required_languages || []).map(mediaLanguageLabel).join(', '))
+            + requirement('Audio result', audio.satisfied ? 'Required dialogue audio present' : 'Required dialogue audio not verified');
+    }
     const subtitleKind = mediaSubtitleRequirementKind(status, subtitles);
     if (subtitleKind !== 'none') {
         const names = (subtitles.required_languages || []).map(mediaLanguageLabel).join(', ');
@@ -565,6 +570,7 @@ function renderMediaRequirements(status, subtitles, upgradesAllowed) {
 function renderEpisodeMediaInfo(section, data) {
     const info = data.media;
     const policy = data.subtitle_requirements;
+    const audioPolicy = data.audio_requirements;
     const subtitleKind = mediaSubtitleRequirementKind(data.media_requirements, policy);
     const row = (label, value) => '<div class="ep-detail-row"><span class="ep-detail-label">'
         + escHtml(label) + '</span><span class="ep-detail-value">' + escHtml(value) + '</span></div>';
@@ -572,9 +578,14 @@ function renderEpisodeMediaInfo(section, data) {
         track.title, track.channels ? track.channels + ' channels' : '',
         track.external ? 'External file' : 'Embedded', track.default ? 'Default' : '',
         track.forced ? 'Forced' : '', track.signs_only ? 'Signs / songs only' : '',
+        track.commentary ? 'Commentary' : '', track.audio_description ? 'Audio description' : '',
         track.valid === false ? 'Invalid or unreadable' : ''].filter(Boolean).join(' · ');
     let html = '<h4>File information</h4>';
-    html += renderMediaRequirements(data.media_requirements, policy, data.upgrades_allowed);
+    html += renderMediaRequirements(data.media_requirements, policy, data.upgrades_allowed, audioPolicy);
+    if (audioPolicy && audioPolicy.enabled) {
+        html += '<p class="ep-media-verdict ep-media-verdict-' + (audioPolicy.satisfied ? 'present' : 'missing')
+            + '">Required dialogue audio ' + (audioPolicy.satisfied ? 'present' : 'not verified') + '</p>';
+    }
     if (subtitleKind !== 'none') {
         const prefix = subtitleKind === 'required' ? 'Required' : 'Preferred';
         const state = policy.satisfied ? 'present' : subtitleKind === 'required' ? 'missing' : 'preferred';
@@ -588,6 +599,10 @@ function renderEpisodeMediaInfo(section, data) {
             track.bit_depth ? track.bit_depth + '-bit' : ''].filter(Boolean).join(' · '));
     });
     html += row('Audio', info.audio.length ? info.audio.map(trackLabel).join(' / ') : 'No audio tracks found');
+    if (audioPolicy && audioPolicy.enabled) {
+        html += row(audioPolicy.match_mode === 'any' ? 'Audio requires any' : 'Audio requires all', audioPolicy.required_languages.map(mediaLanguageLabel).join(', '));
+        if (audioPolicy.reasons.length) html += row('Audio check', audioPolicy.reasons.join(' '));
+    }
     html += row('Subtitles', info.subtitles.length ? info.subtitles.map(trackLabel).join(' / ') : 'No selectable subtitle tracks or matching files found');
     if (subtitleKind !== 'none') {
         html += row('Subtitle check', subtitleKind === 'required'

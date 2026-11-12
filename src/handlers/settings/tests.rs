@@ -804,6 +804,9 @@ mod non_htmx_path {
                 default_allow_upgrades: None,
                 seadex_enabled: None, // seed=true → submit→false
                 default_custom_query_tokens: Some("submit-tokens".to_string()), // seed=seed-tokens
+                required_audio_languages: None,
+                audio_language_match: None,
+                minimum_torrent_seeders: None,
                 required_subtitle_languages: None,
                 subtitle_language_match: None,
                 media_requirements_enabled: None,
@@ -1365,6 +1368,9 @@ mod non_htmx_path {
                 default_allow_upgrades: None,
                 seadex_enabled: None,
                 default_custom_query_tokens: None,
+                required_audio_languages: None,
+                audio_language_match: None,
+                minimum_torrent_seeders: None,
                 required_subtitle_languages: None,
                 subtitle_language_match: None,
                 media_requirements_enabled: None,
@@ -1770,6 +1776,9 @@ mod non_htmx_path {
                 default_allow_upgrades: None,
                 seadex_enabled: None,
                 default_custom_query_tokens: None,
+                required_audio_languages: None,
+                audio_language_match: None,
+                minimum_torrent_seeders: None,
                 required_subtitle_languages: None,
                 subtitle_language_match: None,
                 media_requirements_enabled: None,
@@ -2456,4 +2465,57 @@ async fn old_quality_form_keeps_media_requirement_gates() {
     assert_eq!(saved.minimum_resolution, "1080");
     assert_eq!(saved.target_resolution, "2160");
     assert!(!saved.minimum_subtitle_check);
+}
+
+#[tokio::test]
+async fn language_defaults_and_torrent_floor_preserve_old_forms_and_validate_atomically() {
+    let db = crate::test_support::in_memory_pool().await;
+    config::save_config(
+        &db,
+        &config::Config {
+            required_audio_languages: "de".into(),
+            minimum_torrent_seeders: 4,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let state = crate::test_support::build_test_app_state(db.clone(), None);
+    let body = serde_json::json!({"preferred_groups":"", "blocked_groups":"", "preferred_source":"web", "preferred_resolution":"1080", "cutoff_source":"bluray", "cutoff_resolution":"1080", "finished_series_quality":"same", "prefer_subs":"1"});
+    let _ = settings_quality_submit(
+        State(state.clone()),
+        HxRequest(true),
+        axum::Form(serde_json::from_value(body.clone()).unwrap()),
+    )
+    .await;
+    let old = config::get_config(&db).await.unwrap().unwrap();
+    assert_eq!(old.required_audio_languages, "de");
+    assert_eq!(old.minimum_torrent_seeders, 4);
+    let mut changed = body;
+    changed["required_audio_languages"] = "Spanish,deu,es".into();
+    changed["audio_language_match"] = "any".into();
+    changed["minimum_torrent_seeders"] = "0".into();
+    let _ = settings_quality_submit(
+        State(state.clone()),
+        HxRequest(true),
+        axum::Form(serde_json::from_value(changed.clone()).unwrap()),
+    )
+    .await;
+    let saved = config::get_config(&db).await.unwrap().unwrap();
+    assert_eq!(saved.required_audio_languages, "es,de");
+    assert_eq!(saved.audio_language_match, "any");
+    assert_eq!(saved.minimum_torrent_seeders, 0);
+    for bad in ["-1", "10001", "not a number"] {
+        changed["minimum_torrent_seeders"] = bad.into();
+        changed["required_audio_languages"] = "French".into();
+        let _ = settings_quality_submit(
+            State(state.clone()),
+            HxRequest(true),
+            axum::Form(serde_json::from_value(changed.clone()).unwrap()),
+        )
+        .await;
+        let after = config::get_config(&db).await.unwrap().unwrap();
+        assert_eq!(after.required_audio_languages, "es,de");
+        assert_eq!(after.minimum_torrent_seeders, 0);
+    }
 }

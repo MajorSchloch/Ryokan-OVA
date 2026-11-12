@@ -61,6 +61,7 @@ async fn cached(
 
 fn item(title: &str) -> RssItem {
     RssItem {
+        seeders: None,
         title: title.into(),
         link: String::new(),
         guid: String::new(),

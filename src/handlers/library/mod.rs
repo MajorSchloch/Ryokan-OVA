@@ -13,8 +13,10 @@ pub mod episodes;
 pub mod file_info;
 pub mod groups;
 mod inventory;
+pub mod languages;
 pub mod misgrabs;
 pub mod navigation;
+pub mod numbering;
 pub mod pages;
 pub mod reconcile;
 pub mod recycle;
@@ -255,6 +257,7 @@ struct SeriesTemplate {
     /// Rendered inside an "Advanced" collapsible since most users won't
     /// flip it.
     allow_pt_upgrades: bool,
+    language_preferences: Option<languages::LanguagePreferencesView>,
     /// #23 — Per-series custom Nyaa query tokens. Empty string means
     /// "use the global default in config." Rendered in the Advanced
     /// search panel on the series detail page.

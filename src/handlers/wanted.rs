@@ -264,13 +264,10 @@ fn build_cutoff_rows(
 
 async fn observe_library(
     state: &AppState,
-    cfg: &config::Config,
+    configs: &HashMap<i64, config::Config>,
     library: &[series::Series],
     disk: &HashMap<i64, Vec<media::EpisodeFile>>,
 ) -> HashMap<i64, HashMap<i32, crate::services::media_requirements::Observed>> {
-    if !cfg.media_requirements_enabled {
-        return HashMap::new();
-    }
     use futures_util::{StreamExt, stream};
     // Own each job's inputs so the buffered futures also satisfy the
     // HTTP handlers' Send requirement across their entire lifetime.
@@ -278,16 +275,23 @@ async fn observe_library(
         .iter()
         .filter(|series| series.allow_upgrades)
         .filter_map(|series| {
-            disk.get(&series.id)
-                .map(|files| (series.id, series.folder_name.clone(), files.clone()))
+            let cfg = configs
+                .get(&series.id)
+                .filter(|cfg| cfg.media_requirements_enabled)?;
+            disk.get(&series.id).map(|files| {
+                (
+                    series.id,
+                    series.folder_name.clone(),
+                    files.clone(),
+                    cfg.clone(),
+                )
+            })
         })
         .collect();
     let db = state.db.clone();
-    let cfg = cfg.clone();
     stream::iter(jobs)
-        .map(move |(series_id, folder_name, files)| {
+        .map(move |(series_id, folder_name, files, cfg)| {
             let db = db.clone();
-            let cfg = cfg.clone();
             async move {
                 let observations = crate::services::media_requirements::observe_files(
                     &db,
@@ -302,6 +306,48 @@ async fn observe_library(
         .buffer_unordered(4)
         .collect()
         .await
+}
+
+async fn effective_cutoff_rows(
+    state: &AppState,
+    cfg: &config::Config,
+    library: &[series::Series],
+    disk: &HashMap<i64, Vec<media::EpisodeFile>>,
+    tags: &HashMap<i64, HashMap<i32, episode_tags::EpisodeQualityTag>>,
+) -> Vec<WantedRow> {
+    let ids: Vec<_> = library.iter().map(|release| release.id).collect();
+    let configs = match crate::services::language_preferences::effective_configs(
+        &state.db, cfg, &ids,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(reason) => {
+            logger::warn(
+                &state.db,
+                LogCategory::Library,
+                "Wanted check held: release language settings unavailable",
+                &reason,
+            )
+            .await;
+            return Vec::new();
+        }
+    };
+    let observed = observe_library(state, &configs, library, disk).await;
+    let mut rows = Vec::new();
+    for release in library {
+        if let Some(cfg) = configs.get(&release.id) {
+            rows.extend(build_cutoff_rows(
+                cfg,
+                std::slice::from_ref(release),
+                disk,
+                tags,
+                &observed,
+            ));
+        }
+    }
+    rows.sort_by_key(|row| row.title.to_lowercase());
+    rows
 }
 
 #[derive(Deserialize, Default)]
@@ -336,8 +382,7 @@ async fn rows_for(
         let tags = episode_tags::get_for_all_series(&state.db)
             .await
             .unwrap_or_default();
-        let observed = observe_library(state, cfg, library, &disk).await;
-        build_cutoff_rows(cfg, library, &disk, &tags, &observed)
+        effective_cutoff_rows(state, cfg, library, &disk, &tags).await
     } else {
         let (aired, tag_rows, monitored) = tokio::join!(
             local_metadata::aired_episode_counts(&state.db),
@@ -375,8 +420,7 @@ async fn rows_for_series(
         .unwrap_or_default();
     if tab == "cutoff" {
         let tags_by_series = HashMap::from([(series.id, tags)]);
-        let observed = observe_library(state, cfg, library, &disk).await;
-        build_cutoff_rows(cfg, library, &disk, &tags_by_series, &observed)
+        effective_cutoff_rows(state, cfg, library, &disk, &tags_by_series).await
     } else {
         let (aired, monitored_eps) = tokio::join!(
             local_metadata::aired_episode_count(&state.db, series.id),
@@ -839,6 +883,7 @@ mod tests {
                         Observed {
                             resolution: Resolution::R1080p,
                             subtitles_satisfied: true,
+                            audio_satisfied: true,
                             duration_seconds: None,
                         },
                     ),
@@ -847,6 +892,7 @@ mod tests {
                         Observed {
                             resolution: Resolution::R1080p,
                             subtitles_satisfied: false,
+                            audio_satisfied: true,
                             duration_seconds: None,
                         },
                     ),
@@ -855,6 +901,7 @@ mod tests {
                         Observed {
                             resolution: Resolution::R720p,
                             subtitles_satisfied: true,
+                            audio_satisfied: true,
                             duration_seconds: None,
                         },
                     ),
@@ -867,6 +914,7 @@ mod tests {
                     Observed {
                         resolution: Resolution::R720p,
                         subtitles_satisfied: false,
+                        audio_satisfied: true,
                         duration_seconds: None,
                     },
                 )]),

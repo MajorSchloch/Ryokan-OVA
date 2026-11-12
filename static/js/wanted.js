@@ -332,6 +332,7 @@
         if (isBatch
             && previewMode !== 'never'
             && typeof window.openGrabPicker === 'function'
+            && result.protocol === 'torrent'
             && result.info_hash) {
             window.openGrabPicker(url, {
                 title: result.title || '',

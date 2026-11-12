@@ -634,6 +634,7 @@ impl Release {
         let resolution = extract_resolution_from_title(&self.title);
         let is_batch = detect_batch_from_title(&self.title);
         crate::services::rss::RssItem {
+            seeders: Some(self.seeders),
             title: self.title.clone(),
             link: self.link.clone(),
             guid: self.guid.clone(),

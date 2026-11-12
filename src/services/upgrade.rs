@@ -279,6 +279,9 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
         if !row.allow_upgrades {
             continue;
         }
+        let cfg = crate::services::language_preferences::effective_config(&state.db, &cfg, row.id)
+            .await?;
+        let requirements = RequirementsPolicy::from_config(&cfg);
 
         // Issue #102 — the tracked snapshot was pulled at the top of
         // the sweep; a series removed mid-iteration would still be
@@ -457,6 +460,18 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             let Some(result) = best else {
                 continue;
             };
+            let availability =
+                crate::services::release_availability::Policy::load(&cfg, &state.indexers).await;
+            if let Err(reason) = availability.check_result(&result) {
+                logger::info(
+                    &state.db,
+                    LogCategory::AutoSearch,
+                    "Upgrade held: torrent availability",
+                    &reason,
+                )
+                .await;
+                continue;
+            }
 
             // Issue #28 — PT upgrade gate. When a user hasn't
             // opted this series in to PT-sourced upgrades and the
@@ -602,29 +617,32 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 .await;
                 continue;
             }
-            match client
-                .add_torrent_returning_id(&url, &result.info_hash)
-                .await
+            let mut prepared_bound = None;
+            let dispatch = if let Some(mapping) = result
+                .release_mapping
+                .as_ref()
+                .filter(|mapping| mapping.bound_source().is_some())
             {
-                Ok((_outcome, canonical_id)) => {
-                    total_upgrades_grabbed += 1;
-                    logger::info(
-                        &state.db,
-                        LogCategory::Grab,
-                        &format!("Upgrade grabbed: {}", result.title),
-                        &format!(
-                            "series={}, target={}, group={}, tier={}{}",
-                            title,
-                            label,
-                            result.group,
-                            incoming_classification.label(),
-                            crate::services::auto_search::MatchProvenance::log_suffix(
-                                result.match_provenance.as_ref()
-                            )
-                        ),
-                    )
-                    .await;
-
+                crate::services::source_numbering_grab::add_bound(
+                    client.as_ref(),
+                    &url,
+                    &result.info_hash,
+                    mapping,
+                )
+                .await
+                .map(|prepared| {
+                    let id = prepared.info_hash.clone();
+                    prepared_bound = Some(prepared);
+                    id
+                })
+            } else {
+                client
+                    .add_torrent_returning_id(&url, &result.info_hash)
+                    .await
+                    .map(|(_, id)| id)
+            };
+            match dispatch {
+                Ok(canonical_id) => {
                     // Record for post-processing and quality tags.
                     let mut ep_nums: Vec<i32> = match &target {
                         auto_search::SearchTarget::Episode(n) => vec![*n],
@@ -678,6 +696,45 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                             continue;
                         }
                     };
+                    if let Some(prepared) = &prepared_bound {
+                        if prepared.newly_added && saved.is_none() {
+                            logger::error(
+                                &state.db,
+                                LogCategory::Grab,
+                                "Upgrade held: source decision was not saved",
+                                "New torrent remains paused",
+                            )
+                            .await;
+                            continue;
+                        }
+                        if let Err(reason) = prepared.resume_after_record(client.as_ref()).await {
+                            logger::error(
+                                &state.db,
+                                LogCategory::Grab,
+                                "Upgrade held after source decision was saved",
+                                &reason,
+                            )
+                            .await;
+                            continue;
+                        }
+                    }
+                    total_upgrades_grabbed += 1;
+                    logger::info(
+                        &state.db,
+                        LogCategory::Grab,
+                        &format!("Upgrade grabbed: {}", result.title),
+                        &format!(
+                            "series={}, target={}, group={}, tier={}{}",
+                            title,
+                            label,
+                            result.group,
+                            incoming_classification.label(),
+                            crate::services::auto_search::MatchProvenance::log_suffix(
+                                result.match_provenance.as_ref()
+                            )
+                        ),
+                    )
+                    .await;
                     let grab_id = saved.as_ref().map(|s| s.id);
                     let replayed = saved.as_ref().is_some_and(|s| s.replayed);
                     let ep_nums = saved.map(|s| s.episodes).unwrap_or_default();

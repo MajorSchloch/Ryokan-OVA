@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %} - Review episode numbering{% endblock %}
+{% block content %}
+<div class="cf-section">
+    <a class="btn btn-secondary btn-sm" href="{{ back_url }}">Back to release</a>
+    <h1>Review episode numbering</h1>
+    <p>{{ title }}</p>
+    <p class="cf-section-desc">Choose which release the source starts counting from. Ryokan checks the published files against verified episode ranges. This decision applies to this exact torrent.</p>
+
+    {% if !message.is_empty() %}<div class="alert {% if saved %}alert-success{% else %}alert-warn{% endif %}" role="status">{{ message }}</div>{% endif %}
+
+    {% if !choices.is_empty() %}
+    <form method="get" action="/api/library/series/{{ series_id }}/numbering-review">
+        <input type="hidden" name="link" value="{{ link }}">
+        <input type="hidden" name="hash" value="{{ hash }}">
+        <div class="form-group">
+            <label for="numbering-root">Numbering starts with</label>
+            <select id="numbering-root" name="root">
+                {% for choice in choices %}<option value="{{ choice.root_anilist_id }}" {% if choice.root_anilist_id == selected_root %}selected{% endif %}>{{ choice.title }}</option>{% endfor %}
+            </select>
+            <p class="form-hint">Use the source's numbering convention. The episode you want does not determine the rule.</p>
+        </div>
+        <button class="btn btn-secondary" type="submit">Preview numbering</button>
+    </form>
+    {% endif %}
+</div>
+
+{% if let Some(preview) = preview %}
+<div class="cf-section">
+    <h2>Proposed episode assignments</h2>
+    <p>{{ source_title }}</p>
+    <p class="form-hint">{{ eligible_count }} files belong to {{ preview.target_title }}. Other releases and unverified files are excluded.</p>
+    <div class="rss-table-wrap">
+    <table class="rss-table">
+        <thead><tr><th>Published file</th><th>Source episode</th><th>This release</th><th>Result</th></tr></thead>
+        <tbody>
+        {% for file in preview.files %}
+        <tr>
+            <td style="overflow-wrap:anywhere">{{ file.name }}</td>
+            <td>{% if let Some(first) = file.source_first %}{{ first }}{% if let Some(last) = file.source_last %}{% if last != first %} to {{ last }}{% endif %}{% endif %}{% else %}Not identified{% endif %}</td>
+            <td>{% if file.eligible %}{% if let Some(first) = file.target_first %}{{ first }}{% if let Some(last) = file.target_last %}{% if last != first %} to {{ last }}{% endif %}{% endif %}{% endif %}{% else %}Excluded{% endif %}</td>
+            <td>{% if file.eligible %}<span class="tag">Included</span>{% else %}{{ file.reason }}{% endif %}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+    {% if eligible_count > 0 && !saved %}
+    <form method="post" action="/api/library/series/{{ series_id }}/numbering-review">
+        <input type="hidden" name="link" value="{{ link }}">
+        <input type="hidden" name="hash" value="{{ hash }}">
+        <input type="hidden" name="root" value="{{ selected_root }}">
+        <input type="hidden" name="fingerprint" value="{{ preview.fingerprint }}">
+        <p class="form-hint">Saving keeps these assignments for this source. Files and download jobs are unchanged.</p>
+        <button class="btn btn-primary" type="submit">Use this numbering</button>
+    </form>
+    {% endif %}
+</div>
+{% endif %}
+{% endblock %}

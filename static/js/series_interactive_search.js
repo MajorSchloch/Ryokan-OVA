@@ -91,6 +91,7 @@ function grabInteractiveResult(epNum, btn) {
     if (result.is_batch
         && previewMode !== 'never'
         && typeof window.openGrabPicker === 'function'
+        && result.protocol === 'torrent'
         && result.info_hash) {
         window.openGrabPicker(url, {
             title: result.title || '',
@@ -213,6 +214,7 @@ function grabInteractiveBatchResult(btn) {
     const previewMode = window.GRAB_PREVIEW_MODE || 'batches_only';
     if (previewMode !== 'never'
         && typeof window.openGrabPicker === 'function'
+        && result.protocol === 'torrent'
         && result.info_hash) {
         window.openGrabPicker(url, {
             title: result.title || '',

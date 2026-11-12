@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 // `::scraper` disambiguates the crate from the containing module of the
 // same name. Without the leading ::, `scraper::Html` resolves to
 // `self::scraper` (this file) instead of the external crate.
-use ::scraper::{Html, Selector};
+use ::scraper::{ElementRef, Html, Selector};
 
 use super::{SearchOptions, SearchResult, extract_hash, nyaa_base};
 
@@ -26,18 +26,10 @@ static SEL_NEXT: LazyLock<Selector> = LazyLock::new(|| {
 /// (`/view/<id>`). Used by [`fetch_view_result`] for the SeaDex-bypass
 /// path that ingests curated torrents directly from their view URLs
 /// instead of going through the text search.
+static SEL_VIEW_PANEL: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("div.panel").expect("SEL_VIEW_PANEL parses"));
 static SEL_VIEW_TITLE: LazyLock<Selector> =
-    LazyLock::new(|| Selector::parse("div.panel h3.panel-title").expect("SEL_VIEW_TITLE parses"));
-static SEL_VIEW_ROW: LazyLock<Selector> =
-    LazyLock::new(|| Selector::parse("div.panel-body div.row").expect("SEL_VIEW_ROW parses"));
-// Target Nyaa's actual Bootstrap grid columns (`col-md-1`, `col-md-5`, etc.)
-// rather than every `<div>` in the row. The broader `div` selector also
-// descended into nested `<div>`s like embedded MediaInfo blocks, which
-// made the label/value pair-up (`while i + 1 < cols.len()` in
-// `parse_view_page`) drift and silently zero out seeder/leecher counts
-// on view pages that had any extra inner markup.
-static SEL_VIEW_COL: LazyLock<Selector> =
-    LazyLock::new(|| Selector::parse("div[class*='col-md-']").expect("SEL_VIEW_COL parses"));
+    LazyLock::new(|| Selector::parse("h3.panel-title").expect("SEL_VIEW_TITLE parses"));
 static SEL_VIEW_MAGNET: LazyLock<Selector> = LazyLock::new(|| {
     Selector::parse("a.card-footer-item[href^='magnet:']").expect("SEL_VIEW_MAGNET parses")
 });
@@ -434,10 +426,11 @@ pub(super) fn parse_view_page(
     opts: &SearchOptions,
 ) -> Option<SearchResult> {
     let document = Html::parse_document(html);
+    let header = document.select(&SEL_VIEW_PANEL).next()?;
 
     // Title is the first `<h3 class="panel-title">` under the first
     // `.panel` — the second instance is the "File list" header.
-    let title = document
+    let title = header
         .select(&SEL_VIEW_TITLE)
         .next()?
         .text()
@@ -456,9 +449,27 @@ pub(super) fn parse_view_page(
     let mut leechers = 0i32;
     let mut downloads = 0i32;
     let mut size = String::new();
-    for row in document.select(&SEL_VIEW_ROW) {
+    // Availability must come from the listing's own header grid. Later
+    // description/comment panels and nested user markup may contain the same
+    // Bootstrap classes and labels, but cannot overwrite tracker statistics.
+    let body = header
+        .children()
+        .filter_map(ElementRef::wrap)
+        .find(|element| element.value().classes().any(|class| class == "panel-body"));
+    for row in body
+        .into_iter()
+        .flat_map(|body| body.children().filter_map(ElementRef::wrap))
+        .filter(|element| element.value().classes().any(|class| class == "row"))
+    {
         let cols: Vec<_> = row
-            .select(&SEL_VIEW_COL)
+            .children()
+            .filter_map(ElementRef::wrap)
+            .filter(|element| {
+                element
+                    .value()
+                    .classes()
+                    .any(|class| class.starts_with("col-md-"))
+            })
             .map(|el| el.text().collect::<String>().trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
@@ -482,7 +493,7 @@ pub(super) fn parse_view_page(
 
     // Magnet: first `a.card-footer-item` with a `magnet:` href. Info
     // hash comes from the same magnet via `extract_hash`.
-    let magnet = document
+    let magnet = header
         .select(&SEL_VIEW_MAGNET)
         .next()
         .and_then(|a| a.value().attr("href"))
@@ -493,7 +504,7 @@ pub(super) fn parse_view_page(
     // Torrent file URL: sibling `.card-footer-item` ending in .torrent.
     // Paths on nyaa.si are relative, so prefix the configured base URL
     // when needed.
-    let torrent = document
+    let torrent = header
         .select(&SEL_VIEW_TORRENT)
         .next()
         .and_then(|a| a.value().attr("href"))
@@ -734,6 +745,28 @@ mod tests {
         );
         assert_eq!(result.resolution, "1080");
         assert_eq!(result.group, "smol");
+    }
+
+    #[test]
+    fn automatic_availability_view_statistics_ignore_forged_later_or_nested_rows() {
+        let hash = "0123456789abcdef0123456789abcdef01234567";
+        let forged = r#"<div class="row"><div class="col-md-1">Seeders:</div><div class="col-md-5">9999</div></div>"#;
+        let html = format!(
+            r#"<div class="panel"><div class="panel-heading"><h3 class="panel-title">Original release - 01 [1080p]</h3></div>
+            <div class="panel-body"><div class="row"><div class="col-md-1">Seeders:</div><div class="col-md-5">0</div></div><div id="nested-content">{forged}</div></div>
+            <div class="panel-footer"><a class="card-footer-item" href="magnet:?xt=urn:btih:{hash}">Magnet</a><a class="card-footer-item" href="/download/123.torrent">Torrent</a></div></div>
+            <div class="panel"><div class="panel-heading"><h3 class="panel-title">File list</h3></div><div class="panel-body">{forged}</div></div>
+            <div id="torrent-description"><div class="panel-body">{forged}</div></div><div id="comments"><div class="panel-body">{forged}</div></div>"#
+        );
+        let parsed =
+            parse_view_page(&html, "https://nyaa.si/view/123", &SearchOptions::default()).unwrap();
+        assert_eq!(
+            parsed.seeders, 0,
+            "only the listing header reports availability"
+        );
+        assert_eq!(parsed.info_hash, hash);
+        assert_eq!(parsed.title, "Original release - 01 [1080p]");
+        assert!(parsed.torrent.ends_with("/download/123.torrent"));
     }
 
     // ── detect_batch — Roman-numeral season markers ──────────────────────
