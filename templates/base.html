@@ -335,9 +335,9 @@
        plus the page_lifecycle helper (mount/unmount per-page polling
        on every boosted swap). All `defer`'d so they evaluate after
        the body parses but in source order — load chain: htmx core →
-       page_lifecycle → base.js. base.js references `window.htmx` from
+       page_lifecycle → base.js → interactive_search.js. base.js references `window.htmx` from
        its `[data-ts]` refresh hook and from the `htmx:confirm` bridge
-       for form-confirm interception, so it must load last.
+       for form-confirm interception, so htmx must load first.
 
        Body-wide `hx-boost:inherited="true"` (see `<body>` above)
        means every plain `<a>` and `<form>` runs through htmx by
@@ -346,6 +346,7 @@
     <script src="/static/vendor/htmx-4.0.0.min.js?v={{ crate::asset_version() }}" defer></script>
     <script src="/static/js/page_lifecycle.js?v={{ crate::asset_version() }}" defer></script>
     <script src="/static/js/base.js?v={{ crate::asset_version() }}" defer></script>
+    <script src="/static/js/interactive_search.js?v={{ crate::asset_version() }}" defer></script>
     {# Per-page scripts must load AFTER `page_lifecycle.js` + `base.js`
        because they call `window.ryokanRegisterPageInit`,
        `window.ryokanProgressToast`, `window.ryokanToast`, etc. defined

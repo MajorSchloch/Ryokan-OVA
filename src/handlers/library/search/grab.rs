@@ -757,6 +757,9 @@ mod bound_source_tests {
             panic!("a reviewed source cannot use the legacy optional filter")
         }
         async fn add_torrent_paused(&self, _: &str, _: &str) -> Result<AddOutcome, String> {
+            panic!("a reviewed source must use metadata-only preparation")
+        }
+        async fn add_torrent_metadata_only(&self, _: &str) -> Result<AddOutcome, String> {
             Ok(AddOutcome::Added)
         }
         async fn list_scoped(&self) -> Result<Vec<DownloadItem>, String> {

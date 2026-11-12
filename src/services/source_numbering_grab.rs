@@ -87,7 +87,6 @@ pub(crate) async fn add_bound(
     // Reviews currently originate from public Nyaa listings. A canonical
     // magnet binds the client's actual add to the reviewed hash even when an
     // indexer supplied an HTTP download URL that later redirects or changes.
-    let bound_url = format!("magnet:?xt=urn:btih:{}", proof.info_hash);
     let already_present = client
         .list_scoped()
         .await?
@@ -108,7 +107,7 @@ pub(crate) async fn add_bound(
             mapping: mapping.clone(),
         });
     }
-    match client.add_torrent_paused(&bound_url, info_hash).await? {
+    match client.add_torrent_metadata_only(info_hash).await? {
         AddOutcome::AlreadyPresent => {
             // The scoped list may miss another category or a concurrent add.
             // Never pause, reselect, or resume a job we did not create.
@@ -124,8 +123,9 @@ pub(crate) async fn add_bound(
         }
         AddOutcome::Added => {}
     }
-    // The existing paused-add methods may need to start metadata discovery.
-    // Stop the new job before inspecting or changing any file priorities.
+    // The strict native method returns only after metadata is ready and the
+    // new job is stopped. Verify stop control before changing priorities;
+    // a legacy paused-add or whole-download fallback is never permitted.
     let stopped = client.pause(info_hash).await;
     let validated = async {
         stopped?;

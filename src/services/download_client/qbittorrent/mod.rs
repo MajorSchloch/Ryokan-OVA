@@ -28,6 +28,7 @@
 //!     present in the session. See the comment on `add_torrent`.
 
 use async_trait::async_trait;
+mod metadata_only;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -527,6 +528,10 @@ impl DownloadClient for QbitClient {
         }
 
         Ok(outcome)
+    }
+
+    async fn add_torrent_metadata_only(&self, info_hash: &str) -> Result<AddOutcome, String> {
+        self.prepare_reviewed_metadata(info_hash).await
     }
 
     /// Add a torrent, wait for metadata, invoke `pick`, and mark the
