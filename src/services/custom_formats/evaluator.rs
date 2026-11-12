@@ -193,6 +193,7 @@ pub fn total_cf_score_for_release(
         score: 0,
         score_breakdown: Vec::new(),
         upload_date: String::new(),
+        published_at: None,
         indexer_id: None,
         indexer_name: String::new(),
     };

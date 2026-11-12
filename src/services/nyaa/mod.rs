@@ -173,6 +173,10 @@ pub struct SearchResult {
     /// table matches Nyaa's own listing shape.
     #[serde(default)]
     pub upload_date: String,
+    /// Known publication time as a Unix timestamp. Unknown dates stay absent;
+    /// the display string is not a substitute for this typed source fact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<i64>,
     /// Issue #28 — FK to `indexers.id` of the indexer that
     /// surfaced this release. `None` for Nyaa-direct results (the
     /// existing behavior; Nyaa stays out-of-band per plan

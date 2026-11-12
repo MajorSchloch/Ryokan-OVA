@@ -344,6 +344,12 @@ pub(super) fn parse_feed(xml: &str, source: RssSource) -> Vec<RssItem> {
         let is_batch = detect_batch(&title);
 
         items.push(RssItem {
+            published_at: chrono::DateTime::parse_from_rfc2822(
+                decode_xml(&extract_tag(block, "pubDate")).trim(),
+            )
+            .ok()
+            .map(|date| date.timestamp())
+            .filter(|timestamp| *timestamp > 0),
             seeders: extract_tag(block, "nyaa:seeders")
                 .trim()
                 .parse::<i32>()
@@ -377,6 +383,7 @@ static RE_EXTRACT_TAGS: LazyLock<HashMap<&'static str, Regex>> = LazyLock::new(|
         "title",
         "link",
         "guid",
+        "pubDate",
         "nyaa:downloadurl",
         "nyaa:magneturi",
         "nyaa:infohash",
@@ -700,6 +707,43 @@ mod parser_tests {
     use super::*;
 
     #[test]
+    fn publication_date_rss_parses_2019_rfc2822_time_and_timezone() {
+        for date in [
+            "Tue, 01 Jan 2019 00:00:00 +0000",
+            "Tue, 01 Jan 2019 05:00:00 +0500",
+        ] {
+            let xml =
+                format!("<item><title>Black Clover - 01</title><pubDate>{date}</pubDate></item>");
+            for source in [
+                RssSource::Nyaa,
+                RssSource::UserFeed {
+                    id: 1,
+                    name: "Fixture".into(),
+                },
+            ] {
+                let items = parse_feed(&xml, source);
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].published_at, Some(1_546_300_800), "{date}");
+            }
+        }
+    }
+
+    #[test]
+    fn publication_date_rss_absent_invalid_or_nonpositive_time_is_unknown() {
+        for tag in [
+            "",
+            "<pubDate>invalid</pubDate>",
+            "<pubDate>Thu, 01 Jan 1970 00:00:00 +0000</pubDate>",
+            "<pubDate>Wed, 31 Dec 1969 23:59:59 +0000</pubDate>",
+        ] {
+            let xml = format!("<item><title>Show - 01</title>{tag}</item>");
+            let items = parse_feed(&xml, RssSource::Nyaa);
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].published_at, None, "{tag}");
+        }
+    }
+
+    #[test]
     fn automatic_availability_feed_distinguishes_zero_missing_and_positive_seeders() {
         for (tag, expected) in [
             ("<nyaa:seeders>0</nyaa:seeders>", Some(0)),
@@ -945,6 +989,7 @@ mod parser_tests {
 
     fn make_item(info_hash: &str, guid: &str, link: &str, title: &str) -> RssItem {
         RssItem {
+            published_at: None,
             seeders: None,
             title: title.into(),
             link: link.into(),
