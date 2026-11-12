@@ -719,6 +719,7 @@ mod tests {
         // keys off this — a regression here silently breaks the
         // SAB-vs-BT routing.
         let mk = |magnet: &str, link: &str, torrent: &str| crate::services::rss::RssItem {
+            published_at: None,
             seeders: None,
             title: "x".into(),
             link: link.into(),

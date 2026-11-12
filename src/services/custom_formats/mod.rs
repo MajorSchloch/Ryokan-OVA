@@ -232,6 +232,7 @@ pub(super) mod test_helpers {
             info_hash: info_hash.to_string(),
             score_breakdown: Vec::new(),
             upload_date: String::new(),
+            published_at: None,
             indexer_id: None,
             indexer_name: String::new(),
         }

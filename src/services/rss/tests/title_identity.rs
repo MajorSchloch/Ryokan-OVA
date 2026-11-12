@@ -33,6 +33,7 @@ fn series_with(id: i64, romaji: &str, english: &str, total: i32, offset: i32) ->
 
 fn item(title: &str) -> RssItem {
     RssItem {
+        published_at: None,
         seeders: None,
         title: title.into(),
         link: String::new(),
