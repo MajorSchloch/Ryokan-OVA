@@ -151,7 +151,8 @@ const SELECT_COLUMNS: &str = "preview_id, info_hash, client_kind, indexer_id, se
 /// row, its heartbeat went unanswered, and the walkaway sweep committed
 /// it with every file wanted, overriding the subset the user picked.
 /// `we_added_torrent` starts false and is set by [`finish_add`] once
-/// the add has answered.
+/// the add has answered. `start_unselected` atomically records an empty
+/// selection before client work, including when metadata arrives after close.
 #[allow(clippy::too_many_arguments)]
 pub async fn reserve(
     db: &SqlitePool,
@@ -162,6 +163,7 @@ pub async fn reserve(
     series_id: Option<i64>,
     release_metadata_json: &str,
     download_client_id: Option<i64>,
+    start_unselected: bool,
 ) -> Result<bool, String> {
     let now = now_unix();
     let res = sqlx::query(
@@ -169,7 +171,7 @@ pub async fn reserve(
          (preview_id, info_hash, client_kind, indexer_id, series_id, \
           created_at, heartbeat_at, file_list_json, release_metadata_json, \
           error_message, we_added_torrent, download_client_id, wanted_indices_json) \
-         SELECT ?, ?, ?, ?, ?, ?, ?, '', ?, '', 0, ?, '' \
+         SELECT ?, ?, ?, ?, ?, ?, ?, '', ?, '', 0, ?, ? \
           WHERE NOT EXISTS (SELECT 1 FROM pending_grabs \
                              WHERE info_hash = ? AND error_message = '')",
     )
@@ -182,6 +184,7 @@ pub async fn reserve(
     .bind(now)
     .bind(release_metadata_json)
     .bind(download_client_id)
+    .bind(if start_unselected { "[]" } else { "" })
     .bind(info_hash)
     .execute(db)
     .await
@@ -381,15 +384,58 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn explicit_selection_is_empty_before_metadata_and_stays_empty_when_files_arrive() {
+        let db = crate::test_support::in_memory_pool().await;
+        assert!(
+            reserve(
+                &db,
+                "explicit",
+                &"a".repeat(40),
+                "qbittorrent",
+                None,
+                None,
+                "{}",
+                Some(1),
+                true
+            )
+            .await
+            .unwrap()
+        );
+        let before = get(&db, "explicit").await.unwrap().unwrap();
+        assert!(before.file_list_json.is_empty());
+        assert_eq!(wanted_indices(&before), Some(Vec::new()));
+        set_file_list(
+            &db,
+            "explicit",
+            r#"[{"name":"Show - 01.mkv","size":100,"episodes":[1]}]"#,
+        )
+        .await
+        .unwrap();
+        let ready = get(&db, "explicit").await.unwrap().unwrap();
+        assert!(!ready.file_list_json.is_empty());
+        assert_eq!(wanted_indices(&ready), Some(Vec::new()));
+    }
+
+    #[tokio::test]
     async fn only_one_preview_reserves_a_hash_at_a_time() {
         let db = crate::test_support::in_memory_pool().await;
         let hash = "aabbccddeeff00112233445566778899aabbccdd";
         let reserve_as = |id: &'static str| {
             let db = db.clone();
             async move {
-                reserve(&db, id, hash, "qbittorrent", None, None, "{}", Some(1))
-                    .await
-                    .unwrap()
+                reserve(
+                    &db,
+                    id,
+                    hash,
+                    "qbittorrent",
+                    None,
+                    None,
+                    "{}",
+                    Some(1),
+                    false,
+                )
+                .await
+                .unwrap()
             }
         };
         assert!(reserve_as("first").await);

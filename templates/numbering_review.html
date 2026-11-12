@@ -45,6 +45,12 @@
         </tbody>
     </table>
     </div>
+    {% if saved %}
+    <p class="form-hint">No files start selected. Choose the episode files you want, then confirm them in the file picker.</p>
+    <button type="button" class="btn btn-primary" data-numbering-choose-files
+        data-series-id="{{ series_id }}" data-info-hash="{{ hash }}" data-source-title="{{ source_title }}"
+        onclick="chooseReviewedSourceFiles(this)">Choose files</button>
+    {% endif %}
     {% if eligible_count > 0 && !saved %}
     <form method="post" action="/api/library/series/{{ series_id }}/numbering-review">
         <input type="hidden" name="link" value="{{ link }}">
@@ -57,4 +63,9 @@
     {% endif %}
 </div>
 {% endif %}
+{% include "partials/grab_picker_modal.html" %}
+{% endblock %}
+{% block page_js %}
+<script src="/static/js/grab_picker.js?v={{ crate::asset_version() }}" defer></script>
+<script src="/static/js/numbering_review.js?v={{ crate::asset_version() }}" defer></script>
 {% endblock %}
