@@ -57,6 +57,17 @@ Do not reintroduce a single shared global remote-path mapping.
 
 ## Selective downloads — two flows
 
+**Reviewed exact sources require a separate strict contract:**
+`add_torrent_metadata_only(info_hash)` must prevent payload requests natively
+and return a new job stopped with metadata ready. Initially only stable
+qBittorrent 5.x with Web API v2.11+ implements this, using the native
+`stopCondition=MetadataReceived` barrier and the fixed already-known-metadata
+behavior. Other clients return an unsupported error before adding anything.
+Neither the legacy paused-add nor optional selection is a fallback. Reviewed
+picker previews resolve their saved source decision before adding; read errors
+hold the preview. Existing client jobs keep their state and selection. Legacy
+unreviewed pickers and their supported clients retain the flow below.
+
 There are two ways to add a torrent and pick a subset of files. Don't conflate them.
 
 **1. Automated (callback): `add_torrent_with_file_filter`.** Pauses the torrent, waits for metadata, runs the caller's `pick` closure over the file names, sets non-picked files to skip, resumes. Used from auto-search's batch-with-selective branch and `library/search/grab.rs`. **10s** metadata ceiling (the user is waiting). Each impl handles its own wait-and-narrow loop and **must be idempotent on retry**: read each file's `wanted` flag back before changing it so a re-narrow doesn't clobber user edits. The `pick` callback is `&mut dyn FnMut` to keep the trait object-safe.

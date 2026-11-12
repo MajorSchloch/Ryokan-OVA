@@ -345,6 +345,29 @@ pub async fn grab_preview(
         "Download client not configured".to_string(),
     ))?;
     let client_kind = client.sonarr_impl_name().to_string();
+    // Resolve a saved review before choosing an add contract. A failed lookup
+    // must not downgrade a reviewed source into the legacy optional picker.
+    let owner = if let Some(series_id) = form.series_id {
+        crate::models::series::get_by_id(&state.db, series_id)
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Could not verify the release for this preview.".to_string(),
+                )
+            })?
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "Release not found.".to_string()))?
+            .anilist_id
+    } else {
+        // A reviewed hash without its owner must also hold, rather than
+        // becoming an unattributed whole-pack download from global search.
+        0
+    };
+    let reviewed_source =
+        crate::models::source_numbering::lookup_exact(&state.db, &info_hash, owner)
+            .await
+            .map_err(|reason| (StatusCode::CONFLICT, reason))?
+            .is_some();
     let mut metadata = form.release_metadata.clone();
     if !metadata.is_object() {
         metadata = serde_json::json!({});
@@ -389,13 +412,25 @@ pub async fn grab_preview(
             )),
         };
     }
-    let outcome = match client.add_torrent_paused(&form.url, &info_hash).await {
+    let added = if reviewed_source {
+        client.add_torrent_metadata_only(&info_hash).await
+    } else {
+        client.add_torrent_paused(&form.url, &info_hash).await
+    };
+    let outcome = match added {
         Ok(v) => v,
         Err(e) => {
             let _ = pending_grabs::delete(&state.db, &preview_id).await;
             return Err((StatusCode::INTERNAL_SERVER_ERROR, e));
         }
     };
+    if reviewed_source && outcome == AddOutcome::AlreadyPresent {
+        let _ = pending_grabs::delete(&state.db, &preview_id).await;
+        return Err((
+            StatusCode::CONFLICT,
+            "This reviewed source already exists in the download client. Its files, selection and stopped state were preserved; no new preview took ownership.".into(),
+        ));
+    }
     let we_added = matches!(outcome, AddOutcome::Added);
     let row_kept = pending_grabs::finish_add(&state.db, &preview_id, we_added)
         .await
@@ -1060,6 +1095,10 @@ pub async fn grab_cancel(
 
     Ok(Json(serde_json::json!({"ok": true})))
 }
+
+#[cfg(test)]
+#[path = "grab_reviewed_preview_tests.rs"]
+mod reviewed_preview_tests;
 
 #[cfg(test)]
 #[path = "grab_bound_tests.rs"]

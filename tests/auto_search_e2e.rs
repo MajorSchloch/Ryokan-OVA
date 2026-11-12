@@ -997,6 +997,16 @@ impl DownloadClient for AutoSearchRecordingClient {
     async fn test(&self) -> Result<String, String> {
         Ok("mock".into())
     }
+    async fn add_torrent_metadata_only(&self, hash: &str) -> Result<AddOutcome, String> {
+        if !self
+            .supports_selection
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err("fixture has no native metadata-only support".into());
+        }
+        self.add_torrent(&format!("magnet:?xt=urn:btih:{hash}"), hash)
+            .await
+    }
     async fn add_torrent(&self, url: &str, info_hash: &str) -> Result<AddOutcome, String> {
         self.add_calls
             .lock()
