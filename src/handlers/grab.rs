@@ -371,7 +371,7 @@ pub async fn grab_preview(
         0
     };
     let reviewed_source =
-        crate::models::source_numbering::lookup_exact(&state.db, &info_hash, owner)
+        crate::services::release_numbering::bound_mapping_for_source(&state.db, &info_hash, owner)
             .await
             .map_err(|reason| (StatusCode::CONFLICT, reason))?
             .is_some();
