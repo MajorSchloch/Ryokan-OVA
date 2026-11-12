@@ -305,6 +305,20 @@ pub fn offset_for(anilist_id: i64, mal_id: Option<i64>) -> Option<Offset> {
     INDEX.lookup(anilist_id, mal_id)
 }
 
+/// Roots with a curated redirect need source evidence when a release omits
+/// an explicit season. A missing cache must not restore a heuristic fallback.
+pub fn has_source_namespace(anilist_id: i64) -> bool {
+    static ROOTS: LazyLock<HashSet<i64>> = LazyLock::new(|| {
+        parse(RULES_TEXT)
+            .rules
+            .into_iter()
+            .filter(|rule| rule.src_range.start > 0 && rule.dst_range.start > 0)
+            .filter_map(|rule| rule.src.anilist)
+            .collect()
+    });
+    ROOTS.contains(&anilist_id)
+}
+
 /// Complete finite redirects from one explicit AniList source namespace.
 /// This is separate from the legacy maximum-offset index. Unknown/open or
 /// unequal ranges cannot establish a finite source-numbering decision.

@@ -25,6 +25,9 @@ pub enum MatchKind {
     SeadexCurated,
     /// A saved source-file decision identifies this entry.
     ReviewedSource,
+    /// A unique finite source proof was verified automatically, without
+    /// asserting human review or approval.
+    AutomaticSource,
 }
 
 impl MatchKind {
@@ -34,6 +37,7 @@ impl MatchKind {
             MatchKind::Fuzzy => "fuzzy",
             MatchKind::SeadexCurated => "seadex_curated",
             MatchKind::ReviewedSource => "reviewed_source",
+            MatchKind::AutomaticSource => "automatic_source",
         }
     }
 
@@ -43,6 +47,7 @@ impl MatchKind {
             "fuzzy" => Some(MatchKind::Fuzzy),
             "seadex_curated" => Some(MatchKind::SeadexCurated),
             "reviewed_source" => Some(MatchKind::ReviewedSource),
+            "automatic_source" => Some(MatchKind::AutomaticSource),
             _ => None,
         }
     }
@@ -143,6 +148,15 @@ pub struct MatchProvenance {
 }
 
 impl MatchProvenance {
+    pub fn automatic_source(phase: MatchPhase) -> Self {
+        Self {
+            phase,
+            kind: MatchKind::AutomaticSource,
+            alias: String::new(),
+            ratio: 1.0,
+        }
+    }
+
     pub fn reviewed_source(phase: MatchPhase) -> Self {
         Self {
             phase,
@@ -215,6 +229,9 @@ pub fn history_summary(kind: &str, phase: &str, alias: &str, ratio: f64) -> Stri
         ),
         MatchKind::SeadexCurated => format!("SeaDex curated release ({})", phase_name),
         MatchKind::ReviewedSource => format!("Reviewed source files ({})", phase_name),
+        MatchKind::AutomaticSource => {
+            format!("Automatically verified source files ({})", phase_name)
+        }
     }
 }
 
@@ -222,11 +239,12 @@ pub fn history_summary(kind: &str, phase: &str, alias: &str, ratio: f64) -> Stri
 mod tests {
     use super::*;
 
-    const KINDS: [MatchKind; 4] = [
+    const KINDS: [MatchKind; 5] = [
         MatchKind::Verbatim,
         MatchKind::Fuzzy,
         MatchKind::SeadexCurated,
         MatchKind::ReviewedSource,
+        MatchKind::AutomaticSource,
     ];
     const PHASES: [MatchPhase; 7] = [
         MatchPhase::Primary,
@@ -303,6 +321,33 @@ mod tests {
         assert_eq!(
             history_summary("verbatim", "garbage", "X", 1.0),
             "Verbatim alias match: \"X\" (unknown pass)"
+        );
+    }
+
+    #[test]
+    fn automatic_source_is_distinct_from_human_review_in_json_and_history() {
+        let automatic = MatchProvenance::automatic_source(MatchPhase::Primary);
+        assert_eq!(automatic.kind, MatchKind::AutomaticSource);
+        assert!(automatic.alias.is_empty());
+        assert_eq!(automatic.ratio, 1.0);
+        assert_eq!(
+            automatic.summary(),
+            "Automatically verified source files (primary pass)"
+        );
+        assert!(
+            automatic
+                .log_fragment()
+                .starts_with("match=automatic_source ")
+        );
+        let json = serde_json::to_value(&automatic).unwrap();
+        assert_eq!(json["kind"], "automatic_source");
+        assert_eq!(
+            serde_json::from_value::<MatchProvenance>(json).unwrap(),
+            automatic
+        );
+        assert_eq!(
+            MatchProvenance::reviewed_source(MatchPhase::Primary).kind,
+            MatchKind::ReviewedSource
         );
     }
 

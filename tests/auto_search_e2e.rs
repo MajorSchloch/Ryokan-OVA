@@ -21,6 +21,10 @@ use tokio::sync::Mutex;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[path = "auto_search_e2e/automatic_numbering_compat.rs"]
+mod automatic_numbering_compat;
+#[path = "auto_search_e2e/automatic_source_numbering.rs"]
+mod automatic_source_numbering;
 #[path = "auto_search_e2e/unmarked_packs.rs"]
 mod unmarked_packs;
 

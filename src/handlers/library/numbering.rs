@@ -182,9 +182,16 @@ async fn page(
                 .collect();
             if let Ok(proof) = preview.confirm(&selected) {
                 match saved {
-                    Ok(Some(saved)) if saved.proof == proof => {
-                        result.saved = true;
-                        result.message = "Numbering saved for this exact source. Choose files to download for this release.".into();
+                    Ok(Some(saved)) if saved.proof.same_geometry(&proof) => {
+                        match source_numbering::loader::refresh(&state.db,&saved.proof).await {
+                            Ok(()) => {
+                                result.saved = true;
+                                result.message = if saved.proof.origin() == Ok(source_numbering::ProofOrigin::AutomaticUnique) {
+                                    "Numbering verified automatically for this exact source. Choose files to download for this release."
+                                } else { "Numbering saved for this exact source. Choose files to download for this release." }.into();
+                            }
+                            Err(reason) => result.message = reason,
+                        }
                     }
                     Ok(Some(_)) => result.message = "The current source or numbering rules differ from the saved review. File selection stays unavailable.".into(),
                     Err(reason) => result.message = reason,

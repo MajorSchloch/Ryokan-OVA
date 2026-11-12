@@ -349,6 +349,7 @@ async fn exact_source_match(
     db: &sqlx::SqlitePool,
     item: &RssItem,
     all_meta: &[SeriesMeta],
+    automatic_sources: &crate::services::source_numbering::loader::Resolver,
 ) -> Result<
     Option<(
         MatchResult,
@@ -373,8 +374,54 @@ async fn exact_source_match(
         }
         return Ok(None);
     }
+    let mut saved_sources = crate::models::source_numbering::lookup_hash(db, &hash).await?;
+    let known_source = !saved_sources.is_empty();
+    let automatic_scope = saved_sources.iter().all(|saved| {
+        saved.proof.origin() == Ok(crate::services::source_numbering::ProofOrigin::AutomaticUnique)
+    });
+    if automatic_scope {
+        if let Some((interpretation, url)) = automatic_sources
+            .interpretation(
+                db,
+                &item.title,
+                &item.link,
+                &hash,
+                &item.guid,
+                item.is_batch,
+            )
+            .await?
+        {
+            let owners = all_meta
+                .iter()
+                .map(|meta| meta.series.anilist_id)
+                .filter(|id| *id > 0)
+                .collect();
+            let previous = saved_sources
+                .iter()
+                .map(|saved| saved.proof.clone())
+                .collect();
+            let proofs = crate::services::source_numbering::loader::project(
+                interpretation,
+                owners,
+                previous,
+                url,
+            )
+            .await?;
+            if proofs.len() != 1 {
+                return Err("Episode mapping: automatic source has zero or multiple tracked owners; source remains on hold".into());
+            }
+            saved_sources =
+                vec![crate::models::source_numbering::save_automatic(db, &proofs[0]).await?];
+        } else if known_source {
+            return Err("Episode mapping: saved automatic source cannot be revalidated".into());
+        }
+    }
+    let known_source = !saved_sources.is_empty();
     let mut selected = None;
-    for saved in crate::models::source_numbering::lookup_hash(db, &hash).await? {
+    for saved in saved_sources {
+        if !automatic_scope {
+            crate::services::source_numbering::loader::refresh(db, &saved.proof).await?;
+        }
         let Some(meta) = all_meta
             .iter()
             .find(|meta| meta.series.anilist_id == saved.proof.target_anilist_id)
@@ -395,9 +442,20 @@ async fn exact_source_match(
             family_key: canonical_family_key(&family),
             resolved_eps,
             alias_score: 1.0,
-            resolution_mode: "bound_source_files",
+            resolution_mode: if saved.proof.origin()
+                == Ok(crate::services::source_numbering::ProofOrigin::AutomaticUnique)
+            {
+                "automatic_source_files"
+            } else {
+                "bound_source_files"
+            },
         };
         selected = Some((found, mapping));
+    }
+    if known_source && selected.is_none() {
+        return Err(
+            "Episode mapping: exact source has no tracked owner; source remains on hold".into(),
+        );
     }
     Ok(selected)
 }
@@ -956,6 +1014,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
 
     let availability =
         crate::services::release_availability::Policy::load(&cfg, &state.indexers).await;
+    let automatic_sources = crate::services::source_numbering::loader::Resolver::default();
     for mut item in items {
         items_seen += 1;
         let item_key = build_item_key(&item);
@@ -982,7 +1041,8 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             continue;
         }
 
-        let exact = match exact_source_match(&state.db, &item, &all_meta).await {
+        let exact = match exact_source_match(&state.db, &item, &all_meta, &automatic_sources).await
+        {
             Ok(value) => value,
             Err(reason) => {
                 skipped += 1;
@@ -1144,7 +1204,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                 continue;
             }
         };
-        let release_mapping = if let Some(episodes) = replay_episodes {
+        let mut release_mapping = if let Some(episodes) = replay_episodes {
             found.resolved_eps = episodes.into_iter().collect();
             let meta = SeriesMeta::from_series(&found.series);
             let family = related_family(&meta, &all_meta);
@@ -1318,6 +1378,57 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             monitored_cache.insert(found.series.id, values.clone());
             values
         };
+
+        if let Some(proof) = release_mapping
+            .as_ref()
+            .and_then(|mapping| mapping.bound_source())
+            && proof.origin() == Ok(crate::services::source_numbering::ProofOrigin::AutomaticUnique)
+        {
+            let names: Vec<_> = proof
+                .selected_files
+                .iter()
+                .filter(|file| {
+                    (file.target_first..=file.target_last).all(|ep| monitored_eps.contains(&ep))
+                })
+                .map(|file| file.name.clone())
+                .collect();
+            let narrowed = proof.narrow_to(&names).and_then(|proof| {
+                crate::services::release_numbering::ReleaseMapping::from_bound_source(&proof)
+            });
+            let mapping = match narrowed {
+                Ok(mapping) => mapping,
+                Err(reason) => {
+                    skipped += 1;
+                    let _ = rss::record_decision(
+                        &state.db,
+                        rss::DecisionRecord {
+                            item_key: &item_key,
+                            title: &item.title,
+                            link: &item.link,
+                            series_id: Some(found.series.id),
+                            series_title: &found.series.title,
+                            group_name: &item.group,
+                            is_batch: item.is_batch,
+                            decision: "rejected",
+                            reason: &reason,
+                            source: src_str,
+                            source_id: src_id,
+                        },
+                    )
+                    .await;
+                    continue;
+                }
+            };
+            found.resolved_eps = mapping.episodes().into_iter().collect();
+            let meta = SeriesMeta::from_series(&found.series);
+            let family = related_family(&meta, &all_meta);
+            found.canonical_abs_eps =
+                canonical_absolute_numbers(&meta, &family, &found.resolved_eps);
+            item.is_batch = mapping
+                .bound_source()
+                .is_some_and(|proof| proof.selected_files.len() > 1);
+            release_mapping = Some(mapping);
+        }
 
         let actionable_eps: HashSet<i32> = found
             .resolved_eps
