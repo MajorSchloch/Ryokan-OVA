@@ -389,11 +389,7 @@ fn detect_batch(title: &str) -> bool {
     // because the regex is case-sensitive — see ROMAN_SEASON_MARKER_RE.
     let has_season_marker =
         SEASON_MARKER_RE.is_match(&lower) || ROMAN_SEASON_MARKER_RE.is_match(title);
-    if has_season_marker && !SINGLE_EP_RE.is_match(&lower) {
-        return true;
-    }
-
-    false
+    has_season_marker && !SINGLE_EP_RE.is_match(&lower)
 }
 
 /// See the range rule in `detect_batch`.
