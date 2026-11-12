@@ -172,6 +172,27 @@ pub async fn restore_misgrab(
             "Cannot restore: no download client is configured",
         );
     };
+    match crate::models::source_numbering::has_bound_history(db, &row.hash).await {
+        Ok(false) => {}
+        Ok(true) => {
+            return respond(
+                is_htmx,
+                false,
+                id,
+                "restore",
+                "This source has reviewed episode numbering. Restore it through the release page's file picker.",
+            );
+        }
+        Err(_) => {
+            return respond(
+                is_htmx,
+                false,
+                id,
+                "restore",
+                "Could not verify this source's episode numbering. Try again.",
+            );
+        }
+    }
     let canonical_id = match client.add_torrent_returning_id(&url, &row.hash).await {
         Ok((_, id)) => id,
         Err(e) => {
@@ -520,6 +541,67 @@ mod tests {
             .get("HX-Trigger")
             .map(|v| v.to_str().unwrap().to_string())
             .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn reviewed_source_misgrab_restore_holds_current_and_historical_proofs_without_readding()
+    {
+        for historical in [false, true] {
+            let db = in_memory_pool().await;
+            let proof = crate::services::source_numbering::tests::lagoon_proof();
+            let sid =
+                crate::test_support::seed_series(&db, 1519, "Black Lagoon: The Second Barrage")
+                    .await;
+            crate::models::source_numbering::save_reviewed(&db, &proof)
+                .await
+                .unwrap();
+            let mapping =
+                crate::services::release_numbering::ReleaseMapping::from_bound_source(&proof)
+                    .unwrap();
+            let id = grabbed_torrents::record_grab_with_release_mapping(
+                &db,
+                &proof.info_hash,
+                "Reviewed source",
+                sid,
+                &mapping.episodes(),
+                true,
+                Some(&mapping),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            grabbed_torrents::stamp_verification(&db, id, "misgrab", "{}")
+                .await
+                .unwrap();
+            grabbed_torrents::mark_failed_by_hash_with_reason(&db, &proof.info_hash, "misgrab")
+                .await
+                .unwrap();
+            grabbed_torrents::set_misgrab_action(&db, id, "removed")
+                .await
+                .unwrap();
+            if historical {
+                sqlx::query("DELETE FROM source_numbering_decisions")
+                    .execute(&db)
+                    .await
+                    .unwrap();
+            }
+            let client = Arc::new(RecordingClient::default());
+            let state = build_test_app_state(db.clone(), Some(client.clone()));
+            let response = restore_misgrab(State(state), HxRequest(true), Path(id)).await;
+            assert!(trigger(&response).contains("\"ok\":false"));
+            assert!(trigger(&response).contains("file picker"));
+            assert!(client.add_calls.lock().unwrap().is_empty());
+            assert!(client.delete_calls.lock().unwrap().is_empty());
+            assert!(!grabbed_torrents::is_whitelisted_hash(&db, &proof.info_hash).await);
+            let row = grabbed_torrents::get_by_id(&db, id).await.unwrap().unwrap();
+            assert_eq!(row.state, "failed");
+            assert_eq!(row.verification.as_deref(), Some("misgrab"));
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM grabbed_torrents")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+            assert_eq!(count, 1);
+        }
     }
 
     #[tokio::test]

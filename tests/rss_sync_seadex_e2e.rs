@@ -36,6 +36,7 @@ fn feed_body() -> String {
 <guid>guid-seadex-{n}</guid>
 <nyaa:magneturi>magnet:?xt=urn:btih:{hash}</nyaa:magneturi>
 <nyaa:infohash>{hash}</nyaa:infohash>
+<nyaa:seeders>1</nyaa:seeders>
 </item>"#
         )
     };

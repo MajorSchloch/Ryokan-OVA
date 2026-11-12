@@ -902,6 +902,10 @@ async fn main() {
             post(handlers::library::crud::set_search_overrides),
         )
         .route(
+            "/api/library/languages",
+            post(handlers::library::languages::save_languages),
+        )
+        .route(
             "/api/library/manual-override",
             post(handlers::library::crud::set_manual_override),
         )
@@ -961,6 +965,11 @@ async fn main() {
         .route(
             "/api/series/{anilist_id}/interactive-search-episodes",
             get(handlers::library::search::interactive_search_episodes),
+        )
+        .route(
+            "/api/library/series/{series_id}/numbering-review",
+            get(handlers::library::numbering::review)
+                .post(handlers::library::numbering::save_review),
         )
         .route(
             "/api/series/{anilist_id}/grab/{episode_number}",

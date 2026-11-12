@@ -98,3 +98,18 @@ test('met target reports completion without promising an upgrade', () => {
     assert.match(html, /meets the configured good enough target/);
     assert.doesNotMatch(html, /Below target|Automatic upgrades also depend/);
 });
+
+test('requested dub is separate from subtitles and uses the effective release languages', () => {
+    const section = {};
+    context.renderEpisodeMediaInfo(section, {
+        media: { video: [{ codec: 'h264', width: 1920, height: 1080 }], audio: [{ codec: 'aac', language: null }], subtitles: [], warnings: [] },
+        media_requirements: status({ minimum_met: false, target_met: false, audio_languages_satisfied: false }),
+        subtitle_requirements: { enabled: false, satisfied: true, required_languages: [], reasons: [] },
+        audio_requirements: { enabled: true, satisfied: false, required_languages: ['de'], match_mode: 'all', reasons: ['Audio language is unknown.'] },
+        upgrades_allowed: false,
+    });
+    assert.match(section.innerHTML, /Required audio<\/dt><dd>All of: German/);
+    assert.match(section.innerHTML, /Required dialogue audio not verified/);
+    assert.match(section.innerHTML, /Unknown language · aac/);
+    assert.doesNotMatch(section.innerHTML, /English|Required dialogue audio present/);
+});

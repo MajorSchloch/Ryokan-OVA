@@ -57,6 +57,19 @@ pub async fn episode_file_info(
             );
         }
     };
+    let cfg =
+        match crate::services::language_preferences::effective_config(&state.db, &cfg, series_id)
+            .await
+        {
+            Ok(value) => value,
+            Err(_) => {
+                return error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "language_settings_unavailable",
+                    "Could not read this release's language settings.",
+                );
+            }
+        };
     let root = match tokio::fs::canonicalize(&cfg.media_root).await {
         Ok(value) => value,
         Err(_) => {
@@ -114,11 +127,21 @@ pub async fn episode_file_info(
                 &cfg.subtitle_language_match,
             );
             let requirements = media_requirements::Policy::from_config(&cfg).status(&info);
+            let audio = media_info::evaluate_audio_requirements(
+                &info,
+                &cfg.required_audio_languages
+                    .split(',')
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>(),
+                &cfg.audio_language_match,
+            );
             Json(serde_json::json!({
                 "ok": true,
                 "filename": file.filename,
                 "media": info,
                 "subtitle_requirements": subtitles,
+                "audio_requirements": audio,
                 "media_requirements": requirements,
                 "upgrades_allowed": tracked.allow_upgrades,
             }))
@@ -273,6 +296,68 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         assert!(String::from_utf8_lossy(&body).contains("untracked"));
+    }
+
+    #[tokio::test]
+    async fn file_info_uses_release_audio_override_and_explicit_no_subtitles() {
+        use crate::models::series_language_preferences::{self, LanguagePreferences};
+        let db = in_memory_pool().await;
+        let temp = tempfile::tempdir().unwrap();
+        config::save_config(
+            &db,
+            &config::Config {
+                media_root: temp.path().to_string_lossy().into_owned(),
+                media_requirements_enabled: true,
+                required_subtitle_languages: "en".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let id = observed_file(
+            &db,
+            temp.path(),
+            serde_json::json!([
+                {"codec_type":"video","codec_name":"h264","width":1920,"height":1080},
+                {"codec_type":"audio","codec_name":"aac","channels":2,"tags":{"language":"deu"}}
+            ]),
+        )
+        .await;
+        series::update_allow_upgrades(&db, id, false).await.unwrap();
+        series_language_preferences::save(
+            &db,
+            id,
+            &LanguagePreferences {
+                audio_languages: Some("de".into()),
+                audio_match: Some("all".into()),
+                subtitle_languages: Some(String::new()),
+                subtitle_match: Some("all".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let response =
+            episode_file_info(State(build_test_app_state(db.clone(), None)), Path((id, 1))).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            result["audio_requirements"]["required_languages"],
+            serde_json::json!(["de"])
+        );
+        assert_eq!(result["audio_requirements"]["satisfied"], true);
+        assert_eq!(result["subtitle_requirements"]["enabled"], false);
+        assert_eq!(result["media_requirements"]["minimum_met"], true);
+        assert_eq!(result["media_requirements"]["target_met"], true);
+        assert_eq!(result["upgrades_allowed"], false);
+        assert_eq!(
+            config::get_config(&db)
+                .await
+                .unwrap()
+                .unwrap()
+                .required_subtitle_languages,
+            "en"
+        );
     }
 
     #[tokio::test]

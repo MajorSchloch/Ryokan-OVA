@@ -42,6 +42,7 @@ fn series_named_with_id(id: i64, title: &str, alternate_titles: &str) -> series:
 
 fn item(title: &str) -> RssItem {
     RssItem {
+        seeders: None,
         title: title.to_string(),
         link: String::new(),
         guid: String::new(),

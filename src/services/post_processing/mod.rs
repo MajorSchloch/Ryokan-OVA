@@ -977,12 +977,15 @@ async fn import_special_file(
         .await;
         return Ok(SpecialOutcome::Occupied);
     }
-    if subtitle_guard::required(cfg) {
+    let import_cfg =
+        crate::services::language_preferences::effective_config(&state.db, cfg, ctx.series.id)
+            .await?;
+    if subtitle_guard::required(&import_cfg) {
         let (candidates, videos_in_source) =
             subtitle_guard::nearby_candidates(src, &cfg.extra_file_extensions).await;
         subtitle_guard::import_required(
             &state.db,
-            cfg,
+            &import_cfg,
             &cfg.post_processing_mode,
             src,
             &dest,
@@ -1371,6 +1374,17 @@ async fn import_torrent(
         )
     };
 
+    if let Some(mapping) = release_mapping
+        .as_ref()
+        .filter(|mapping| mapping.bound_source().is_some())
+    {
+        let actual: Vec<_> = files
+            .iter()
+            .map(|file| (file.name.as_str(), file.wanted))
+            .collect();
+        mapping.validate_bound_files(torrent_hash, &actual)?;
+    }
+
     // Grab-time auto-expand can fail when qBit's metadata wait times
     // out on a slow tracker (see the 180s wait in
     // `handlers::library::search::auto_expand_library_from_pack`). By
@@ -1693,7 +1707,11 @@ async fn import_torrent(
                 let special = media::is_tv_format(&owner.format)
                     && (span.special || media::path_names_specials(Path::new(&file.name)));
                 if !special {
-                    let mapped = mapping.resolve_named_file(basename)?;
+                    let mapped = if mapping.bound_source().is_some() {
+                        mapping.resolve_bound_file(&file.name)?
+                    } else {
+                        mapping.resolve_named_file(basename)?
+                    };
                     actual_episodes.extend(mapped.first..=mapped.last);
                 }
             }
@@ -2495,7 +2513,13 @@ async fn import_torrent(
         } else {
             dest_video.clone()
         };
-        let required_transaction = subtitle_guard::required(cfg);
+        let import_cfg = crate::services::language_preferences::effective_config(
+            &state.db,
+            cfg,
+            target_series_id,
+        )
+        .await?;
+        let required_transaction = subtitle_guard::required(&import_cfg);
         let placed = if required_transaction {
             let extensions = [cfg.extra_file_extensions.as_str(), "srt,ass,ssa"].join(",");
             let extensions = extras::parse_extensions(&extensions);
@@ -2530,7 +2554,7 @@ async fn import_torrent(
                 .collect();
             match subtitle_guard::import_required(
                 &state.db,
-                cfg,
+                &import_cfg,
                 &cfg.post_processing_mode,
                 &src,
                 &dest_video,

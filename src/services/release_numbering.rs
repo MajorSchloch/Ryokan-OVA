@@ -222,6 +222,31 @@ fn source_heading(title: &str, marked_batch: bool) -> Result<SourceHeading, Stri
     })
 }
 
+/// Strict source-file numbering shared by reviewed finite domains and the
+/// ordinary release mapping. This does not choose an entry or an offset.
+pub(crate) fn validated_source_file_span(
+    filename: &str,
+) -> Result<(media::EpisodeSpan, Option<i32>), String> {
+    let heading = source_heading(filename, false)?;
+    let span = media::parse_episode_span(&filename.to_ascii_lowercase())
+        .ok_or_else(|| "Episode mapping: file has no identifiable episode number".to_string())?;
+    if (heading.season.is_some() && heading.payload_span.is_none())
+        || span
+            .season
+            .is_some_and(|season| heading.season != Some(season))
+        || heading
+            .payload_span
+            .is_some_and(|payload| payload.first != span.first || payload.last != span.last)
+    {
+        return Err("Episode mapping: source filename has conflicting episode evidence".into());
+    }
+    Ok((span, heading.season))
+}
+
+pub(crate) fn validated_source_folder_season(folder: &str) -> Result<Option<i32>, String> {
+    source_heading(folder, true).map(|heading| heading.season)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseMapping {
@@ -233,6 +258,8 @@ pub struct ReleaseMapping {
     target_first: i32,
     source_season: Option<i32>,
     basis: NumberingBasis,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bound_source: Option<crate::services::source_numbering::BoundSourceProof>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -242,11 +269,44 @@ enum NumberingBasis {
     EntryRelative,
     /// An explicit source season, reconciled with known provider maps.
     SeasonRelative,
+    /// A reviewed exact source selects a finite provider-root domain.
+    SourceBound,
 }
 
 impl ReleaseMapping {
     pub fn validate(&self) -> Result<(), String> {
+        if self.basis == NumberingBasis::SourceBound {
+            let proof = self
+                .bound_source
+                .as_ref()
+                .ok_or_else(|| "Episode mapping: source-bound decision has no proof".to_string())?;
+            proof.validate()?;
+            let (first, last, target) = proof.source_span()?;
+            let owner = proof
+                .domain
+                .entries
+                .iter()
+                .find(|entry| entry.anilist_id == proof.target_anilist_id)
+                .ok_or_else(|| {
+                    "Episode mapping: source-bound owner metadata is missing".to_string()
+                })?;
+            let season = proof
+                .selected_files
+                .iter()
+                .filter_map(|file| file.source_season)
+                .next();
+            if self.version != 2
+                || self.anilist_id != proof.target_anilist_id
+                || self.tv_series != media::is_tv_format(&owner.format)
+                || (self.source_first, self.source_last, self.target_first) != (first, last, target)
+                || self.source_season != season
+            {
+                return Err("Episode mapping: source-bound release decision changed".into());
+            }
+            return Ok(());
+        }
         if self.version != 1
+            || self.bound_source.is_some()
             || self.anilist_id == 0
             || self.source_season.is_none_or(|season| season <= 0)
         {
@@ -268,10 +328,16 @@ impl ReleaseMapping {
     }
 
     pub fn episodes(&self) -> Vec<i32> {
+        if let Some(proof) = &self.bound_source {
+            return proof.episodes();
+        }
         (self.target_first..=self.target_first + self.source_last - self.source_first).collect()
     }
 
     pub fn contains_episode(&self, number: i32) -> bool {
+        if let Some(proof) = &self.bound_source {
+            return proof.episodes().contains(&number);
+        }
         number >= self.target_first
             && number <= self.target_first + self.source_last - self.source_first
     }
@@ -279,6 +345,11 @@ impl ReleaseMapping {
     /// Never borrow a requested slot when the actual file cannot be parsed.
     pub fn resolve_file(&self, span: media::EpisodeSpan) -> Result<MappedFile, String> {
         self.validate()?;
+        if self.bound_source.is_some() {
+            return Err(
+                "Episode mapping: source-bound files require their exact relative filenames".into(),
+            );
+        }
         if (self.tv_series && span.special)
             || span.season == Some(0)
             || (self.source_season.is_some()
@@ -296,6 +367,9 @@ impl ReleaseMapping {
     /// Validate the actual filename's source heading as well as its strict
     /// episode span. A saved Season 2 decision cannot import Season 3 - 03.
     pub fn resolve_named_file(&self, filename: &str) -> Result<MappedFile, String> {
+        if self.bound_source.is_some() {
+            return self.resolve_bound_file(filename);
+        }
         let heading = source_heading(filename, false)?;
         let span = media::parse_episode_span(&filename.to_ascii_lowercase()).ok_or_else(|| {
             "Episode mapping: file has no identifiable episode number".to_string()
@@ -318,6 +392,60 @@ impl ReleaseMapping {
 
     pub fn offset(&self) -> i32 {
         self.source_first - self.target_first
+    }
+
+    pub fn bound_source(&self) -> Option<&crate::services::source_numbering::BoundSourceProof> {
+        self.bound_source.as_ref()
+    }
+
+    pub fn from_bound_source(
+        proof: &crate::services::source_numbering::BoundSourceProof,
+    ) -> Result<Self, String> {
+        proof.validate()?;
+        let (source_first, source_last, target_first) = proof.source_span()?;
+        let owner = proof
+            .domain
+            .entries
+            .iter()
+            .find(|entry| entry.anilist_id == proof.target_anilist_id)
+            .ok_or_else(|| "Episode mapping: source-bound owner metadata is missing".to_string())?;
+        let mapping = Self {
+            version: 2,
+            anilist_id: proof.target_anilist_id,
+            tv_series: media::is_tv_format(&owner.format),
+            source_first,
+            source_last,
+            target_first,
+            source_season: proof
+                .selected_files
+                .iter()
+                .filter_map(|file| file.source_season)
+                .next(),
+            basis: NumberingBasis::SourceBound,
+            bound_source: Some(proof.clone()),
+        };
+        mapping.validate()?;
+        Ok(mapping)
+    }
+
+    pub fn validate_bound_files(
+        &self,
+        info_hash: &str,
+        files: &[(&str, bool)],
+    ) -> Result<(), String> {
+        self.validate()?;
+        self.bound_source
+            .as_ref()
+            .ok_or_else(|| "Episode mapping: no exact source proof is saved".to_string())?
+            .validate_files(info_hash, files)
+    }
+
+    pub fn resolve_bound_file(&self, relative_name: &str) -> Result<MappedFile, String> {
+        self.validate()?;
+        self.bound_source
+            .as_ref()
+            .ok_or_else(|| "Episode mapping: no exact source proof is saved".to_string())?
+            .resolve_file(relative_name)
     }
 }
 
@@ -455,6 +583,7 @@ impl NumberingContext {
             } else {
                 NumberingBasis::EntryRelative
             },
+            bound_source: None,
         };
         mapping.validate()?;
         Ok(mapping)
@@ -501,6 +630,7 @@ impl NumberingContext {
             } else {
                 NumberingBasis::EntryRelative
             },
+            bound_source: None,
         };
         mapping.validate()?;
         Ok(mapping)
@@ -534,6 +664,11 @@ pub(crate) async fn apply_reviewed_source(
     candidate: &mut crate::services::nyaa::SearchResult,
 ) -> Result<bool, String> {
     let required_replay = candidate.replay_episodes.is_some();
+    let required_bound = candidate
+        .release_mapping
+        .as_ref()
+        .filter(|mapping| mapping.bound_source().is_some())
+        .cloned();
     candidate.replay_episodes = None;
     let source_url = if !candidate.magnet.is_empty() {
         &candidate.magnet
@@ -555,8 +690,44 @@ pub(crate) async fn apply_reviewed_source(
         if required_replay {
             return Err("Episode mapping: the reviewed source changed during search".into());
         }
-        return Ok(false);
+        let mapping = bound_mapping_for_source(db, &candidate.info_hash, anilist_id).await?;
+        let Some(mapping) = mapping else {
+            if required_bound.is_some() {
+                return Err(
+                    "Episode mapping: the exact reviewed source proof changed during search".into(),
+                );
+            }
+            return Ok(false);
+        };
+        if required_bound.as_ref().is_some_and(|old| *old != mapping)
+            || matches!(target, auto_search::SearchTarget::Episode(number) if !mapping.contains_episode(*number))
+        {
+            return Err(
+                "Episode mapping: exact reviewed source does not contain this entry or episode"
+                    .into(),
+            );
+        }
+        candidate.is_batch |= mapping
+            .bound_source()
+            .is_some_and(|proof| proof.selected_files.len() > 1);
+        candidate.release_mapping = Some(mapping);
+        return Ok(true);
     };
+    if required_bound.is_some() {
+        return Err(
+            "Episode mapping: migration replay conflicts with an exact-source numbering proof"
+                .into(),
+        );
+    }
+    if !crate::models::source_numbering::lookup_hash(db, &candidate.info_hash)
+        .await?
+        .is_empty()
+    {
+        return Err(
+            "Episode mapping: migration replay conflicts with an exact-source numbering review"
+                .into(),
+        );
+    }
     if episodes.is_empty()
         || matches!(target, auto_search::SearchTarget::Episode(n) if !episodes.contains(n))
     {
@@ -567,6 +738,17 @@ pub(crate) async fn apply_reviewed_source(
     candidate.release_mapping = None;
     candidate.replay_episodes = Some(episodes);
     Ok(true)
+}
+
+pub async fn bound_mapping_for_source(
+    db: &sqlx::SqlitePool,
+    info_hash: &str,
+    anilist_id: i64,
+) -> Result<Option<ReleaseMapping>, String> {
+    crate::models::source_numbering::lookup_exact(db, info_hash, anilist_id)
+        .await?
+        .map(|saved| ReleaseMapping::from_bound_source(&saved.proof))
+        .transpose()
 }
 
 /// The final automatic gate also covers SeaDex candidates. Curation confirms
@@ -650,6 +832,7 @@ pub(crate) async fn filter_automatic_candidates_with_pack_mappings(
                     match mapping.basis {
                         NumberingBasis::EntryRelative => None,
                         NumberingBasis::SeasonRelative => mapping.source_season,
+                        NumberingBasis::SourceBound => return Err("Episode mapping: published-pack evidence cannot replace an exact source proof".into()),
                     },
                 )?;
                 if !candidate.is_batch || expected != *mapping {

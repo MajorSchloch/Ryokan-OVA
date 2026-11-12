@@ -41,6 +41,7 @@ fn feed_body() -> String {
 <link>https://feed.example/view/1</link>
 <guid>guid-feed-1</guid>
 <nyaa:downloadurl>https://feed.example/torrent/1.torrent</nyaa:downloadurl>
+<nyaa:seeders>1</nyaa:seeders>
 </item>
 <item>
 <title>{HASH_BLOCKED_TITLE}</title>
@@ -48,6 +49,7 @@ fn feed_body() -> String {
 <guid>guid-feed-2</guid>
 <nyaa:magneturi>magnet:?xt=urn:btih:{HASH_BLOCKED}</nyaa:magneturi>
 <nyaa:infohash>{HASH_BLOCKED}</nyaa:infohash>
+<nyaa:seeders>1</nyaa:seeders>
 </item>
 <item>
 <title>{CLEAN_TITLE}</title>
@@ -55,6 +57,7 @@ fn feed_body() -> String {
 <guid>guid-feed-3</guid>
 <nyaa:magneturi>magnet:?xt=urn:btih:{CLEAN_HASH}</nyaa:magneturi>
 <nyaa:infohash>{CLEAN_HASH}</nyaa:infohash>
+<nyaa:seeders>1</nyaa:seeders>
 </item>
 </channel>
 </rss>"#
