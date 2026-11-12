@@ -63,6 +63,11 @@ and return a new job stopped with metadata ready. Initially only stable
 qBittorrent 5.x with Web API v2.11+ implements this, using the native
 `stopCondition=MetadataReceived` barrier and the fixed already-known-metadata
 behavior. Other clients return an unsupported error before adding anything.
+On qBittorrent 5.3, a successful add acknowledgement is not exclusive ownership:
+concurrent loading adds can each report success. The strict path requires its
+random per-attempt tag on the exact job before controls, and removes only that
+job's marker at the stopped, metadata-ready handoff. Unused global tag names
+can remain; they must not authorize ownership or cleanup of another job.
 Neither the legacy paused-add nor optional selection is a fallback. Reviewed
 picker previews resolve their saved source decision before adding; read errors
 hold the preview. Existing client jobs keep their state and selection. Legacy
