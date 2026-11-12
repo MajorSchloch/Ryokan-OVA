@@ -37,8 +37,10 @@ impl DownloadClient for SelectiveClient {
     ) -> Result<crate::services::download_client::SelectiveOutcome, String> {
         panic!("reviewed sources cannot use optional selection")
     }
-    async fn add_torrent_paused(&self, url: &str, hash: &str) -> Result<AddOutcome, String> {
-        assert_eq!(url, format!("magnet:?xt=urn:btih:{hash}"));
+    async fn add_torrent_paused(&self, _: &str, _: &str) -> Result<AddOutcome, String> {
+        panic!("reviewed sources require the strict metadata-only contract");
+    }
+    async fn add_torrent_metadata_only(&self, _: &str) -> Result<AddOutcome, String> {
         self.paused_adds.fetch_add(1, AtomicOrdering::SeqCst);
         self.paused.store(true, AtomicOrdering::SeqCst);
         Ok(AddOutcome::Added)

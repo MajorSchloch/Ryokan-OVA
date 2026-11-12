@@ -163,6 +163,14 @@ pub trait DownloadClient: Send + Sync {
         self.add_torrent(url, info_hash).await
     }
 
+    /// Prepare an exact reviewed v1 source without requesting payload pieces.
+    /// The implementation must use a native metadata-only barrier, return a
+    /// new job stopped with metadata ready, and leave existing jobs untouched.
+    /// Unlike the legacy picker contract, there is no whole-download fallback.
+    async fn add_torrent_metadata_only(&self, _info_hash: &str) -> Result<AddOutcome, String> {
+        Err("This download client cannot safely prepare reviewed torrent metadata without downloading files.".into())
+    }
+
     /// Add a torrent and narrow it to a subset of its files. The `pick`
     /// callback receives the file names and returns the indices to
     /// keep (or `None` for a full grab). Each impl handles its own

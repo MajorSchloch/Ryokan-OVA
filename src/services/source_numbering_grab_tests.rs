@@ -55,8 +55,14 @@ impl DownloadClient for StrictClient {
         panic!("strict source must never use legacy optional selection")
     }
     async fn add_torrent_paused(&self, url: &str, _: &str) -> Result<AddOutcome, String> {
+        panic!("strict source preparation must not use a legacy paused add: {url}");
+    }
+    async fn add_torrent_metadata_only(&self, hash: &str) -> Result<AddOutcome, String> {
         self.events.lock().unwrap().push("add paused");
-        self.added_urls.lock().unwrap().push(url.to_string());
+        self.added_urls
+            .lock()
+            .unwrap()
+            .push(format!("magnet:?xt=urn:btih:{hash}"));
         Ok(if self.preexisting_on_add {
             AddOutcome::AlreadyPresent
         } else {
