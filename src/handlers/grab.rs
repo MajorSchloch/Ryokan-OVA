@@ -68,6 +68,10 @@ pub struct GrabPreviewForm {
     /// so confirm/cancel hit the same client.
     #[serde(default)]
     pub indexer_id: Option<i64>,
+    /// Start a saved-review picker with an explicit empty selection, including
+    /// before metadata arrives. Missing reviews and default-all fallback hold.
+    #[serde(default)]
+    pub start_unselected: bool,
 }
 
 /// POST `/api/grab/preview` response.
@@ -319,6 +323,9 @@ pub async fn grab_preview(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
     {
+        if form.start_unselected {
+            return Err((StatusCode::CONFLICT, "A file selection for this source is already open. Finish or close that selection first.".into()));
+        }
         return Ok(Json(in_flight_preview(existing)));
     }
 
@@ -368,6 +375,12 @@ pub async fn grab_preview(
             .await
             .map_err(|reason| (StatusCode::CONFLICT, reason))?
             .is_some();
+    if form.start_unselected && !reviewed_source {
+        return Err((
+            StatusCode::CONFLICT,
+            "The saved numbering review is no longer available. Reopen the numbering review before choosing files.".into(),
+        ));
+    }
     let mut metadata = form.release_metadata.clone();
     if !metadata.is_object() {
         metadata = serde_json::json!({});
@@ -397,10 +410,17 @@ pub async fn grab_preview(
         form.series_id,
         &metadata_json,
         Some(dispatch_client_id),
+        form.start_unselected,
     )
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     if !reserved {
+        if form.start_unselected {
+            return Err((
+                StatusCode::CONFLICT,
+                "Another file selection for this source is already open.".into(),
+            ));
+        }
         return match pending_grabs::get_by_hash(&state.db, &info_hash)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
@@ -1325,6 +1345,7 @@ mod tests {
                 series_id: None,
                 release_metadata: serde_json::Value::Null,
                 indexer_id: None,
+                start_unselected: false,
             }),
         )
         .await;
@@ -1338,6 +1359,7 @@ mod tests {
                 series_id: None,
                 release_metadata: serde_json::Value::Null,
                 indexer_id: None,
+                start_unselected: false,
             }),
         )
         .await;
@@ -1356,6 +1378,7 @@ mod tests {
                 series_id: Some(42),
                 release_metadata: serde_json::json!({"title": "test"}),
                 indexer_id: None,
+                start_unselected: false,
             }),
         )
         .await;
@@ -1384,6 +1407,7 @@ mod tests {
                 series_id: None,
                 release_metadata: serde_json::Value::Null,
                 indexer_id: None,
+                start_unselected: false,
             }),
         )
         .await;
@@ -1399,6 +1423,7 @@ mod tests {
                 series_id: None,
                 release_metadata: serde_json::Value::Null,
                 indexer_id: None,
+                start_unselected: false,
             }),
         )
         .await;
@@ -1437,6 +1462,7 @@ mod tests {
                 series_id: None,
                 release_metadata: serde_json::json!({"title": "tab-2 request"}),
                 indexer_id: None,
+                start_unselected: false,
             }),
         )
         .await
@@ -1489,6 +1515,7 @@ mod tests {
                 series_id: None,
                 release_metadata: serde_json::Value::Null,
                 indexer_id: None,
+                start_unselected: false,
             }),
         )
         .await;
@@ -1576,6 +1603,7 @@ mod tests {
                 series_id: None,
                 release_metadata: serde_json::Value::Null,
                 indexer_id: None,
+                start_unselected: false,
             }),
         )
         .await;
@@ -1597,9 +1625,11 @@ mod tests {
         // walkaway on the sweep's next tick.
         let db = in_memory_pool().await;
         assert!(
-            pending_grabs::reserve(&db, "pid", VALID_HASH, "rTorrent", None, None, "{}", None)
-                .await
-                .unwrap()
+            pending_grabs::reserve(
+                &db, "pid", VALID_HASH, "rTorrent", None, None, "{}", None, false
+            )
+            .await
+            .unwrap()
         );
         sqlx::query("UPDATE pending_grabs SET heartbeat_at = heartbeat_at - 3600")
             .execute(&db)

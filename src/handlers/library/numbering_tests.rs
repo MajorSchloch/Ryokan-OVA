@@ -198,6 +198,7 @@ async fn get_numbering_review_previews_verified_source_without_writes() {
     let rendered = html(response).await;
     assert!(rendered.contains("12 files belong to Black Lagoon: The Second Barrage"));
     assert!(rendered.contains("Use this numbering"));
+    assert!(!rendered.contains("data-numbering-choose-files"));
     assert!(rendered.contains("[Legion] Black Lagoon - 29"));
     assert_metadata_only(&state, 0).await;
     // Private, opt-in visual verification of the actual handler output.
@@ -399,11 +400,11 @@ async fn save_identical_review_is_idempotent_and_only_owns_target_files() {
         )
         .await
         .unwrap();
-        assert!(
-            html(response)
-                .await
-                .contains("Numbering saved for this exact source.")
-        );
+        let rendered = html(response).await;
+        assert!(rendered.contains("Numbering saved for this exact source."));
+        assert!(rendered.contains("data-numbering-choose-files"));
+        assert!(rendered.contains(&format!("data-series-id=\"{target}\"")));
+        assert!(rendered.contains(&format!("data-info-hash=\"{HASH}\"")));
         let saved = decisions::lookup_exact(&state.db, HASH, 1519)
             .await
             .unwrap()
@@ -428,4 +429,159 @@ async fn save_identical_review_is_idempotent_and_only_owns_target_files() {
         );
     }
     assert_eq!(server.received_requests().await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn get_saved_review_offers_files_only_after_fresh_exact_owner_and_manifest_check() {
+    let _lock = ENV_LOCK.lock().await;
+    let server = MockServer::start().await;
+    let _origin = NyaaOrigin::set(&server.uri());
+    Mock::given(method("GET"))
+        .and(path("/view/123"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(listing(&lagoon_files())))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let (state, _, target) = state().await;
+    let initial = page(&state, target, &query(&server)).await.unwrap();
+    let proof = initial
+        .preview
+        .unwrap()
+        .confirm(&lagoon_files()[12..24])
+        .unwrap();
+    decisions::save_reviewed(&state.db, &proof).await.unwrap();
+    let mut input = query(&server);
+    input.root = None;
+    let rendered = html(
+        review(State(state.clone()), Path(target), Query(input))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(rendered.contains("data-numbering-choose-files"));
+    assert!(rendered.contains(&format!("data-series-id=\"{target}\"")));
+    assert!(rendered.contains(&format!("data-info-hash=\"{HASH}\"")));
+    assert!(!rendered.contains("Use this numbering"));
+    assert_eq!(rendered.matches("id=\"grab-picker-modal\"").count(), 1);
+    assert!(rendered.contains("/static/js/grab_picker.js"));
+    assert!(rendered.contains("/static/js/numbering_review.js"));
+    assert_metadata_only(&state, 1).await;
+    if let Some(output) = std::env::var_os("RYOKAN_NUMBERING_SAVED_HTML") {
+        std::fs::write(output, &rendered).expect("write private saved-review page");
+    }
+}
+
+#[tokio::test]
+async fn get_saved_review_hides_files_when_published_manifest_changes() {
+    let _lock = ENV_LOCK.lock().await;
+    let server = MockServer::start().await;
+    let _origin = NyaaOrigin::set(&server.uri());
+    let files = lagoon_files();
+    let before = listing(&files);
+    let mut changed = files.clone();
+    changed.push("new-checksum.sha256".into());
+    let after = listing(&changed);
+    let calls = AtomicUsize::new(0);
+    Mock::given(method("GET"))
+        .and(path("/view/123"))
+        .respond_with(move |_: &wiremock::Request| {
+            ResponseTemplate::new(200).set_body_string(
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    before.clone()
+                } else {
+                    after.clone()
+                },
+            )
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    let (state, _, target) = state().await;
+    let initial = page(&state, target, &query(&server)).await.unwrap();
+    let proof = initial.preview.unwrap().confirm(&files[12..24]).unwrap();
+    decisions::save_reviewed(&state.db, &proof).await.unwrap();
+    let rendered = html(
+        review(State(state.clone()), Path(target), Query(query(&server)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(!rendered.contains("data-numbering-choose-files"));
+    assert!(rendered.contains("differ from the saved review"));
+    assert_metadata_only(&state, 1).await;
+}
+
+#[tokio::test]
+async fn saved_review_does_not_offer_files_for_another_owner_or_corrupt_saved_fingerprint() {
+    let _lock = ENV_LOCK.lock().await;
+    let server = MockServer::start().await;
+    let _origin = NyaaOrigin::set(&server.uri());
+    Mock::given(method("GET"))
+        .and(path("/view/123"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(listing(&lagoon_files())))
+        .expect(3)
+        .mount(&server)
+        .await;
+    let (state, root, target) = state().await;
+    let initial = page(&state, target, &query(&server)).await.unwrap();
+    let proof = initial
+        .preview
+        .unwrap()
+        .confirm(&lagoon_files()[12..24])
+        .unwrap();
+    decisions::save_reviewed(&state.db, &proof).await.unwrap();
+    let wrong_owner = html(
+        review(State(state.clone()), Path(root), Query(query(&server)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(!wrong_owner.contains("data-numbering-choose-files"));
+    sqlx::query("UPDATE source_numbering_decisions SET fingerprint='corrupt'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let corrupt = html(
+        review(State(state.clone()), Path(target), Query(query(&server)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(!corrupt.contains("data-numbering-choose-files"));
+    assert!(corrupt.contains("saved source decision identity changed"));
+    assert_metadata_only(&state, 1).await;
+}
+
+#[tokio::test]
+async fn stale_save_cannot_offer_files_based_on_an_earlier_saved_state() {
+    let _lock = ENV_LOCK.lock().await;
+    let server = MockServer::start().await;
+    let _origin = NyaaOrigin::set(&server.uri());
+    Mock::given(method("GET"))
+        .and(path("/view/123"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(listing(&lagoon_files())))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let (state, _, target) = state().await;
+    let initial = page(&state, target, &query(&server)).await.unwrap();
+    let proof = initial
+        .preview
+        .unwrap()
+        .confirm(&lagoon_files()[12..24])
+        .unwrap();
+    decisions::save_reviewed(&state.db, &proof).await.unwrap();
+    let rendered = html(
+        save_review(
+            State(state.clone()),
+            Path(target),
+            Form(form(&server, "stale")),
+        )
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert!(rendered.contains("The source or numbering rules changed."));
+    assert!(!rendered.contains("data-numbering-choose-files"));
+    assert_metadata_only(&state, 1).await;
 }
