@@ -38,6 +38,7 @@
     // an open session are a no-op so a double-click on Grab doesn't
     // spawn two preview rows.
     let session = null;
+    let openGeneration = 0;
 
     function $(id) { return document.getElementById(id); }
 
@@ -144,6 +145,7 @@
     // ─── Session lifecycle ─────────────────────────────────────────
 
     function resetSession() {
+        openGeneration += 1;
         if (!session) return;
         if (session.pollTimer) clearTimeout(session.pollTimer);
         if (session.heartbeatTimer) clearInterval(session.heartbeatTimer);
@@ -505,6 +507,10 @@
                     const unwanted = computeDefaultUnwanted(session.files);
                     unwanted.forEach(i => session.wanted.delete(i));
                     applyWantedEpisodes();
+                    if (session.startUnselected) {
+                        session.wanted.clear();
+                        session.preselectNote = 'No files selected. Tick the episode files you want, then confirm.';
+                    }
                     renderFileList();
                     // The walkaway sweep must know the pre-selection
                     // from the first moment the list is on screen.
@@ -688,12 +694,15 @@
         }
 
         if (!openModal()) return;
+        const generation = ++openGeneration;
+        const modalElement = $('grab-picker-modal');
         renderHeader(ctx);
         renderStatus('Adding torrent and waiting for metadata…', { spinner: true });
 
         const body = {
             url,
             info_hash: infoHash,
+            start_unselected: ctx.startUnselected === true,
             release_metadata: {
                 title: ctx.title || '',
                 size: ctx.size || '',
@@ -723,6 +732,7 @@
             return data;
         })
         .then(data => {
+            if (generation !== openGeneration || $('grab-picker-modal') !== modalElement) return;
             session = {
                 previewId: data.preview_id,
                 files: [],
@@ -739,6 +749,7 @@
                     ? ctx.wantedEpisodes.map(Number).filter(n => n > 0)
                     : [],
                 preselectNote: '',
+                startUnselected: ctx.startUnselected === true,
             };
             // Heartbeat immediately so a slow-metadata case doesn't
             // trip the TTL sweep before the first 30s interval fires.
@@ -747,6 +758,7 @@
             pollPreview();
         })
         .catch(err => {
+            if (generation !== openGeneration || $('grab-picker-modal') !== modalElement) return;
             renderStatus((err && err.message) || 'Failed to open grab preview', {
                 error: true,
                 hint: 'Check that the download client is configured and reachable in Settings.',

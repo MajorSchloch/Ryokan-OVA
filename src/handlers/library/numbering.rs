@@ -91,11 +91,19 @@ async fn page(
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Release not found.".to_string()))?;
     validate_source(&input.link, &input.hash)
         .map_err(|reason| (StatusCode::BAD_REQUEST, reason))?;
+    let saved = decisions::lookup_exact(&state.db, &input.hash, series.anilist_id).await;
     let choices = source_numbering::domain_choices(&state.db, series.anilist_id)
         .await
         .map_err(|reason| (StatusCode::BAD_GATEWAY, reason))?;
     let selected_root = input
         .root
+        .or_else(|| {
+            saved
+                .as_ref()
+                .ok()?
+                .as_ref()
+                .map(|saved| saved.proof.domain.root_anilist_id)
+        })
         .or_else(|| choices.first().map(|choice| choice.root_anilist_id))
         .unwrap_or(0);
     if selected_root != 0
@@ -166,6 +174,23 @@ async fn page(
     ) {
         Ok(preview) => {
             result.eligible_count = preview.files.iter().filter(|file| file.eligible).count();
+            let selected: Vec<_> = preview
+                .files
+                .iter()
+                .filter(|file| file.eligible)
+                .map(|file| file.name.clone())
+                .collect();
+            if let Ok(proof) = preview.confirm(&selected) {
+                match saved {
+                    Ok(Some(saved)) if saved.proof == proof => {
+                        result.saved = true;
+                        result.message = "Numbering saved for this exact source. Choose files to download for this release.".into();
+                    }
+                    Ok(Some(_)) => result.message = "The current source or numbering rules differ from the saved review. File selection stays unavailable.".into(),
+                    Err(reason) => result.message = reason,
+                    Ok(None) => {}
+                }
+            }
             result.preview = Some(preview);
         }
         Err(reason) => result.message = reason,
@@ -196,6 +221,8 @@ pub async fn save_review(
         root: Some(input.root),
     };
     let mut result = page(&state, series_id, &query).await?;
+    // A failed save must not offer an action based on an earlier GET state.
+    result.saved = false;
     let Some(preview) = &result.preview else {
         return result.response(StatusCode::OK);
     };
