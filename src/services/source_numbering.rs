@@ -18,6 +18,11 @@ use crate::services::{
 #[path = "source_numbering_tests.rs"]
 pub(crate) mod tests;
 
+#[path = "source_numbering_auto.rs"]
+pub mod automatic;
+#[path = "source_numbering_loader.rs"]
+pub(crate) mod loader;
+
 fn fail(message: &str) -> String {
     format!("Episode mapping: {message}")
 }
@@ -105,6 +110,26 @@ pub struct ReviewPreview {
     published_files: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProofOrigin {
+    HumanReviewed,
+    AutomaticUnique,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AutomaticEvidence {
+    pub verifier_version: u32,
+    pub scope_fingerprint: String,
+    pub publication_url: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(tag = "origin", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProofProvenance {
+    AutomaticUnique { evidence: AutomaticEvidence },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BoundSourceProof {
@@ -115,6 +140,8 @@ pub struct BoundSourceProof {
     pub publication_fingerprint: String,
     pub published_files: Vec<String>,
     pub selected_files: Vec<BoundFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ProofProvenance>,
 }
 
 pub async fn domain_choices(
@@ -344,6 +371,76 @@ impl SourceDomain {
     }
 }
 
+pub(crate) fn validate_source_file_identity(
+    domain: &SourceDomain,
+    name: &str,
+    span: media::EpisodeSpan,
+    season: Option<i32>,
+) -> Result<(), String> {
+    let basename = Path::new(name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| fail("invalid source filename"))?;
+    if season.is_some_and(|season| season != domain.source_season) {
+        return Err(fail("file names another source season"));
+    }
+    for component in Path::new(name)
+        .parent()
+        .into_iter()
+        .flat_map(Path::components)
+    {
+        let folder = component
+            .as_os_str()
+            .to_str()
+            .ok_or_else(|| fail("invalid source folder"))?;
+        if crate::services::release_numbering::validated_source_folder_season(folder)?
+            .is_some_and(|season| season != domain.source_season)
+        {
+            return Err(fail("folder names another source season"));
+        }
+        let parts = auto_search::part_cour_numbers(folder);
+        let expected: HashSet<_> = domain
+            .root_aliases
+            .iter()
+            .flat_map(|alias| auto_search::part_cour_numbers(alias))
+            .collect();
+        if !parts.is_empty() && parts != expected {
+            return Err(fail("folder names another Part/Cour source"));
+        }
+    }
+    let root = domain
+        .entries
+        .iter()
+        .find(|entry| entry.anilist_id == domain.root_anilist_id)
+        .ok_or_else(|| fail("missing source owner"))?;
+    if media::is_non_episodic_file(&basename.to_ascii_lowercase())
+        || (media::is_tv_format(&root.format)
+            && (span.special || media::path_names_specials(Path::new(name))))
+    {
+        return Err(fail("extra or special outside the main source domain"));
+    }
+    let title = library_link::extract_anime_title(basename)
+        .map(|title| auto_search::normalize_title(&title))
+        .ok_or_else(|| fail("file has no verifiable source title"))?;
+    if !domain
+        .root_aliases
+        .iter()
+        .any(|alias| auto_search::normalize_title(alias) == title)
+    {
+        return Err(fail("file does not name the full canonical source root"));
+    }
+    let source_parts = auto_search::part_cour_numbers(basename);
+    let root_parts: HashSet<_> = domain
+        .root_aliases
+        .iter()
+        .flat_map(|alias| auto_search::part_cour_numbers(alias))
+        .collect();
+    if !source_parts.is_empty() && source_parts != root_parts {
+        return Err(fail("file names another Part/Cour source identity"));
+    }
+    Ok(())
+}
+
 fn review_file(domain: &SourceDomain, name: &str, target: i64) -> ReviewFile {
     let mut row = ReviewFile {
         name: name.into(),
@@ -367,63 +464,7 @@ fn review_file(domain: &SourceDomain, name: &str, target: i64) -> ReviewFile {
             crate::services::release_numbering::validated_source_file_span(basename)?;
         row.source_first = Some(span.first);
         row.source_last = Some(span.last);
-        if season.is_some_and(|season| season != domain.source_season) {
-            return Err(fail("file names another source season"));
-        }
-        for component in Path::new(name)
-            .parent()
-            .into_iter()
-            .flat_map(Path::components)
-        {
-            let folder = component
-                .as_os_str()
-                .to_str()
-                .ok_or_else(|| fail("invalid source folder"))?;
-            if crate::services::release_numbering::validated_source_folder_season(folder)?
-                .is_some_and(|season| season != domain.source_season)
-            {
-                return Err(fail("folder names another source season"));
-            }
-            let parts = auto_search::part_cour_numbers(folder);
-            let expected: HashSet<_> = domain
-                .root_aliases
-                .iter()
-                .flat_map(|alias| auto_search::part_cour_numbers(alias))
-                .collect();
-            if !parts.is_empty() && parts != expected {
-                return Err(fail("folder names another Part/Cour source"));
-            }
-        }
-        let root = domain
-            .entries
-            .iter()
-            .find(|entry| entry.anilist_id == domain.root_anilist_id)
-            .ok_or_else(|| fail("missing source owner"))?;
-        if media::is_non_episodic_file(&basename.to_ascii_lowercase())
-            || (media::is_tv_format(&root.format)
-                && (span.special || media::path_names_specials(Path::new(name))))
-        {
-            return Err(fail("extra or special outside the main source domain"));
-        }
-        let title = library_link::extract_anime_title(basename)
-            .map(|title| auto_search::normalize_title(&title))
-            .ok_or_else(|| fail("file has no verifiable source title"))?;
-        if !domain
-            .root_aliases
-            .iter()
-            .any(|alias| auto_search::normalize_title(alias) == title)
-        {
-            return Err(fail("file does not name the full canonical source root"));
-        }
-        let source_parts = auto_search::part_cour_numbers(basename);
-        let root_parts: HashSet<_> = domain
-            .root_aliases
-            .iter()
-            .flat_map(|alias| auto_search::part_cour_numbers(alias))
-            .collect();
-        if !source_parts.is_empty() && source_parts != root_parts {
-            return Err(fail("file names another Part/Cour source identity"));
-        }
+        validate_source_file_identity(domain, name, span, season)?;
         let mapped = episode_mapping::resolve_file(&domain.rules, span.first, span.last)
             .map_err(|error| error.to_string())?;
         let owner = domain
@@ -516,11 +557,41 @@ impl ReviewPreview {
             publication_fingerprint: self.fingerprint.clone(),
             published_files: self.published_files.clone(),
             selected_files: selected,
+            provenance: None,
         })
     }
 }
 
 impl BoundSourceProof {
+    pub fn origin(&self) -> Result<ProofOrigin, String> {
+        match (self.version, &self.provenance) {
+            (1, None) => Ok(ProofOrigin::HumanReviewed),
+            (2, Some(ProofProvenance::AutomaticUnique { evidence }))
+                if evidence.verifier_version == 1
+                    && evidence.scope_fingerprint.len() == 64
+                    && evidence
+                        .scope_fingerprint
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    && crate::services::nyaa::view_page_url(&evidence.publication_url)
+                        .as_deref()
+                        == Some(evidence.publication_url.as_str()) =>
+            {
+                Ok(ProofOrigin::AutomaticUnique)
+            }
+            _ => Err(fail("unsupported source-proof version or origin")),
+        }
+    }
+
+    pub fn same_geometry(&self, other: &Self) -> bool {
+        self.info_hash == other.info_hash
+            && self.target_anilist_id == other.target_anilist_id
+            && self.domain == other.domain
+            && self.publication_fingerprint == other.publication_fingerprint
+            && self.published_files == other.published_files
+            && self.selected_files == other.selected_files
+    }
+
     /// A picker can narrow a reviewed release, never expand its assignment.
     pub fn narrow_to(&self, selected_names: &[String]) -> Result<Self, String> {
         self.validate()?;
@@ -542,6 +613,8 @@ impl BoundSourceProof {
     pub fn is_within_review(&self, reviewed: &Self) -> bool {
         self.validate().is_ok()
             && reviewed.validate().is_ok()
+            && self.version == reviewed.version
+            && self.provenance == reviewed.provenance
             && self.info_hash == reviewed.info_hash
             && self.target_anilist_id == reviewed.target_anilist_id
             && self.domain == reviewed.domain
@@ -554,9 +627,7 @@ impl BoundSourceProof {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.version != 1 {
-            return Err(fail("unsupported source-proof version"));
-        }
+        self.origin()?;
         let preview = prepare_review(
             self.domain.clone(),
             &self.info_hash,
@@ -568,7 +639,7 @@ impl BoundSourceProof {
             .iter()
             .map(|file| file.name.clone())
             .collect();
-        if preview.confirm(&names)? != *self {
+        if !preview.confirm(&names)?.same_geometry(self) {
             return Err(fail("saved source proof differs from its publication"));
         }
         Ok(())

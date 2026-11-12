@@ -27,6 +27,7 @@ pub(crate) async fn mapping_for_selection(
     else {
         return Ok(None);
     };
+    crate::services::source_numbering::loader::refresh(db, &saved.proof).await?;
     let selected: Vec<_> = filenames
         .iter()
         .filter(|name| crate::services::auto_search::is_media_filename(name))

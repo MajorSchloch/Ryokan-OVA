@@ -124,6 +124,11 @@ pub fn judge_release_with_requirements(
 /// Advertised and reviewed coverage must agree before an automatic
 /// single-episode replacement is authorized.
 pub(crate) fn release_covers_multiple(result: &crate::services::nyaa::SearchResult) -> bool {
+    if let Some(mapping) = &result.release_mapping
+        && let Some(proof) = mapping.bound_source()
+    {
+        return proof.validate().is_err() || mapping.episodes().len() != 1;
+    }
     result.is_batch
         || result
             .replay_episodes

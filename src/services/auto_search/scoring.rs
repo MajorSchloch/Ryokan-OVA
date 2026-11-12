@@ -299,7 +299,10 @@ pub(super) fn rescore_for_auto_search_with_breakdown(
     if let Some(p) = &result.match_provenance {
         let delta = match p.kind {
             MatchKind::Fuzzy => FUZZY_MATCH_PENALTY,
-            MatchKind::Verbatim | MatchKind::SeadexCurated | MatchKind::ReviewedSource => 0,
+            MatchKind::Verbatim
+            | MatchKind::SeadexCurated
+            | MatchKind::ReviewedSource
+            | MatchKind::AutomaticSource => 0,
         } + if p.phase.is_fallback() {
             FALLBACK_PHASE_PENALTY
         } else {
