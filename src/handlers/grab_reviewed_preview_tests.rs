@@ -73,6 +73,7 @@ impl DownloadClient for LegacyOnly {
 struct NativeClient {
     legacy: LegacyOnly,
     outcome: AddOutcome,
+    cancel_empty: bool,
 }
 
 #[async_trait]
@@ -114,6 +115,12 @@ impl DownloadClient for NativeClient {
         self.legacy.resume(hash).await
     }
     async fn delete(&self, hash: &str, files: bool) -> Result<(), String> {
+        if self.cancel_empty {
+            assert_eq!(hash, HASH);
+            assert!(files);
+            self.legacy.events.lock().unwrap().push("delete-empty");
+            return Ok(());
+        }
         self.legacy.delete(hash, files).await
     }
     async fn set_file_wanted(
@@ -147,6 +154,7 @@ fn form(series_id: Option<i64>) -> GrabPreviewForm {
         series_id,
         release_metadata: serde_json::json!({"title":"Black Lagoon complete source","is_batch":true}),
         indexer_id: None,
+        start_unselected: false,
     }
 }
 
@@ -159,6 +167,7 @@ async fn reviewed_picker_uses_native_contract_and_never_starts_payload() {
             files_ready: true,
         },
         outcome: AddOutcome::Added,
+        cancel_empty: false,
     });
     let (state, id) = state(client, true).await;
     let Json(created) = grab_preview(State(state.clone()), Json(form(Some(id))))
@@ -227,6 +236,7 @@ async fn reviewed_picker_preserves_preexisting_stopped_metadata_empty_job() {
             files_ready: false,
         },
         outcome: AddOutcome::AlreadyPresent,
+        cancel_empty: false,
     });
     let (state, id) = state(client, true).await;
     let error = grab_preview(State(state.clone()), Json(form(Some(id))))
@@ -267,4 +277,135 @@ async fn unreviewed_picker_keeps_legacy_client_support() {
             .is_ok()
     );
     assert_eq!(events.lock().unwrap().first(), Some(&"legacy"));
+}
+
+#[tokio::test]
+async fn explicit_picker_keeps_empty_intent_without_selection_posts_and_walkaway_never_resumes() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let client = Arc::new(NativeClient {
+        legacy: LegacyOnly {
+            events: events.clone(),
+            files_ready: true,
+        },
+        outcome: AddOutcome::Added,
+        cancel_empty: true,
+    });
+    let (state, id) = state(client, true).await;
+    let mut request = form(Some(id));
+    request.start_unselected = true;
+    let Json(created) = grab_preview(State(state.clone()), Json(request))
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        let row = pending_grabs::get(&state.db, &created.preview_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending_grabs::wanted_indices(&row), Some(Vec::new()));
+        if !row.file_list_json.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let ready = pending_grabs::get(&state.db, &created.preview_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!ready.file_list_json.is_empty());
+    sqlx::query("UPDATE pending_grabs SET heartbeat_at=0 WHERE preview_id=?")
+        .bind(&created.preview_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::services::grab_sweep::sweep_once(&state)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(events.lock().unwrap().contains(&"delete-empty"));
+    assert_eq!(pending_grabs::count(&state.db).await.unwrap(), 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM grabbed_torrents")
+            .fetch_one(&state.db)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn explicit_picker_cannot_adopt_or_replace_an_existing_preview_selection() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let client = Arc::new(LegacyOnly {
+        events: events.clone(),
+        files_ready: true,
+    });
+    let (state, id) = state(client, true).await;
+    assert!(
+        pending_grabs::reserve(
+            &state.db,
+            "existing",
+            HASH,
+            "QBittorrent",
+            None,
+            Some(id),
+            "{}",
+            None,
+            false
+        )
+        .await
+        .unwrap()
+    );
+    pending_grabs::set_wanted_indices(&state.db, "existing", "[2]")
+        .await
+        .unwrap();
+    let mut request = form(Some(id));
+    request.start_unselected = true;
+    let error = grab_preview(State(state.clone()), Json(request))
+        .await
+        .unwrap_err();
+    assert_eq!(error.0, StatusCode::CONFLICT);
+    assert!(events.lock().unwrap().is_empty());
+    let row = pending_grabs::get(&state.db, "existing")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending_grabs::wanted_indices(&row), Some(vec![2]));
+}
+
+#[test]
+fn existing_preview_requests_keep_legacy_default_selection() {
+    let request: GrabPreviewForm = serde_json::from_value(serde_json::json!({
+        "url": "magnet:?xt=urn:btih:91a564c6d0f605344b67cef81eeab3199d61872b", "info_hash": HASH,
+    }))
+    .unwrap();
+    assert!(!request.start_unselected);
+}
+
+#[tokio::test]
+async fn explicit_picker_holds_if_saved_review_disappears_before_open() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let client = Arc::new(LegacyOnly {
+        events: events.clone(),
+        files_ready: true,
+    });
+    let (state, id) = state(client, true).await;
+    sqlx::query("DELETE FROM source_numbering_decisions")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let mut request = form(Some(id));
+    request.start_unselected = true;
+    let error = grab_preview(State(state.clone()), Json(request))
+        .await
+        .unwrap_err();
+    assert_eq!(error.0, StatusCode::CONFLICT);
+    assert!(
+        error
+            .1
+            .contains("saved numbering review is no longer available")
+    );
+    assert!(events.lock().unwrap().is_empty());
+    assert_eq!(pending_grabs::count(&state.db).await.unwrap(), 0);
 }
