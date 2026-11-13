@@ -20,6 +20,8 @@ pub mod numbering;
 pub mod pages;
 pub mod reconcile;
 pub mod recycle;
+#[cfg(test)]
+mod recycle_cancellation_tests;
 pub mod search;
 pub mod table;
 

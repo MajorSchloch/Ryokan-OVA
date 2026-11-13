@@ -26,6 +26,8 @@
 pub mod helpers;
 pub mod manifest;
 #[cfg(test)]
+pub(crate) mod test_support;
+#[cfg(test)]
 mod tests;
 
 use std::fs;
