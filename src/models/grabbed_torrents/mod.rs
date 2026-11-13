@@ -3,6 +3,8 @@ use sqlx::{Row, SqlitePool};
 mod import_policy;
 pub mod migration_replay;
 mod numbering;
+mod source_compatibility;
+pub(crate) use source_compatibility::ensure_automatic_compatibility;
 #[cfg(test)]
 mod requirements_failure_tests;
 #[cfg(test)]

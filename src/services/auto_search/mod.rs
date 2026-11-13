@@ -1317,6 +1317,23 @@ async fn collect_scored_for_target_filtered(
                 continue;
             }
         };
+        if let Err(reason) = crate::models::grabbed_torrents::ensure_automatic_compatibility(
+            db,
+            &result.info_hash,
+            detail.id,
+            result.release_mapping.as_ref(),
+        )
+        .await
+        {
+            logger::warn(
+                db,
+                LogCategory::Grab,
+                "Automatic candidate held: existing source assignment",
+                &reason,
+            )
+            .await;
+            continue;
+        }
         if !allow_batch && result.is_batch {
             continue;
         }
@@ -1690,6 +1707,20 @@ async fn collect_scored_for_target_filtered(
 /// `AutoQueryCtx { aliases: &all_aliases, ..ctx }`.
 impl AutoQueryCtx<'_> {
     async fn apply_source(&self, result: &mut SearchResult) -> Result<bool, String> {
+        let applied = self.resolve_source(result).await?;
+        if self.require_verbatim && applied {
+            crate::models::grabbed_torrents::ensure_automatic_compatibility(
+                self.db,
+                &result.info_hash,
+                self.anilist_id,
+                result.release_mapping.as_ref(),
+            )
+            .await?;
+        }
+        Ok(applied)
+    }
+
+    async fn resolve_source(&self, result: &mut SearchResult) -> Result<bool, String> {
         if let Some(bound) = self.premiere_bound {
             bound.check(result.published_at)?;
         }
