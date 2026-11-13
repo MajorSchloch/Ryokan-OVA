@@ -69,6 +69,10 @@ pub fn companions(main: &Path) -> Vec<PathBuf> {
 /// a second filesystem) fall back to copy-then-unlink through a
 /// `.ryokan-tmp` sibling so an interrupted copy leaves nothing at `dst`.
 pub(super) fn move_path(src: &Path, dst: &Path, force_copy: bool) -> io::Result<()> {
+    #[cfg(test)]
+    let paused_copy = super::test_support::copy_for(src);
+    #[cfg(test)]
+    let force_copy = force_copy || paused_copy.is_some();
     if !force_copy {
         match fs::rename(src, dst) {
             Ok(()) => return Ok(()),
@@ -86,6 +90,10 @@ pub(super) fn move_path(src: &Path, dst: &Path, force_copy: bool) -> io::Result<
         fs::remove_dir_all(src)
     } else {
         copy_file_via_tmp(src, dst)?;
+        #[cfg(test)]
+        if let Some(copy) = paused_copy {
+            copy.pause();
+        }
         fs::remove_file(src)
     }
 }

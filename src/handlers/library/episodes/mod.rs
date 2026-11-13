@@ -169,6 +169,47 @@ pub async fn delete_episode_file(
     HxRequest(is_htmx): HxRequest,
     Path((request_id, episode_number)): Path<(i64, i32)>,
 ) -> Response {
+    // Keep the move and its catalog/client updates together if the
+    // browser disconnects. Dropping this join handle detaches the task.
+    match tokio::spawn(delete_episode_file_owned(
+        state,
+        is_htmx,
+        request_id,
+        episode_number,
+    ))
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::error!("episode delete task failed: {e}");
+            let status = axum::http::StatusCode::INTERNAL_SERVER_ERROR;
+            let message = "Episode delete task failed; check the library and logs.";
+            if is_htmx {
+                episode_delete_trigger(
+                    status,
+                    episode_number,
+                    &[episode_number],
+                    false,
+                    message,
+                    None,
+                )
+            } else {
+                (
+                    status,
+                    Json(serde_json::json!({"ok": false, "message": message})),
+                )
+                    .into_response()
+            }
+        }
+    }
+}
+
+async fn delete_episode_file_owned(
+    state: AppState,
+    is_htmx: bool,
+    request_id: i64,
+    episode_number: i32,
+) -> Response {
     // The route serves both the legacy JSON shape (POST `/api/...` from
     // a non-htmx caller — kept for any external programmatic consumer)
     // and the migration's declarative shape (htmx `hx-post` from the
