@@ -316,6 +316,21 @@ async fn nudge_jellyfin(state: &AppState) {
     ),
 )]
 pub async fn restore(State(state): State<AppState>, Path(entry_id): Path<String>) -> Response {
+    // The task owns the import locks until file placement, retagging,
+    // and notification finish, even when the browser disconnects.
+    match tokio::spawn(restore_owned(state, entry_id)).await {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::error!("recycle restore task failed: {e}");
+            json_err(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "Restore task failed; check the library and logs.",
+            )
+        }
+    }
+}
+
+async fn restore_owned(state: AppState, entry_id: String) -> Response {
     let (bin, media_root) = match bin_path(&state).await {
         Ok(b) => b,
         Err(r) => return *r,
