@@ -9,6 +9,8 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
+#[path = "existing_bound_sources.rs"]
+mod existing_bound_sources;
 #[path = "root_pack_discovery.rs"]
 mod root_pack_discovery;
 

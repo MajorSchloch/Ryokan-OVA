@@ -1475,6 +1475,35 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             release_mapping = Some(mapping);
         }
 
+        if let Err(reason) = crate::models::grabbed_torrents::ensure_automatic_compatibility(
+            &state.db,
+            &item.info_hash,
+            found.series.anilist_id,
+            release_mapping.as_ref(),
+        )
+        .await
+        {
+            skipped += 1;
+            let _ = rss::record_decision(
+                &state.db,
+                rss::DecisionRecord {
+                    item_key: &item_key,
+                    title: &item.title,
+                    link: &item.link,
+                    series_id: Some(found.series.id),
+                    series_title: &found.series.title,
+                    group_name: &item.group,
+                    is_batch: item.is_batch,
+                    decision: "rejected",
+                    reason: &reason,
+                    source: src_str,
+                    source_id: src_id,
+                },
+            )
+            .await;
+            continue;
+        }
+
         let actionable_eps: HashSet<i32> = found
             .resolved_eps
             .iter()
