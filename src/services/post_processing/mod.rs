@@ -3730,28 +3730,21 @@ pub async fn run_once(state: &AppState) {
         v
     };
 
-    // Pre-pass: NULL the `download_client_id` stamp on any pending
-    // grab whose stamped client is no longer in the pool (deleted
-    // by the user, disabled, or referenced via a never-existed id
-    // due to an earlier crash mid-write). Runs unconditionally
-    // before fan-out so the cleanup fires even in the corner case
-    // where every pending grab points at a gone client and the
-    // fan-out itself would early-return at `clients.is_empty()`.
-    //
-    // PR 110's in-loop cleanup also handled this but only when at
-    // least one valid client made it into the per-pass `clients`
-    // map — the all-orphans case fell through the `is_empty()`
-    // guard. The pre-pass is sufficient because the pool can't
-    // change mid-run; checking once up front catches every orphan
-    // and lets the loop body stay focused on matching.
-    //
-    // The next post-processing tick re-loads `pending` and finds
-    // the now-NULLed grab, falls through to default, and either
-    // matches against the default's `list_scoped` or hits the 60s
-    // stale-mark grace window.
+    // A disabled or unavailable client still owns its grabs. Only a
+    // missing configuration row permits legacy fallback to a default.
+    // Keep ownership unchanged if the configuration lookup fails.
+    let configured_ids: HashSet<i64> =
+        match crate::models::download_clients::list_all(&state.db).await {
+            Ok(rows) => rows.into_iter().map(|row| row.id).collect(),
+            Err(error) => {
+                tracing::warn!(%error, "post-processing held: could not read client owners");
+                return;
+            }
+        };
     for grab in &pending {
         if let Some(id) = grab.download_client_id
             && state.client_by_id(id).await.is_none()
+            && !configured_ids.contains(&id)
         {
             let _ = grabbed_torrents::set_download_client(&state.db, grab.id, None).await;
         }
@@ -3962,13 +3955,9 @@ pub async fn run_once(state: &AppState) {
                     "Marking as removed (not found in client)",
                 )
                 .await;
-                let _ = grabbed_torrents::mark_removed(&state.db, grab.id).await;
-                let _ = episode_tags::clear_tags_for_removal(
-                    &state.db,
-                    grab.series_id,
-                    &grab.episode_numbers,
-                )
-                .await;
+                if let Err(error) = grabbed_torrents::cancel_pending_grab(&state.db, grab).await {
+                    tracing::warn!(grab_id = grab.id, %error, "could not reconcile missing grab");
+                }
             }
             continue;
         };
@@ -4536,31 +4525,44 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
     if pool.clients.is_empty() {
         return Ok(());
     }
-    let mut all_torrents: Vec<crate::services::download_client::DownloadItem> = Vec::new();
+    let mut all_torrents = Vec::new();
     let mut skipped_fetches = HashSet::new();
-    for c in pool.clients.values() {
+    for (id, c) in &pool.clients {
         if let Ok(items) = c.list_scoped().await {
             skipped_fetches.extend(
                 items
                     .iter()
                     .filter(|item| is_skipped_nzbget_fetch(c.as_ref(), item))
-                    .map(|item| item.hash.clone()),
+                    .flat_map(|item| [(Some(*id), item.hash.clone()), (None, item.hash.clone())]),
             );
-            all_torrents.extend(items);
+            all_torrents.extend(items.into_iter().map(|item| (*id, item)));
         }
     }
-    let by_hash: HashMap<String, &crate::services::download_client::DownloadItem> = all_torrents
+    // Stamped jobs can only match their owner. NULL keeps the legacy
+    // merged lookup; another client's matching hash or name is no proof
+    // that a disabled or unreachable owner's job completed or vanished.
+    let by_hash: HashMap<_, _> = all_torrents
         .iter()
-        .map(|t| (t.hash.to_lowercase(), t))
+        .flat_map(|(id, t)| {
+            [
+                ((Some(*id), t.hash.to_lowercase()), t),
+                ((None, t.hash.to_lowercase()), t),
+            ]
+        })
         .collect();
-    let by_name: HashMap<String, &crate::services::download_client::DownloadItem> = all_torrents
+    let by_name: HashMap<_, _> = all_torrents
         .iter()
-        .map(|t| (t.name.to_lowercase(), t))
+        .flat_map(|(id, t)| {
+            [
+                ((Some(*id), t.name.to_lowercase()), t),
+                ((None, t.name.to_lowercase()), t),
+            ]
+        })
         .collect();
 
     for grab in &pending {
         // Match the exact job key, even if an active retry has the same title.
-        if skipped_fetches.contains(&grab.hash) {
+        if skipped_fetches.contains(&(grab.download_client_id, grab.hash.clone())) {
             record_skipped_fetch(state, grab).await;
             continue;
         }
@@ -4574,9 +4576,13 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
         }
 
         let matched = if !grab.hash.is_empty() {
-            by_hash.get(&grab.hash.to_lowercase()).copied()
+            by_hash
+                .get(&(grab.download_client_id, grab.hash.to_lowercase()))
+                .copied()
         } else {
-            by_name.get(&grab.torrent_name.to_lowercase()).copied()
+            by_name
+                .get(&(grab.download_client_id, grab.torrent_name.to_lowercase()))
+                .copied()
         };
         let Some(torrent) = matched else { continue };
 
