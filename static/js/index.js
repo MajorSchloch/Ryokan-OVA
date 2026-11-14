@@ -623,6 +623,7 @@ function confirmBulkDelete() {
         body: JSON.stringify({
             series_ids: ids,
             delete_files: deleteFiles,
+            note: (document.getElementById('bulk-delete-note') || {}).value || '',
             add_exclusion: !!(document.getElementById('bulk-delete-exclude') || {}).checked
         })
     })

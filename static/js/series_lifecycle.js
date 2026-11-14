@@ -111,6 +111,7 @@ function performRemoveSeries(dbId) {
         body: JSON.stringify({
             id: dbId,
             delete_files: true,
+            note: (document.getElementById('remove-series-note') || {}).value || '',
             add_exclusion: !!(document.getElementById('remove-series-exclude') || {}).checked,
         })
     })

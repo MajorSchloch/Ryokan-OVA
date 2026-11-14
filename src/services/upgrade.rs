@@ -180,26 +180,31 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
 
-    let (cutoff_source, cutoff_is_remux, cutoff_is_bdmv) =
-        source::parse_cutoff_source(&cfg.cutoff_source);
-    let cutoff_resolution = Resolution::from_str(&cfg.cutoff_resolution);
-    // The full upgrade decision (cutoff, revisions, Custom Format
-    // score) for the per-candidate gate below; the quality cutoff
-    // pieces above still drive the target selection.
-    let policy = source::UpgradePolicy::from_config(&cfg);
-    let requirements = RequirementsPolicy::from_config(&cfg);
-    if !requirements.enabled && !policy.has_quality_cutoff() {
+    let tracked = series::get_all(&state.db)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let policies = crate::services::language_preferences::resolve_snapshot(
+        &state.db,
+        &cfg,
+        &tracked.iter().map(|s| s.id).collect::<Vec<_>>(),
+    )
+    .await?;
+    let has_invalid = policies.values().any(Result::is_err);
+    let has_cutoff = policies.values().filter_map(|p| p.as_ref().ok()).any(|p| {
+        RequirementsPolicy::from_config(&p.config).enabled
+            || source::UpgradePolicy::from_config(&p.config).has_quality_cutoff()
+    });
+    let empty_default_cutoff = RequirementsPolicy::from_config(&cfg).enabled
+        || source::UpgradePolicy::from_config(&cfg).has_quality_cutoff();
+    if !has_invalid && !has_cutoff && (!tracked.is_empty() || !empty_default_cutoff) {
         return Ok(UpgradeSummary {
             series_checked: 0,
             episodes_checked: 0,
             upgrades_grabbed: 0,
-            detail: "No quality cutoff configured; skipping upgrade search".to_string(),
+            detail: "No quality cutoff configured; skipping upgrade search".into(),
         });
     }
-
-    let tracked = series::get_all(&state.db)
-        .await
-        .map_err(|e| e.to_string())?;
 
     // Multi-client routing — resolved per-result inside the loop via
     // `client_for_indexer_with_id(result.indexer_id)`. We bail early
@@ -284,9 +289,27 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
         if !row.allow_upgrades {
             continue;
         }
-        let cfg = crate::services::language_preferences::effective_config(&state.db, &cfg, row.id)
-            .await?;
+        let cfg = match policies.get(&row.id) {
+            Some(Ok(policy)) => policy.config.clone(),
+            _ => {
+                logger::warn(
+                    &state.db,
+                    LogCategory::AutoSearch,
+                    "Upgrade held: release requirements unavailable",
+                    &row.title,
+                )
+                .await;
+                continue;
+            }
+        };
         let requirements = RequirementsPolicy::from_config(&cfg);
+        let policy = source::UpgradePolicy::from_config(&cfg);
+        if !requirements.enabled && !policy.has_quality_cutoff() {
+            continue;
+        }
+        let (cutoff_source, cutoff_is_remux, cutoff_is_bdmv) =
+            source::parse_cutoff_source(&cfg.cutoff_source);
+        let cutoff_resolution = Resolution::from_str(&cfg.cutoff_resolution);
 
         // Issue #102 — the tracked snapshot was pulled at the top of
         // the sweep; a series removed mid-iteration would still be

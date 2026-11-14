@@ -25,6 +25,14 @@ pub async fn save(
     HxRequest(htmx): HxRequest,
     Form(fields): Form<Vec<(String, String)>>,
 ) -> Result<Response, Error> {
+    let mut fields = fields;
+    if fields
+        .iter()
+        .any(|(k, v)| k == "future_controls" && v == "1")
+        && !fields.iter().any(|(k, _)| k == "future_enabled")
+    {
+        fields.retain(|(k, _)| k != "include");
+    }
     let plan = draft(&db, seed, &fields).await?;
     let owner = plan.owner.filter(|id| *id > 0).ok_or((
         StatusCode::BAD_REQUEST,
@@ -75,6 +83,14 @@ pub async fn save(
         &plan.name_override
     };
     let policy = &plan.policy;
+    if fields.iter().any(|(k, _)| k == "future_enabled")
+        && !(policy.tv || policy.movies || policy.ovas)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Choose TV, movies, or OVAs before enabling future releases.",
+        ));
+    }
     // Prefer the existing owner's row. Re-anchoring a season-two follow keeps its receipts and start date.
     let id = if let Some(primary) = follows
         .iter()
@@ -129,9 +145,24 @@ pub async fn save(
             .bind(owner).bind(name).bind(policy.tv).bind(policy.movies).bind(policy.ovas).bind(policy.alternatives)
             .fetch_one(&mut *tx).await.map_err(read_error)?
     };
-    save_choices(&mut tx, id, &plan).await?;
+    let future_only = fields
+        .iter()
+        .any(|(k, v)| k == "future_controls" && v == "1");
+    if !future_only {
+        save_choices(&mut tx, id, &plan).await?;
+    }
     tx.commit().await.map_err(read_error)?;
     SETTINGS_CHANGED.notify_one();
+    if future_only {
+        let destination = plan.return_to.as_deref().unwrap_or("/");
+        return Ok(htmx_aware_redirect(
+            htmx,
+            &format!(
+                "{destination}{}tab=settings",
+                if destination.contains('?') { "&" } else { "?" }
+            ),
+        ));
+    }
     let mut destination = format!("/library/groups/{owner}/preview");
     if let Some(return_to) = &plan.return_to {
         destination.push_str("?return_to=");

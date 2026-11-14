@@ -215,6 +215,14 @@ pub async fn run_sanitize(live_db: &Path, output: &Path) -> Result<SanitizeSumma
 
     // Log text: any URL or `apikey=` value in a message or detail.
     let log_rows = scrub_logs(&pool).await?;
+    // Activity stores user notes and raw historical request failures. Do not
+    // export that free text in a debug database, even when it is not a URL.
+    sqlx::query(
+        "UPDATE library_activity SET operation_key='sanitized-activity-'||id,reason='Reason removed from sanitized copy',detail='',note=''",
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| format!("scrub activity: {e}"))?;
 
     // `sessions.token` — cookie values double as DB session keys.
     // A sanitized DB handed to someone else shouldn't let them log
@@ -982,6 +990,7 @@ mod tests {
                 .execute(&pool)
                 .await
                 .unwrap();
+            sqlx::query("INSERT INTO library_activity(operation_key,action,title,reason,detail,note) VALUES('activity-key-sekrit','Failed','Show','http://client/api?apikey=activity-reason-sekrit','token=activity-detail-sekrit','activity-note-sekrit')").execute(&pool).await.unwrap();
             pool.close().await;
         }
         let out = dir.join("sanitized.db");
@@ -1001,6 +1010,10 @@ mod tests {
             "path-passkey-sekrit",
             "sab-sekrit",
             "poll-sekrit",
+            "activity-key-sekrit",
+            "activity-reason-sekrit",
+            "activity-detail-sekrit",
+            "activity-note-sekrit",
             "topsecret-qbit",
             "cookie-token-xyz",
         ] {

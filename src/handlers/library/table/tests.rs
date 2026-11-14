@@ -81,7 +81,7 @@ async fn counts_local_slots_and_only_confirmed_airings_for_each_part() {
         (first.disk, first.missing, first.total),
         (Some(12), Some(0), Some(13))
     );
-    assert!(first.next.as_ref().unwrap().ends_with("Ep 13"));
+    assert!(first.next.as_ref().unwrap().starts_with("Episode 13"));
     assert!(!second.followed);
     assert_eq!(
         (second.mode, second.disk, second.missing),
@@ -97,10 +97,12 @@ async fn unreadable_root_and_sparse_air_dates_stay_unknown() {
     let db = fixture(&root).await;
     seed_series(&db, 17, "No schedule").await;
     seed_series(&db, 18, "Finished").await;
-    sqlx::query("UPDATE series SET status='FINISHED',episodes=1 WHERE anilist_id=18")
-        .execute(&db)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE series SET status='FINISHED',episodes=1,monitor_mode='all' WHERE anilist_id=18",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
     let rows = load(&db).await.unwrap().rows;
     assert!(rows.iter().all(|r| r.disk.is_none() && r.missing.is_none()));
     fs::create_dir(root).unwrap();

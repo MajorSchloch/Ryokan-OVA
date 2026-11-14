@@ -1,7 +1,7 @@
 //! Provider-addressed detail pages exist independently of library membership.
 use axum::{
     Router,
-    extract::{Path, Query, State},
+    extract::{OriginalUri, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
@@ -25,6 +25,8 @@ pub fn path(provider_id: impl std::borrow::Borrow<i64>) -> String {
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .merge(super::requirements::routes())
+        .merge(super::management::routes())
         .route("/anime/anilist/{id}", get(anilist_detail))
         .route("/anime/mal/{id}", get(mal_detail))
         .route("/series/{id}", get(legacy_detail))
@@ -58,6 +60,7 @@ async fn legacy_detail(
     State(state): State<AppState>,
     Path(id): Path<i64>,
     Query(kind): Query<SeriesIdKind>,
+    OriginalUri(uri): OriginalUri,
     HxRequest(is_htmx): HxRequest,
 ) -> Response {
     let provider_id = match resolve_series_request(&state.db, id, kind.by_anilist()).await {
@@ -74,7 +77,21 @@ async fn legacy_detail(
     if provider_id == 0 || provider_id == i64::MIN {
         return (StatusCode::NOT_FOUND, "Anime not found.").into_response();
     }
-    htmx_aware_redirect(is_htmx, &path(provider_id))
+    let mut destination = path(provider_id);
+    if let Some(query) = uri.query() {
+        let parsed = reqwest::Url::parse(&format!("http://localhost/?{query}")).ok();
+        let mut serializer = reqwest::Url::parse("http://localhost/").unwrap();
+        if let Some(parsed) = parsed {
+            for (key, value) in parsed.query_pairs().filter(|(key, _)| key != "by") {
+                serializer.query_pairs_mut().append_pair(&key, &value);
+            }
+        }
+        if let Some(query) = serializer.query() {
+            destination.push('?');
+            destination.push_str(query);
+        }
+    }
+    htmx_aware_redirect(is_htmx, &destination)
 }
 
 #[cfg(test)]

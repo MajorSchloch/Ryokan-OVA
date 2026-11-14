@@ -145,6 +145,8 @@ pub async fn bulk_monitor(
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct BulkDeleteRequest {
+    #[serde(default)]
+    pub note: Option<String>,
     pub series_ids: Vec<i64>,
     /// When true, also walks `grabbed_torrents` for each series and
     /// asks the resolved download client to drop the torrent + its
@@ -182,6 +184,36 @@ pub async fn bulk_delete(
     State(state): State<AppState>,
     Json(req): Json<BulkDeleteRequest>,
 ) -> Json<BulkOutcome> {
+    let ids = req.series_ids.clone();
+    match tokio::spawn(bulk_delete_owned(state, req)).await {
+        Ok(outcome) => outcome,
+        Err(_) => Json(BulkOutcome {
+            succeeded: Vec::new(),
+            failed: ids
+                .into_iter()
+                .map(|series_id| BulkFailure {
+                    series_id,
+                    reason: "Removal ended unexpectedly; check the library before retrying.".into(),
+                })
+                .collect(),
+        }),
+    }
+}
+
+async fn bulk_delete_owned(state: AppState, req: BulkDeleteRequest) -> Json<BulkOutcome> {
+    if req.note.as_ref().is_some_and(|n| n.chars().count() > 1000) {
+        return Json(BulkOutcome {
+            succeeded: Vec::new(),
+            failed: req
+                .series_ids
+                .iter()
+                .map(|id| BulkFailure {
+                    series_id: *id,
+                    reason: "Use at most 1000 characters for a note.".into(),
+                })
+                .collect(),
+        });
+    }
     if req.series_ids.is_empty() {
         return Json(BulkOutcome {
             succeeded: vec![],
@@ -211,6 +243,23 @@ pub async fn bulk_delete(
         } else {
             None
         };
+        let mut event = crate::models::library_activity::Event::new(
+            format!(
+                "remove:{}:{}",
+                series_id,
+                chrono::Utc::now().timestamp_micros()
+            ),
+            "Removed from library",
+            Some(*series_id),
+            "",
+            if req.delete_files {
+                "Manually removed the library entry and requested media cleanup."
+            } else {
+                "Manually removed tracking; media was kept."
+            },
+        );
+        event.note = req.note.clone().unwrap_or_default();
+        event.capture_parent(&state.db).await;
         match delete_one_series(
             &state,
             *series_id,
@@ -224,12 +273,18 @@ pub async fn bulk_delete(
                 if let Some(snapshot) = exclusion {
                     super::crud::record_sync_exclusion(&state.db, snapshot).await;
                 }
+                crate::models::library_activity::append(&state.db, event).await;
                 succeeded.push(*series_id)
             }
-            Err(reason) => failed.push(BulkFailure {
-                series_id: *series_id,
-                reason,
-            }),
+            Err(reason) => {
+                event.action = "Removal needs attention".into();
+                event.reason = reason.clone();
+                crate::models::library_activity::append(&state.db, event).await;
+                failed.push(BulkFailure {
+                    series_id: *series_id,
+                    reason,
+                });
+            }
         }
     }
 
@@ -468,6 +523,7 @@ mod tests {
         let b = insert_series(&pool, 2, "B").await;
 
         let req = BulkDeleteRequest {
+            note: None,
             series_ids: vec![a, b],
             delete_files: false,
             add_exclusion: false,
@@ -491,6 +547,7 @@ mod tests {
     async fn bulk_delete_empty_selection_is_200_noop() {
         let pool = in_memory_pool().await;
         let req = BulkDeleteRequest {
+            note: None,
             series_ids: vec![],
             delete_files: false,
             add_exclusion: false,
@@ -549,6 +606,7 @@ mod tests {
         let state = crate::test_support::build_test_app_state(pool.clone(), None);
 
         let req = BulkDeleteRequest {
+            note: None,
             series_ids: vec![series_id],
             delete_files: true,
             add_exclusion: false,
@@ -687,6 +745,7 @@ mod tests {
         let state = crate::test_support::build_test_app_state(pool.clone(), Some(client));
 
         let req = BulkDeleteRequest {
+            note: None,
             series_ids: vec![series_id],
             delete_files: true,
             add_exclusion: false,

@@ -3288,6 +3288,9 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
+    crate::models::requirement_preferences::migrate(db).await?;
+    crate::models::library_activity::migrate(db).await?;
+
     Ok(())
 }
 

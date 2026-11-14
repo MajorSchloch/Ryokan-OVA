@@ -57,11 +57,11 @@ pub async fn episode_file_info(
             );
         }
     };
-    let cfg =
-        match crate::services::language_preferences::effective_config(&state.db, &cfg, series_id)
+    let policy =
+        match crate::services::language_preferences::resolve_all(&state.db, &cfg, &[series_id])
             .await
         {
-            Ok(value) => value,
+            Ok(mut value) => value.remove(&series_id).expect("requested policy exists"),
             Err(_) => {
                 return error(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -70,6 +70,7 @@ pub async fn episode_file_info(
                 );
             }
         };
+    let cfg = policy.config;
     let root = match tokio::fs::canonicalize(&cfg.media_root).await {
         Ok(value) => value,
         Err(_) => {
@@ -144,6 +145,7 @@ pub async fn episode_file_info(
                 "audio_requirements": audio,
                 "media_requirements": requirements,
                 "upgrades_allowed": tracked.allow_upgrades,
+                "requirement_origins": policy.origins,
             }))
             .into_response()
         }

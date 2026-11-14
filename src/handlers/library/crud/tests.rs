@@ -912,6 +912,7 @@ mod crud_ci {
         let series_id = seed_series(&db, 70, "Show").await;
         let state = build_test_app_state(db.clone(), None);
         let form = super::super::RemoveSeriesForm {
+            note: None,
             id: series_id,
             delete_files: Some(false),
             add_exclusion: None,
@@ -934,6 +935,7 @@ mod crud_ci {
         let db = in_memory_pool().await;
         let state = build_test_app_state(db, None);
         let form = super::super::RemoveSeriesForm {
+            note: None,
             id: 99_999,
             delete_files: Some(false),
             add_exclusion: None,
@@ -1025,6 +1027,7 @@ mod remove_series_safety {
         let state = build_test_app_state(db.clone(), None);
 
         let form = super::super::RemoveSeriesForm {
+            note: None,
             id: series_id,
             delete_files: Some(true),
             add_exclusion: None,
@@ -1055,6 +1058,7 @@ mod remove_series_safety {
         save_media_root(&db, media_root.to_str().unwrap()).await;
         let state = build_test_app_state(db.clone(), None);
         let form = super::super::RemoveSeriesForm {
+            note: None,
             id: series_id,
             delete_files: Some(true),
             add_exclusion: None,
@@ -1085,6 +1089,7 @@ mod remove_series_safety {
         save_media_root(&db, media_root.to_str().unwrap()).await;
         let state = build_test_app_state(db.clone(), None);
         let form = super::super::RemoveSeriesForm {
+            note: None,
             id: series_id,
             delete_files: Some(true),
             add_exclusion: None,
@@ -1114,6 +1119,7 @@ mod remove_series_safety {
         save_media_root(&db, media_root.to_str().unwrap()).await;
         let state = build_test_app_state(db.clone(), None);
         let form = super::super::RemoveSeriesForm {
+            note: None,
             id: series_id,
             delete_files: Some(true),
             add_exclusion: None,
@@ -1153,6 +1159,7 @@ mod remove_series_safety {
         let state = build_test_app_state(db.clone(), None);
 
         let form = super::super::RemoveSeriesForm {
+            note: None,
             id: series_id,
             delete_files: Some(true),
             add_exclusion: None,
@@ -1181,6 +1188,7 @@ mod remove_series_safety {
         let state = build_test_app_state(db.clone(), None);
 
         let form = super::super::RemoveSeriesForm {
+            note: None,
             id: series_id,
             delete_files: Some(true),
             add_exclusion: None,
@@ -1210,6 +1218,7 @@ mod remove_series_safety {
         let state = build_test_app_state(db.clone(), None);
 
         let form = super::super::RemoveSeriesForm {
+            note: None,
             id: series_id,
             delete_files: Some(true),
             add_exclusion: None,
@@ -1240,6 +1249,7 @@ mod remove_series_safety {
         let state = build_test_app_state(db.clone(), None);
 
         let form = super::super::RemoveSeriesForm {
+            note: None,
             id: series_id,
             delete_files: Some(true),
             add_exclusion: None,
@@ -1340,6 +1350,7 @@ mod remove_series_safety {
         let state = build_test_app_state(db.clone(), Some(client));
 
         let form = super::super::RemoveSeriesForm {
+            note: None,
             id: series_id,
             delete_files: Some(true),
             add_exclusion: None,
@@ -1378,6 +1389,7 @@ mod remove_series_safety {
         let client: Arc<dyn DownloadClient> = recorder.clone();
         let state = build_test_app_state(db.clone(), Some(client));
         let form = super::super::RemoveSeriesForm {
+            note: None,
             id: a,
             delete_files: Some(true),
             add_exclusion: None,
@@ -1412,6 +1424,7 @@ mod remove_series_safety {
         let state = build_test_app_state(db.clone(), None);
 
         let form = super::super::RemoveSeriesForm {
+            note: None,
             id: series_id,
             delete_files: Some(true),
             add_exclusion: None,
