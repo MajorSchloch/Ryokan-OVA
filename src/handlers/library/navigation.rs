@@ -147,6 +147,11 @@ pub(super) async fn cards(
     let follows = release_follows::list(db).await?;
     let total = groups.len();
     let needle = search.trim().to_lowercase();
+    let aliases = super::summary::titles(
+        db,
+        &library.values().map(|s| (**s).clone()).collect::<Vec<_>>(),
+    )
+    .await?;
     let mut cards = Vec::new();
     for group in groups {
         if matching_ids.is_some_and(|ids| {
@@ -157,7 +162,13 @@ pub(super) async fn cards(
         }) {
             continue;
         }
-        let searchable = search_titles(&group, &library);
+        let mut searchable = search_titles(&group, &library);
+        for entry in &group.entries {
+            if let Some(names) = entry.series_id.and_then(|id| aliases.get(&id)) {
+                searchable.push('\n');
+                searchable.push_str(names);
+            }
+        }
         let matches_search = needle.is_empty() || searchable.to_lowercase().contains(&needle);
         let representative = representative(&group, &library);
         let mut formats: Vec<_> = group
@@ -200,9 +211,10 @@ pub(super) async fn cards(
             tracked: group.tracked,
             available: group.outside,
             progress: p,
-            following: follows
-                .iter()
-                .any(|f| group.entries.iter().any(|e| e.provider_id == f.anilist_id)),
+            following: follows.iter().any(|f| {
+                (f.tv || f.movies || f.ovas)
+                    && group.entries.iter().any(|e| e.provider_id == f.anilist_id)
+            }),
             formats: formats.join(" · "),
             next_airing: upcoming,
             added_date: availability::added_label(&added_at),
@@ -241,12 +253,15 @@ struct Release {
     format: String,
     date: String,
     status: String,
-    files: String,
     in_library: bool,
-    included: bool,
+    series_id: Option<i64>,
+    monitor_mode: String,
+    requirements_label: String,
+    upcoming: bool,
+    aliases: String,
+    allow_upgrades: bool,
     progress: CardProgress,
     monitoring_label: String,
-    follow_label: String,
     next_airing: String,
     added_date: String,
 }
@@ -263,6 +278,10 @@ struct FranchisePage {
     seed: i64,
     progress: CardProgress,
     next_airing: String,
+    id: String,
+    requirements: super::requirements::RequirementsView,
+    activity: Vec<crate::models::library_activity::Activity>,
+    future: super::groups::FutureFollowView,
 }
 
 pub async fn page(
@@ -302,9 +321,9 @@ pub async fn page(
         .await
         .map_err(read_error)?;
     let follows = release_follows::list(&state.db).await.map_err(read_error)?;
-    let following = follows
-        .iter()
-        .any(|f| group.entries.iter().any(|e| e.provider_id == f.anilist_id));
+    let following = follows.iter().any(|f| {
+        (f.tv || f.movies || f.ovas) && group.entries.iter().any(|e| e.provider_id == f.anilist_id)
+    });
     let representative = representative(&group, &by_id);
     let cover_url = representative
         .map(|s| s.cover_url.clone())
@@ -322,12 +341,55 @@ pub async fn page(
     let combined =
         availability::aggregate(library.iter().filter_map(|s| progress_by_id.get(&s.id)));
     let next_airing = next_airing(library.iter().filter_map(|s| progress_by_id.get(&s.id)));
+    let future = if seed > 0 {
+        super::groups::future_controls(&state.db, &id, seed)
+            .await
+            .map_err(read_error)?
+    } else {
+        super::groups::FutureFollowView::default()
+    };
+    let aliases = super::summary::titles(&state.db, &library)
+        .await
+        .map_err(read_error)?;
+    let requirements = super::requirements::franchise_view(&state.db, &cfg, &id)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Franchise requirements unavailable.",
+            )
+        })?;
+    let activity = crate::models::library_activity::recent(
+        &state.db,
+        &library.iter().map(|s| s.id).collect::<Vec<_>>(),
+        Some(&id),
+    )
+    .await
+    .map_err(read_error)?;
+    let policy_snapshot = crate::services::language_preferences::resolve_snapshot(
+        &state.db,
+        &cfg,
+        &library.iter().map(|s| s.id).collect::<Vec<_>>(),
+    )
+    .await
+    .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Requirements unavailable."))?;
+    let provider_aliases = super::summary::provider_titles(
+        &state.db,
+        &group
+            .entries
+            .iter()
+            .map(|e| e.provider_id)
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .map_err(read_error)?;
+    let inherited =
+        crate::services::language_preferences::franchise_config(&state.db, &cfg, &id).await;
     let releases = group
         .entries
         .iter()
         .map(|e| {
             let tracked = e.series_id.and_then(|id| by_id.get(&id));
-            let included = tracked.is_some() && e.choice != Some(false) && !e.excluded;
             let summary = e
                 .series_id
                 .and_then(|id| progress_by_id.get(&id))
@@ -348,6 +410,53 @@ pub async fn page(
                     String::new()
                 };
             Release {
+                series_id: e.series_id,
+                monitor_mode: if summary.monitoring_label.contains(" of ") {
+                    "custom".into()
+                } else {
+                    tracked
+                        .map(|s| s.monitor_mode.clone())
+                        .unwrap_or_else(|| "none".into())
+                },
+                requirements_label: match e
+                    .series_id
+                    .and_then(|id| policy_snapshot.get(&id))
+                    .and_then(|p| p.as_ref().ok())
+                    .map(|p| &p.config)
+                    .or_else(|| {
+                        e.series_id
+                            .is_none()
+                            .then(|| inherited.as_ref().ok())
+                            .flatten()
+                    }) {
+                    Some(cfg) => super::requirements::brief(cfg),
+                    None => "Requirements unavailable".into(),
+                },
+                upcoming: tracked
+                    .map(|s| s.status.as_str())
+                    .or_else(|| e.related.as_ref().map(|r| r.status.as_str()))
+                    .is_some_and(|s| matches!(s, "NOT_YET_RELEASED" | "NOT_YET_AIRED")),
+                aliases: tracked
+                    .and_then(|s| aliases.get(&s.id))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        let mut names = vec![
+                            e.title.clone(),
+                            provider_aliases
+                                .get(&e.provider_id)
+                                .cloned()
+                                .unwrap_or_default(),
+                        ];
+                        if let Some(r) = &e.related {
+                            names.extend([
+                                r.title_english.clone(),
+                                r.title_romaji.clone(),
+                                r.title_native.clone(),
+                            ]);
+                        }
+                        names.join("\n")
+                    }),
+                allow_upgrades: tracked.is_some_and(|s| s.allow_upgrades),
                 title: e.title.clone(),
                 cover_url: tracked
                     .map(|s| s.cover_url.clone())
@@ -360,31 +469,19 @@ pub async fn page(
                     .map(|s| s.status.replace('_', " "))
                     .or_else(|| e.related.as_ref().map(|r| r.status_display.clone()))
                     .unwrap_or_default(),
-                files: if tracked.is_some() {
-                    summary.files_label.clone()
-                } else if e.excluded {
-                    "Excluded from sync".into()
-                } else {
-                    "Outside library".into()
-                },
                 monitoring_label: summary.monitoring_label.clone(),
-                follow_label: if summary.following {
-                    "In franchise follow"
-                } else if following && e.choice.is_none() {
-                    "Future follow on parent"
-                } else {
-                    "Not selected for follow"
-                }
-                .into(),
                 next_airing: next,
                 added_date: summary.added_date.clone(),
                 progress: summary,
                 in_library: tracked.is_some(),
-                included,
             }
         })
         .collect();
     let page = FranchisePage {
+        id,
+        requirements,
+        activity,
+        future,
         page: "library",
         title_language: loaded.title_language,
         title: group.title,

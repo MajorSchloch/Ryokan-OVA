@@ -1,0 +1,5 @@
+<div class="file-summary">
+    <p data-summary-part="episodes">{% if files.complete_scan %}On disk: {{ files.episodes }} episodes · {{ files.files }} files{% else %}File scan unavailable{% endif %}</p>
+    <p data-summary-part="size">Logical media size: {{ files.size() }}</p>
+    <p data-summary-part="quality" class="file-summary-quality" title="File checks use current requirements and identity-validated stream facts.">{{ files.quality() }}</p>
+</div>

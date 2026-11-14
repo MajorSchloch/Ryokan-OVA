@@ -1,10 +1,230 @@
 //! One effective language policy for acquisition, import, and file details.
+use sqlx::Row;
 use sqlx::SqlitePool;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::models::{
     config::Config,
+    requirement_preferences::{self, FranchisePreferences, QualityPreferences},
     series_language_preferences::{self, LanguagePreferences},
 };
+
+#[derive(Clone)]
+pub struct EffectivePolicy {
+    pub config: Config,
+    pub origins: BTreeMap<&'static str, &'static str>,
+    pub franchise_id: Option<String>,
+}
+
+pub fn overlay_quality(cfg: &Config, p: &QualityPreferences) -> Config {
+    let mut cfg = cfg.clone();
+    if let Some(v) = &p.minimum_resolution {
+        cfg.minimum_resolution = v.clone();
+    }
+    if let Some(v) = &p.target_resolution {
+        cfg.target_resolution = v.clone();
+    }
+    if let Some(v) = p.minimum_subtitle_check {
+        cfg.minimum_subtitle_check = v;
+    }
+    if let Some(v) = p.target_subtitle_check {
+        cfg.target_subtitle_check = v;
+    }
+    cfg
+}
+
+pub fn apply_quality(cfg: &Config, p: &QualityPreferences) -> Result<Config, String> {
+    let cfg = overlay_quality(cfg, p);
+    let minimum = super::source::Resolution::from_str(&cfg.minimum_resolution);
+    let target = super::source::Resolution::from_str(&cfg.target_resolution);
+    if minimum == super::source::Resolution::Unknown
+        || target == super::source::Resolution::Unknown
+        || target.rank() < minimum.rank()
+    {
+        return Err("Choose a valid target resolution at least as high as the minimum.".into());
+    }
+    Ok(cfg)
+}
+
+pub fn apply_franchise(cfg: &Config, p: &FranchisePreferences) -> Result<Config, String> {
+    let cfg = apply(
+        cfg,
+        &LanguagePreferences {
+            audio_languages: p.audio_languages.clone(),
+            audio_match: p.audio_match.clone(),
+            subtitle_languages: p.subtitle_languages.clone(),
+            subtitle_match: p.subtitle_match.clone(),
+        },
+    )?;
+    Ok(overlay_quality(
+        &cfg,
+        &QualityPreferences {
+            minimum_resolution: p.minimum_resolution.clone(),
+            target_resolution: p.target_resolution.clone(),
+            minimum_subtitle_check: p.minimum_subtitle_check,
+            target_subtitle_check: p.target_subtitle_check,
+        },
+    ))
+}
+
+pub async fn franchise_config(
+    db: &SqlitePool,
+    cfg: &Config,
+    page_id: &str,
+) -> Result<Config, String> {
+    let id = crate::models::library_layout::resolve_page_id(db, page_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("Franchise not found.")?;
+    let p = requirement_preferences::franchise(db, &id)
+        .await
+        .map_err(|e| e.to_string())?;
+    apply_franchise(cfg, &p)
+}
+
+/// Resolve stored membership through either a saved provider or its unique
+/// cached AniList identity. Conflicting saved parents remain an error.
+pub async fn franchise_for_release(db: &SqlitePool, id: i64) -> Result<Option<String>, String> {
+    let ids:Vec<String>=sqlx::query_scalar(sqlx::AssertSqlSafe(format!("{} SELECT DISTINCT f.page_id FROM series s LEFT JOIN local_anilist_ids l ON l.series_id=s.id JOIN library_franchise_members m ON m.provider_id IN(l.anilist_id,s.anilist_id) JOIN library_franchises f ON f.folder=m.folder WHERE s.id=?",crate::models::series::LOCAL_ANILIST_IDS))).bind(id).fetch_all(db).await.map_err(|e|e.to_string())?;
+    if ids.len() > 1 {
+        return Err("This release has conflicting franchise settings.".into());
+    }
+    Ok(ids.into_iter().next())
+}
+
+/// Bulk snapshot shared by RSS, library summaries and single-release callers.
+pub async fn resolve_snapshot(
+    db: &SqlitePool,
+    cfg: &Config,
+    ids: &[i64],
+) -> Result<HashMap<i64, Result<EffectivePolicy, String>>, String> {
+    let languages = series_language_preferences::get_all(db)
+        .await
+        .map_err(|e| e.to_string())?;
+    let qualities = sqlx::query("SELECT series_id,minimum_resolution,target_resolution,minimum_subtitle_check,target_subtitle_check FROM series_language_preferences").fetch_all(db).await.map_err(|e| e.to_string())?;
+    let qualities: HashMap<i64, QualityPreferences> = qualities
+        .into_iter()
+        .map(|r| {
+            (
+                r.get("series_id"),
+                QualityPreferences {
+                    minimum_resolution: r.get("minimum_resolution"),
+                    target_resolution: r.get("target_resolution"),
+                    minimum_subtitle_check: r.get("minimum_subtitle_check"),
+                    target_subtitle_check: r.get("target_subtitle_check"),
+                },
+            )
+        })
+        .collect();
+    let parents = sqlx::query(sqlx::AssertSqlSafe(format!("{} SELECT s.id AS series_id,f.page_id FROM series s LEFT JOIN local_anilist_ids l ON l.series_id=s.id JOIN library_franchise_members m ON m.provider_id IN(l.anilist_id,s.anilist_id) JOIN library_franchises f ON f.folder=m.folder", crate::models::series::LOCAL_ANILIST_IDS))).fetch_all(db).await.map_err(|e| e.to_string())?;
+    let mut parent_ids = HashMap::<i64, String>::new();
+    let mut conflicts = std::collections::HashSet::new();
+    for r in parents {
+        let id = r.get("series_id");
+        if !ids.contains(&id) {
+            continue;
+        }
+        let parent: String = r.get("page_id");
+        if let Some(old) = parent_ids.insert(id, parent.clone())
+            && old != parent
+        {
+            conflicts.insert(id);
+        }
+    }
+    let franchises: HashMap<String, FranchisePreferences> =
+        sqlx::query_as::<_, FranchisePreferences>(
+            "SELECT * FROM franchise_requirement_preferences",
+        )
+        .fetch_all(db)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|p| (p.page_id.clone(), p))
+        .collect();
+    let inherited_languages = LanguagePreferences::default();
+    let inherited_quality = QualityPreferences::default();
+    let mut result = HashMap::new();
+    for id in ids {
+        let resolved = (|| -> Result<EffectivePolicy, String> {
+            if conflicts.contains(id) {
+                return Err("This release has conflicting franchise settings.".into());
+            }
+            let parent = parent_ids.get(id);
+            let p = parent.and_then(|id| franchises.get(id));
+            let mut effective = if let Some(p) = p {
+                apply_franchise(cfg, p)?
+            } else {
+                cfg.clone()
+            };
+            let l = languages.get(id).unwrap_or(&inherited_languages);
+            let q = qualities.get(id).unwrap_or(&inherited_quality);
+            effective = apply_quality(&apply(&effective, l)?, q)?;
+            let mut origins = BTreeMap::new();
+            for (name, custom, parent_custom) in [
+                (
+                    "audio",
+                    l.audio_languages.is_some(),
+                    p.is_some_and(|p| p.audio_languages.is_some()),
+                ),
+                (
+                    "subtitles",
+                    l.subtitle_languages.is_some(),
+                    p.is_some_and(|p| p.subtitle_languages.is_some()),
+                ),
+                (
+                    "minimum",
+                    q.minimum_resolution.is_some(),
+                    p.is_some_and(|p| p.minimum_resolution.is_some()),
+                ),
+                (
+                    "target",
+                    q.target_resolution.is_some(),
+                    p.is_some_and(|p| p.target_resolution.is_some()),
+                ),
+                (
+                    "minimum_subtitles",
+                    q.minimum_subtitle_check.is_some(),
+                    p.is_some_and(|p| p.minimum_subtitle_check.is_some()),
+                ),
+                (
+                    "target_subtitles",
+                    q.target_subtitle_check.is_some(),
+                    p.is_some_and(|p| p.target_subtitle_check.is_some()),
+                ),
+            ] {
+                origins.insert(
+                    name,
+                    if custom {
+                        "Release"
+                    } else if parent_custom {
+                        "Franchise"
+                    } else {
+                        "App default"
+                    },
+                );
+            }
+            Ok(EffectivePolicy {
+                config: effective,
+                origins,
+                franchise_id: parent.cloned(),
+            })
+        })();
+        result.insert(*id, resolved);
+    }
+    Ok(result)
+}
+
+pub async fn resolve_all(
+    db: &SqlitePool,
+    cfg: &Config,
+    ids: &[i64],
+) -> Result<HashMap<i64, EffectivePolicy>, String> {
+    resolve_snapshot(db, cfg, ids)
+        .await?
+        .into_iter()
+        .map(|(id, value)| value.map(|p| (id, p)))
+        .collect()
+}
 
 /// Normalize names/codes without silently discarding an invalid requirement.
 pub fn normalize_languages(value: &str, kind: &str) -> Result<String, String> {
@@ -52,6 +272,24 @@ fn apply_one(
     )))
 }
 
+/// Raw values are only for the repair editor; acquisition must use `apply`.
+pub fn overlay_languages(cfg: &Config, p: &LanguagePreferences) -> Config {
+    let mut value = cfg.clone();
+    if let Some(v) = &p.audio_languages {
+        value.required_audio_languages = v.clone();
+    }
+    if let Some(v) = &p.audio_match {
+        value.audio_language_match = v.clone();
+    }
+    if let Some(v) = &p.subtitle_languages {
+        value.required_subtitle_languages = v.clone();
+    }
+    if let Some(v) = &p.subtitle_match {
+        value.subtitle_language_match = v.clone();
+    }
+    value
+}
+
 pub fn apply(cfg: &Config, preferences: &LanguagePreferences) -> Result<Config, String> {
     let mut effective = cfg.clone();
     if let Some((languages, mode)) = apply_one(
@@ -79,12 +317,11 @@ pub async fn effective_config(
     cfg: &Config,
     series_id: i64,
 ) -> Result<Config, String> {
-    let preferences = series_language_preferences::get(db, series_id)
-        .await
-        .map_err(|_| {
-            "Language requirement: could not read this release's language settings.".to_string()
-        })?;
-    apply(cfg, &preferences)
+    Ok(resolve_all(db, cfg, &[series_id])
+        .await?
+        .remove(&series_id)
+        .ok_or("Could not resolve release requirements.")?
+        .config)
 }
 
 /// Library pages read overrides once; one-release menus keep their scoped query.
@@ -93,22 +330,11 @@ pub async fn effective_configs(
     cfg: &Config,
     series_ids: &[i64],
 ) -> Result<std::collections::HashMap<i64, Config>, String> {
-    if let [series_id] = series_ids {
-        return Ok(std::collections::HashMap::from([(
-            *series_id,
-            effective_config(db, cfg, *series_id).await?,
-        )]));
-    }
-    let preferences = series_language_preferences::get_all(db)
-        .await
-        .map_err(|_| {
-            "Language requirement: could not read release language settings.".to_string()
-        })?;
-    let inherited = LanguagePreferences::default();
-    series_ids
-        .iter()
-        .map(|id| Ok((*id, apply(cfg, preferences.get(id).unwrap_or(&inherited))?)))
-        .collect()
+    Ok(resolve_all(db, cfg, series_ids)
+        .await?
+        .into_iter()
+        .map(|(id, p)| (id, p.config))
+        .collect())
 }
 
 /// Search can also open an untracked provider entry, which uses library defaults.
@@ -117,15 +343,24 @@ pub async fn for_provider(
     cfg: &Config,
     provider_id: i64,
 ) -> Result<Config, String> {
-    let release = crate::models::series::get_by_anilist_id(db, provider_id)
-        .await
-        .map_err(|_| {
-            "Language requirement: could not resolve the release's saved language settings."
-                .to_string()
-        })?;
-    match release {
-        Some(release) => effective_config(db, cfg, release.id).await,
-        None => Ok(cfg.clone()),
+    let ids: Vec<i64>=sqlx::query_scalar(sqlx::AssertSqlSafe(format!("{} SELECT DISTINCT s.id FROM series s LEFT JOIN local_anilist_ids l ON l.series_id=s.id WHERE l.anilist_id=? OR s.anilist_id=?",crate::models::series::LOCAL_ANILIST_IDS))).bind(provider_id).bind(provider_id).fetch_all(db).await.map_err(|e|e.to_string())?;
+    if ids.len() > 1 {
+        return Err("This provider identity has conflicting release settings.".into());
+    }
+    match ids.first() {
+        Some(id) => effective_config(db, cfg, *id).await,
+        None => {
+            match crate::models::library_layout::page_for_provider(db, provider_id)
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                Some((page, _)) => apply_quality(
+                    &franchise_config(db, cfg, &page).await?,
+                    &QualityPreferences::default(),
+                ),
+                None => Ok(cfg.clone()),
+            }
+        }
     }
 }
 

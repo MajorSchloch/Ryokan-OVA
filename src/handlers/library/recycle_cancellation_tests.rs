@@ -210,6 +210,12 @@ async fn delete_finishes_catalog_and_client_cleanup_after_request_disconnect() {
         );
     }
     assert_eq!(entry.manifest.original_path, f.video.to_str().unwrap());
+    let events = crate::models::library_activity::recent(&f.db, &[f.series_id], None)
+        .await
+        .unwrap();
+    assert_eq!(events.iter().filter(|e| e.action == "Recycled").count(), 1);
+    assert!(events.iter().any(|e| e.reason.contains("Manually")));
+
     server.verify().await;
 }
 
@@ -269,6 +275,10 @@ async fn restore_retains_import_locks_and_retags_after_request_disconnect() {
         .lock()
         .await;
     f.assert_library_bytes();
+    let events = crate::models::library_activity::recent(&f.db, &[f.series_id], None)
+        .await
+        .unwrap();
+    assert_eq!(events.iter().filter(|e| e.action == "Restored").count(), 1);
     assert!(bin::find_entry(&f.bin, &entry_id).await.unwrap().is_none());
     let tags = episode_tags::get_for_series(&f.db, f.series_id)
         .await

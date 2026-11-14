@@ -1889,6 +1889,7 @@ async fn import_torrent(
     // greppable. Functionally equivalent to HashMap; pure log hygiene.
     let mut imported_eps_by_series: std::collections::BTreeMap<i64, Vec<(i32, i64, String)>> =
         std::collections::BTreeMap::new();
+    let mut import_activity = Vec::new();
     let mut imported_count = 0_usize;
     let mut protected_count = 0_usize;
     let mut protected_missing = false;
@@ -3231,6 +3232,25 @@ async fn import_torrent(
                         .push((ep, file.size, dest_basename.clone()));
                 }
 
+                let mut event = crate::models::library_activity::Event::new(
+                    format!(
+                        "import:{}:{}:{}:{}",
+                        grab.id, grab.grabbed_at, target_series_id, dest_basename
+                    ),
+                    if is_upgrade { "Upgraded" } else { "Imported" },
+                    Some(target_series_id),
+                    &ctx.series.title,
+                    if is_upgrade {
+                        "Replaced existing media after the incoming file passed the import and replacement checks."
+                    } else {
+                        "Imported accepted media after the configured file checks passed."
+                    },
+                );
+                event.provider_id = Some(ctx.series.anilist_id);
+                event.grab_id = Some(grab.id);
+                event.detail=serde_json::json!({"release":grab.torrent_name,"file":dest_basename,"episodes":resolved.episodes().collect::<Vec<_>>(),"previous_files":existing_for_ep.iter().map(|(p,_)|p.display().to_string()).collect::<Vec<_>>(),"rules_at_import":{"minimum":import_cfg.minimum_resolution,"target":import_cfg.target_resolution,"quality_gates_enabled":import_cfg.media_requirements_enabled,"required_audio":import_cfg.required_audio_languages,"required_subtitles":import_cfg.required_subtitle_languages,"minimum_selectable_subtitles":import_cfg.minimum_subtitle_check,"target_selectable_subtitles":import_cfg.target_subtitle_check}}).to_string();
+                import_activity.push(event);
+
                 // Issue #118 — fire `Imported` once per file, like Sonarr,
                 // keyed on the first episode; a two-episode file is one
                 // import, not two. Sequenced AFTER the tag writes above so
@@ -3515,6 +3535,10 @@ async fn import_torrent(
             )
             .await;
         }
+    }
+
+    for event in import_activity {
+        crate::models::library_activity::append(&state.db, event).await;
     }
 
     if protected_count > 0 {
@@ -4292,6 +4316,16 @@ pub async fn run_once(state: &AppState) {
                 if e.starts_with("Episode mapping:") || e.starts_with("Import protection:") {
                     // Keep retrying every tick. A new reason needs immediate attention,
                     // but an unchanged hold only needs an hourly reminder in System.
+                    let mut event = crate::models::library_activity::Event::new(
+                        format!("hold:{}:{}:{}", grab.id, grab.grabbed_at, e),
+                        "Held",
+                        Some(grab.series_id),
+                        "",
+                        &e,
+                    );
+                    event.grab_id = Some(grab.id);
+                    event.detail = grab.torrent_name.clone();
+                    crate::models::library_activity::append(&state.db, event).await;
                     let key = format!("import-hold:{}:{e}", grab.id);
                     if logger::first_in_window(&key, std::time::Duration::from_secs(3600)) {
                         logger::warn(
@@ -4314,7 +4348,7 @@ pub async fn run_once(state: &AppState) {
                     &e,
                 )
                 .await;
-                let _ = grabbed_torrents::mark_failed(&state.db, grab.id).await;
+                let _ = grabbed_torrents::mark_failed_recorded(&state.db, grab.id, &e).await;
             }
         }
     }

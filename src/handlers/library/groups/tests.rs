@@ -868,3 +868,59 @@ async fn follow_save_keeps_unchecked_library_files_and_explicit_episode_monitori
         0
     );
 }
+
+#[tokio::test]
+async fn future_only_controls_preserve_existing_releases_choices_and_monitoring() {
+    use axum::Form;
+    use axum_htmx::HxRequest;
+    let db = crate::test_support::in_memory_pool().await;
+    let id = seed_series(&db, FIRST, TITLE).await;
+    sqlx::query("UPDATE series SET monitor_mode='none',allow_upgrades=0 WHERE id=?")
+        .bind(id)
+        .execute(&db)
+        .await
+        .unwrap();
+    cache(&db, FIRST, &[("SEQUEL", SECOND)]).await;
+    cache(&db, SECOND, &[("PREQUEL", FIRST)]).await;
+    for enabled in [true, false] {
+        let version = preview::draft(&db, FIRST, &[]).await.unwrap().version;
+        let mut fields = vec![
+            ("version".into(), version),
+            ("selection".into(), "1".into()),
+            ("owner".into(), FIRST.to_string()),
+            ("future_controls".into(), "1".into()),
+            ("include".into(), "tv".into()),
+        ];
+        if enabled {
+            fields.push(("future_enabled".into(), "on".into()));
+        }
+        follow::save(
+            State(db.clone()),
+            Path(FIRST),
+            HxRequest(false),
+            Form(fields),
+        )
+        .await
+        .unwrap();
+        let follows = crate::models::release_follows::list(&db).await.unwrap();
+        assert_eq!(follows.len(), 1);
+        assert_eq!(follows[0].tv, enabled);
+        assert_eq!(crate::test_support::count_series(&db).await, 1);
+        let row = series::get_by_id(&db, id).await.unwrap().unwrap();
+        assert_eq!(row.monitor_mode, "none");
+        assert!(!row.allow_upgrades);
+        let choices: i64 = sqlx::query_scalar("SELECT count(*) FROM franchise_choices")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            choices, 0,
+            "Future formats must not exclude known outside releases or alter membership"
+        );
+        let grabs: i64 = sqlx::query_scalar("SELECT count(*) FROM grabbed_torrents")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(grabs, 0);
+    }
+}

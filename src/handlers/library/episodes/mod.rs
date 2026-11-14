@@ -169,6 +169,62 @@ pub async fn delete_episode_file(
     HxRequest(is_htmx): HxRequest,
     Path((request_id, episode_number)): Path<(i64, i32)>,
 ) -> Response {
+    delete_episode_task(state, is_htmx, request_id, episode_number, String::new()).await
+}
+
+/// Accept an optional form note while preserving legacy empty-body requests.
+pub async fn delete_episode_file_with_note(
+    State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
+    Path((request_id, episode_number)): Path<(i64, i32)>,
+    body: axum::body::Bytes,
+) -> Response {
+    if body.len() > 8192 {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            "Deletion note is too long.",
+        )
+            .into_response();
+    }
+    let note = if body.is_empty() {
+        String::new()
+    } else {
+        let Ok(text) = std::str::from_utf8(&body) else {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                "Invalid deletion note.",
+            )
+                .into_response();
+        };
+        let Ok(url) = reqwest::Url::parse(&format!("http://localhost/?{text}")) else {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                "Invalid deletion note.",
+            )
+                .into_response();
+        };
+        url.query_pairs()
+            .find(|(name, _)| name == "note")
+            .map(|(_, value)| value.into_owned())
+            .unwrap_or_default()
+    };
+    if note.chars().count() > 1000 {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            "Use at most1000 characters for a deletion note.",
+        )
+            .into_response();
+    }
+    delete_episode_task(state, is_htmx, request_id, episode_number, note).await
+}
+
+async fn delete_episode_task(
+    state: AppState,
+    is_htmx: bool,
+    request_id: i64,
+    episode_number: i32,
+    note: String,
+) -> Response {
     // Keep the move and its catalog/client updates together if the
     // browser disconnects. Dropping this join handle detaches the task.
     match tokio::spawn(delete_episode_file_owned(
@@ -176,6 +232,7 @@ pub async fn delete_episode_file(
         is_htmx,
         request_id,
         episode_number,
+        note,
     ))
     .await
     {
@@ -209,6 +266,7 @@ async fn delete_episode_file_owned(
     is_htmx: bool,
     request_id: i64,
     episode_number: i32,
+    note: String,
 ) -> Response {
     // The route serves both the legacy JSON shape (POST `/api/...` from
     // a non-htmx caller — kept for any external programmatic consumer)
@@ -634,6 +692,28 @@ async fn delete_episode_file_owned(
                     let _ = grabbed_torrents::mark_removed(&state.db, grab.id).await;
                 }
             }
+
+            let mut event = crate::models::library_activity::Event::new(
+                format!(
+                    "delete:{}:{}",
+                    tracked.id,
+                    recycle_entry_id
+                        .clone()
+                        .unwrap_or_else(|| chrono::Utc::now().timestamp_micros().to_string())
+                ),
+                if recycle_entry_id.is_some() {
+                    "Recycled"
+                } else {
+                    "Deleted"
+                },
+                Some(tracked.id),
+                &tracked.title,
+                "Manually removed episode media from the library.",
+            );
+            event.detail = format!("Episodes {:?} · {}", held, file.filename);
+            event.note = note;
+            event.recycle_entry_id = recycle_entry_id.clone();
+            crate::models::library_activity::append(&state.db, event).await;
 
             logger::info(
                 &state.db,

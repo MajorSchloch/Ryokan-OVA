@@ -229,6 +229,47 @@ pub async fn inspect(db: &SqlitePool, video: &Path) -> Result<MediaInfo, ProbeEr
     Ok(info)
 }
 
+/// Read cached stream facts without ever launching ffprobe. Current sidecars
+/// are inspected separately because they are not part of the video cache.
+pub async fn inspect_cached_json(
+    video: &Path,
+    stored_identity: &str,
+    json: &str,
+) -> Option<MediaInfo> {
+    let before = tokio::fs::metadata(video).await.ok()?;
+    let identity = FileIdentity::from_metadata(&before).ok()?;
+    if identity.cache_key() != stored_identity {
+        return None;
+    }
+    let mut info = parse_probe_json(json, identity.clone(), true).ok()?;
+    let mut candidates = Vec::new();
+    let mut entries = tokio::fs::read_dir(video.parent()?).await.ok()?;
+    let mut count = 0;
+    while let Some(entry) = entries.next_entry().await.ok()? {
+        count += 1;
+        if count > DIRECTORY_ENTRY_CAP {
+            return None;
+        }
+        if is_subtitle_path(&entry.path()) && entry.file_type().await.ok()?.is_file() {
+            candidates.push(entry.path());
+        }
+    }
+    let span = video
+        .file_name()?
+        .to_str()
+        .and_then(|name| media::parse_episode_span(&name.to_ascii_lowercase()));
+    let mut matched = extras::find_subtitles(video, span, &candidates, usize::MAX);
+    matched.dedup();
+    if matched.len() > SIDECAR_COUNT_CAP {
+        return None;
+    }
+    for path in matched {
+        info.subtitles.push(inspect_sidecar(video, &path).await);
+    }
+    let after = tokio::fs::metadata(video).await.ok()?;
+    (FileIdentity::from_metadata(&after).ok()? == identity).then_some(info)
+}
+
 /// Pre-import inspection using the same sidecar matching as the importer.
 /// The caller supplies the download's safe, wanted candidate paths and its
 /// total video count. A requirement must also be checked after sidecars

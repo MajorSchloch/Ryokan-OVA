@@ -168,6 +168,7 @@ fn safe_return_to(value: &str) -> Option<String> {
     }
     let path = uri.path();
     let allowed = path == "/"
+        || path == "/library/table"
         || path
             .strip_prefix("/franchises/")
             .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))

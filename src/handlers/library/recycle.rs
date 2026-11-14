@@ -337,11 +337,14 @@ async fn restore_owned(state: AppState, entry_id: String) -> Response {
     };
     // Read the manifest before the move so the re-tag step knows which
     // series the file belongs to once it's back.
-    let series_id = match recycle::find_entry(&bin, &entry_id).await {
-        Ok(Some(entry)) if entry.manifest.kind == RecycleKind::Episode => entry.manifest.series_id,
-        Ok(_) => None,
+    let original = match recycle::find_entry(&bin, &entry_id).await {
+        Ok(entry) => entry,
         Err(e) => return json_err(status_for(&e), &e),
     };
+    let series_id = original
+        .as_ref()
+        .filter(|e| e.manifest.kind == RecycleKind::Episode)
+        .and_then(|e| e.manifest.series_id);
     // Placement in the library is the importers' job, under their locks,
     // and each checks a destination is free before writing it. A restore
     // racing an import of the same episode could replace the file the
@@ -369,6 +372,19 @@ async fn restore_owned(state: AppState, entry_id: String) -> Response {
                 &format!("entry={} to={}", entry_id, final_path.display()),
             )
             .await;
+            let mut event = crate::models::library_activity::Event::new(
+                format!("restore:{entry_id}"),
+                "Restored",
+                series_id,
+                original
+                    .as_ref()
+                    .map(|e| e.manifest.series_title.as_str())
+                    .unwrap_or("Removed title"),
+                "Restored media from the recoverable bin.",
+            );
+            event.detail = final_path.display().to_string();
+            event.recycle_entry_id = Some(entry_id.clone());
+            crate::models::library_activity::append(&state.db, event).await;
             nudge_jellyfin(&state).await;
             let name = final_path
                 .file_name()

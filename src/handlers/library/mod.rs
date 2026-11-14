@@ -14,6 +14,9 @@ pub mod file_info;
 pub mod groups;
 mod inventory;
 pub mod languages;
+pub mod management;
+#[cfg(test)]
+mod milestone_tests;
 pub mod misgrabs;
 pub mod navigation;
 pub mod numbering;
@@ -22,7 +25,9 @@ pub mod reconcile;
 pub mod recycle;
 #[cfg(test)]
 mod recycle_cancellation_tests;
+pub mod requirements;
 pub mod search;
+pub mod summary;
 pub mod table;
 
 /// Keep the preferred landing page in this browser. The index checks this
@@ -38,6 +43,8 @@ fn view_cookie(view: &str) -> [(axum::http::HeaderName, String); 1] {
 /// confirmed air dates. The poster and parent page use the same counts.
 #[derive(Debug, Clone, Default)]
 pub struct CardProgress {
+    pub availability_known: bool,
+    pub files: summary::FileSummary,
     pub state: String,
     pub downloaded: i64,
     pub aired: i64,
@@ -75,6 +82,7 @@ struct IndexTemplate {
     /// summary. Tupled (rather than a wrapper struct) so the card
     /// template's dense `s.*` field references stay untouched.
     cards: Vec<(series::Series, CardProgress)>,
+    search_titles: std::collections::HashMap<i64, String>,
     franchise_cards: Vec<navigation::FranchiseCard>,
     individual: bool,
     franchise_count: usize,
@@ -157,6 +165,9 @@ struct SeriesTemplate {
     route_id: i64,
     follow_anilist_id: i64,
     parent_franchise: Option<(String, String)>,
+    files: summary::FileSummary,
+    requirements: Option<requirements::RequirementsView>,
+    activity: Vec<crate::models::library_activity::Activity>,
     detail: anilist::AnimeDetail,
     is_tracked: bool,
     db_id: Option<i64>,
@@ -259,7 +270,6 @@ struct SeriesTemplate {
     /// Rendered inside an "Advanced" collapsible since most users won't
     /// flip it.
     allow_pt_upgrades: bool,
-    language_preferences: Option<languages::LanguagePreferencesView>,
     /// #23 — Per-series custom Nyaa query tokens. Empty string means
     /// "use the global default in config." Rendered in the Advanced
     /// search panel on the series detail page.
@@ -298,6 +308,7 @@ struct ErrorTemplate {
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct Episode {
+    pub file_gate: Option<summary::FileGate>,
     pub number: i32,
     pub title: String,
     pub title_romaji: String,
@@ -425,6 +436,8 @@ pub struct AddSeriesForm {
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct RemoveSeriesForm {
+    #[serde(default)]
+    note: Option<String>,
     id: i64,
     /// When true (the default for the "Remove from Library" button), the
     /// handler also tells qBittorrent to drop every torrent associated

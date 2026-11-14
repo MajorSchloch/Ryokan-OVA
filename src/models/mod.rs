@@ -34,4 +34,6 @@ pub mod migrations;
 
 pub use migrations::migrate;
 
+pub mod library_activity;
 pub mod release_follows;
+pub mod requirement_preferences;

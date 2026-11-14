@@ -314,6 +314,29 @@ pub async fn remove_series(
     State(state): State<AppState>,
     Json(form): Json<RemoveSeriesForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    if form.note.as_ref().is_some_and(|n| n.chars().count() > 1000) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"ok":false,"message":"Use at most 1000 characters for a note."}),
+            ),
+        ));
+    }
+    match tokio::spawn(remove_series_owned(state, form)).await {
+        Ok(result) => result,
+        Err(_) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                serde_json::json!({"ok":false,"message":"Removal ended unexpectedly; check the library and logs before retrying."}),
+            ),
+        )),
+    }
+}
+
+async fn remove_series_owned(
+    state: AppState,
+    form: RemoveSeriesForm,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let series_id = form.id;
     let delete_files = form.delete_files.unwrap_or(true);
     // Captured now, written only after the row is gone: an exclusion
@@ -368,6 +391,26 @@ pub async fn remove_series(
         Err(e) => return Err(fail_with(&state.db, series_id, "lookup", e.to_string()).await),
     };
 
+    let mut activity_event = crate::models::library_activity::Event::new(
+        format!(
+            "remove:{}:{}",
+            series_id,
+            chrono::Utc::now().timestamp_micros()
+        ),
+        "Removed from library",
+        Some(series_id),
+        tracked
+            .as_ref()
+            .map(|s| s.title.as_str())
+            .unwrap_or("Removed title"),
+        if delete_files {
+            "Manually removed the library entry and requested media cleanup."
+        } else {
+            "Manually removed tracking; media was kept."
+        },
+    );
+    activity_event.note = form.note.unwrap_or_default();
+    activity_event.capture_parent(&state.db).await;
     // Filesystem + torrent cleanup is shared with `bulk::delete_one_series`
     // via the `cleanup_series_files` helper. Both paths went out of sync
     // before — bulk silently bypassed the canonicalize+starts_with
@@ -429,6 +472,16 @@ pub async fn remove_series(
     }
     if let Some(snapshot) = exclusion {
         record_sync_exclusion(&state.db, snapshot).await;
+    }
+
+    if let Some(report) = &cleanup_report
+        && !report.is_clean()
+    {
+        activity_event.action = "Removal needs attention".into();
+        activity_event.reason = report.partial_failure_reason();
+    }
+    if tracked.is_some() {
+        crate::models::library_activity::append(&state.db, activity_event).await;
     }
 
     // Scrub user-controlled strings for the log line.

@@ -166,14 +166,17 @@ pub async fn index(
     let search_query = q.search.unwrap_or_default();
     // Keep all scoped releases in the DOM. Reloading a searched view and
     // clearing its live search must restore the rest without a round trip.
+    let search_titles = super::summary::titles(&state.db, &library)
+        .await
+        .unwrap_or_default();
     let needle = search_query.trim().to_lowercase();
     let hidden_release_ids: std::collections::HashSet<i64> = library
         .iter()
         .filter(|s| {
             !needle.is_empty()
-                && ![&s.title, &s.title_english, &s.title_romaji, &s.title_native]
-                    .iter()
-                    .any(|title| title.to_lowercase().contains(&needle))
+                && !search_titles
+                    .get(&s.id)
+                    .is_some_and(|titles| titles.to_lowercase().contains(&needle))
         })
         .map(|s| s.id)
         .collect();
@@ -340,6 +343,7 @@ pub async fn index(
         0
     };
     let template = IndexTemplate {
+        search_titles,
         page: "library".to_string(),
         cards,
         franchise_cards,
@@ -759,19 +763,33 @@ pub async fn series_detail(
         .await
         .ok()
         .flatten();
-    let language_preferences = if let Some(id) = db_id {
-        let defaults = cfg.clone().unwrap_or_default();
-        Some(
-            super::languages::load_view(&state.db, &defaults, id)
-                .await
-                .unwrap_or_else(|_| {
-                    super::languages::LanguagePreferencesView::unavailable(id, &defaults)
-                }),
-        )
+    let files = if let Some(row) = &db_series {
+        super::summary::load(&state.db, &media_root, std::slice::from_ref(row))
+            .await
+            .ok()
+            .and_then(|mut rows| rows.remove(&row.id))
+            .unwrap_or_default()
+    } else {
+        Default::default()
+    };
+    let requirements = if let Some(id) = db_id {
+        super::requirements::release_view(&state.db, &cfg.clone().unwrap_or_default(), id)
+            .await
+            .ok()
     } else {
         None
     };
+    let activity = if let Some(id) = db_id {
+        crate::models::library_activity::recent(&state.db, &[id], None)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let template = SeriesTemplate {
+        files,
+        requirements,
+        activity,
         page: "library".to_string(),
         route_id: db_id.unwrap_or(provider_id),
         parent_franchise,
@@ -809,7 +827,6 @@ pub async fn series_detail(
         all_monitored,
         allow_upgrades,
         allow_pt_upgrades,
-        language_preferences,
         custom_query_tokens,
         restrict_to_uploader,
         alternate_titles,
@@ -1193,6 +1210,7 @@ pub(super) async fn build_episodes(
                 Err(_) => !detail.is_finished(),
             };
         episodes.push(Episode {
+            file_gate: None,
             number: ep_num,
             title: ep_title,
             title_romaji: ep_title_romaji,
@@ -1289,6 +1307,7 @@ pub(super) async fn build_episodes(
             let manual_override = tag.map(|t| t.manual_override).unwrap_or(false);
             rendered_eps.insert(ep);
             episodes.push(Episode {
+                file_gate: None,
                 number: ep,
                 title: String::new(),
                 title_romaji: String::new(),
@@ -1349,6 +1368,7 @@ pub(super) async fn build_episodes(
             }
             rendered_eps.insert(ep_num);
             episodes.push(Episode {
+                file_gate: None,
                 number: ep_num,
                 title: String::new(),
                 title_romaji: String::new(),
@@ -1378,6 +1398,16 @@ pub(super) async fn build_episodes(
         }
     }
 
+    if let Some(id) = db_id
+        && let Ok(Some(row)) = series::get_by_id(db, id).await
+        && let Ok(mut summaries) =
+            super::summary::load(db, media_root, std::slice::from_ref(&row)).await
+        && let Some(summary) = summaries.remove(&id)
+    {
+        for ep in &mut episodes {
+            ep.file_gate = summary.gates.get(&ep.number).cloned();
+        }
+    }
     episodes.sort_by_key(|e| std::cmp::Reverse(e.number));
 
     let size_display = format_size(total_size);
