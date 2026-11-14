@@ -196,6 +196,163 @@ async fn install_pool(
     *state.download_clients.write().await = Arc::new(pool);
 }
 
+async fn ownership_rows(db: &sqlx::SqlitePool) -> Vec<Vec<String>> {
+    let mut snapshot = Vec::new();
+    for table in [
+        "grabbed_torrents",
+        "episode_quality_tags",
+        "episode_grab_history",
+    ] {
+        let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info(?)")
+            .bind(table)
+            .fetch_all(db)
+            .await
+            .unwrap();
+        assert!(
+            columns
+                .iter()
+                .all(|c| c.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        );
+        let fields = columns
+            .iter()
+            .map(|c| format!("'{c}',\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        snapshot.push(
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT json_object({fields}) FROM {table} ORDER BY rowid"
+            )))
+            .fetch_all(db)
+            .await
+            .unwrap(),
+        );
+    }
+    snapshot
+}
+
+#[rstest::rstest]
+#[case(true, true, false, false, false)]
+#[case(true, false, false, false, false)]
+#[case(true, true, false, true, false)]
+#[case(true, true, true, true, false)]
+#[case(false, true, false, true, false)]
+#[case(false, false, false, false, false)]
+#[case(false, true, true, true, false)]
+#[case(false, true, false, true, true)]
+#[case(false, true, true, true, true)]
+#[tokio::test]
+async fn unavailable_configured_owner_preserves_exact_pending_bookkeeping(
+    #[case] imports: bool,
+    #[case] other_present: bool,
+    #[case] owner_fails: bool,
+    #[case] same_hash_on_other: bool,
+    #[case] other_complete: bool,
+    #[values(false, true)] name_only: bool,
+) {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    let db = in_memory_pool().await;
+    seed_config(&db).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let original = tmp.path().join("original.mkv");
+    let source = tmp.path().join("download.mkv");
+    std::fs::write(&original, b"existing original").unwrap();
+    std::fs::write(&source, b"retained native download").unwrap();
+    sqlx::query("UPDATE config SET post_processing_enabled=?, media_root=? WHERE id=1")
+        .bind(imports)
+        .bind(tmp.path().to_str().unwrap())
+        .execute(&db)
+        .await
+        .unwrap();
+    for (name, kind, enabled) in [
+        ("owner", "qbittorrent", owner_fails),
+        ("other", "nzbget", other_present),
+    ] {
+        insert_dc(
+            &db,
+            DownloadClientForm {
+                name,
+                kind,
+                url: "http://unused",
+                username: "",
+                password: "",
+                label: "anime",
+                download_path: "",
+                enabled,
+                is_default: true,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let sid = seed_series(&db, 1, "Show").await;
+    let id = grabbed_torrents::record_grab(
+        &db,
+        if name_only { "" } else { "owned" },
+        "pending upgrade",
+        sid,
+        &[1],
+        false,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    grabbed_torrents::set_download_client(&db, id, Some(1))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE grabbed_torrents SET grabbed_at=datetime('now','-1 hour') WHERE id=?")
+        .bind(id)
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO episode_quality_tags(series_id,episode_number,quality_tag,release_title,state) VALUES (?,1,'BD-1080p','original','completed')")
+        .bind(sid).execute(&db).await.unwrap();
+    for (title, state) in [("original", "completed"), ("pending upgrade", "grabbed")] {
+        sqlx::query("INSERT INTO episode_grab_history(series_id,episode_number,quality_tag,release_title,state) VALUES (?,1,'BD-1080p',?,?)")
+            .bind(sid).bind(title).bind(state).execute(&db).await.unwrap();
+    }
+    let other = Arc::new(RecordingClient::new(if same_hash_on_other {
+        let mut item = fake_torrent(
+            "owned",
+            if other_complete {
+                DownloadItemState::Seeding
+            } else {
+                DownloadItemState::Removed
+            },
+        );
+        item.name = "pending upgrade".into();
+        vec![item]
+    } else {
+        vec![]
+    }));
+    let failing = Arc::new(RecordingClient::failing());
+    let mut clients = std::collections::HashMap::<i64, Arc<dyn DownloadClient>>::new();
+    if other_present {
+        clients.insert(2, other.clone());
+    }
+    if owner_fails {
+        clients.insert(1, failing.clone());
+    }
+    let state = build_test_app_state(db.clone(), None);
+    *state.download_clients.write().await = Arc::new(crate::DownloadClientPool {
+        clients,
+        default_torrent_id: owner_fails.then_some(1),
+        default_usenet_id: other_present.then_some(2),
+    });
+    let before = ownership_rows(&db).await;
+    for _ in 0..2 {
+        post_processing::run_once(&state).await;
+        assert_eq!(
+            ownership_rows(&db).await,
+            before,
+            "unavailable owner must not fall back or erase existing history"
+        );
+        assert_eq!(std::fs::read(&original).unwrap(), b"existing original");
+        assert_eq!(std::fs::read(&source).unwrap(), b"retained native download");
+        assert!(other.deleted().is_empty());
+        assert!(failing.deleted().is_empty());
+    }
+}
+
 #[tokio::test]
 async fn run_once_fans_out_list_scoped_per_pinned_client() {
     let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
@@ -721,8 +878,8 @@ async fn run_once_marks_grab_removed_when_client_loses_torrent_and_grab_is_stale
     // The pre-multi-client comment at mod.rs:1717 frames this case
     // as "user deleted ep 9 from the client and the row is still
     // pending." After 60s with no matching torrent in any client's
-    // list_scoped response, the grab transitions to 'removed' and
-    // the per-episode tags get cleared. Pin both halves so a
+    // list_scoped response, only that pending attempt ends. Existing
+    // completed tags and history survive. Pin both halves so a
     // refactor that flipped the grace direction (`<` vs `<=`) or
     // inverted the missing-torrent guard can't silently regress
     // into "stuck pending forever."
@@ -733,6 +890,13 @@ async fn run_once_marks_grab_removed_when_client_loses_torrent_and_grab_is_stale
         .await
         .unwrap()
         .unwrap();
+    sqlx::query("INSERT INTO episode_quality_tags(series_id,episode_number,quality_tag,release_title,state) VALUES (?,3,'BD-1080p','original','completed')")
+        .bind(series_id).execute(&db).await.unwrap();
+    for (title, state) in [("original", "completed"), ("rel", "grabbed")] {
+        sqlx::query("INSERT INTO episode_grab_history(series_id,episode_number,quality_tag,release_title,state) VALUES (?,3,'BD-1080p',?,?)")
+            .bind(series_id).bind(title).bind(state).execute(&db).await.unwrap();
+    }
+    let before = ownership_rows(&db).await;
     // Backdate grabbed_at so grab_is_stale(_, 60) returns true.
     sqlx::query(
         "UPDATE grabbed_torrents SET grabbed_at = datetime('now', '-5 minutes') WHERE id = ?",
@@ -778,6 +942,28 @@ async fn run_once_marks_grab_removed_when_client_loses_torrent_and_grab_is_stale
         final_state, "removed",
         "stale grab + no matching torrent → mark_removed; not 'pending' (would re-search forever) and not 'failed' (would blocklist)"
     );
+    let after = ownership_rows(&db).await;
+    assert_eq!(after[1], before[1], "the completed file's tag survives");
+    assert_eq!(after[2][0], before[2][0], "the completed history survives");
+    let history: Vec<(String, String)> =
+        sqlx::query_as("SELECT release_title,state FROM episode_grab_history ORDER BY id")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+    assert_eq!(
+        history,
+        vec![
+            ("original".into(), "completed".into()),
+            ("rel".into(), "removed".into())
+        ]
+    );
+    post_processing::run_once(&state).await;
+    assert_eq!(
+        ownership_rows(&db).await,
+        after,
+        "reconciliation is idempotent"
+    );
+    assert!(default_client.deleted().is_empty());
 }
 
 #[tokio::test]
