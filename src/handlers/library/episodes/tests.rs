@@ -943,6 +943,41 @@ mod episodes_ci {
     }
 
     #[tokio::test]
+    async fn a_disabled_stamped_client_is_not_a_successful_empty_listing() {
+        let db = in_memory_pool().await;
+        let series_id = seed_series(&db, 506, "Held client").await;
+        let grab =
+            stale_pending_grab(&db, series_id, "7777777777777777777777777777777777777777").await;
+        sqlx::query("UPDATE grabbed_torrents SET download_client_id = 99 WHERE id = ?")
+            .bind(grab)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO episode_quality_tags (series_id, episode_number, quality_tag, state) VALUES (?, 1, 'WEBDL-1080p', 'completed')")
+            .bind(series_id).execute(&db).await.unwrap();
+        sqlx::query("INSERT INTO episode_grab_history (series_id, episode_number, quality_tag, release_title, state) VALUES (?, 1, 'WEBDL-1080p', 'Original file', 'completed')")
+            .bind(series_id).execute(&db).await.unwrap();
+        let client: std::sync::Arc<dyn crate::services::download_client::DownloadClient> =
+            std::sync::Arc::new(ListingClient(vec![]));
+        let state = build_test_app_state(db.clone(), Some(client));
+        let _ = episode_download_progress(State(state), Path(506))
+            .await
+            .unwrap();
+        assert_eq!(grab_state(&db, grab).await, "pending");
+        assert_eq!(
+            episode_tags::get_for_series(&db, series_id).await.unwrap()[&1].state,
+            "completed"
+        );
+        assert_eq!(
+            episode_tags::get_grab_history(&db, series_id, 1)
+                .await
+                .unwrap()[0]
+                .state,
+            "completed"
+        );
+    }
+
+    #[tokio::test]
     async fn a_grab_missing_from_a_listing_that_came_back_is_removed() {
         // The other half: the client answered and the torrent isn't in
         // it, so the user deleted it there.

@@ -871,12 +871,13 @@ pub(super) async fn build_episodes(
     media_root: &str,
 ) -> (Vec<Episode>, i32, i32, String, i32) {
     let ep_count = detail.effective_episode_count();
-    // Fan out the four independent pre-fetches in parallel:
+    // Fan out the six independent pre-fetches in parallel:
     //   1. disk file walk (blocking pool)
     //   2. cached episode metadata map (DB, with a fallback path)
     //   3. force_kitsu_fallback config flag (DB)
     //   4. monitored-episode set (DB, only when the series is tracked)
     //   5. per-episode quality tags (DB, only when the series is tracked)
+    //   6. pending acquisition coverage (DB, only when tracked)
     let disk_files_fut = media::scan_series_folder(media_root, folder_name);
 
     // The series remains the identity authority when detail came from a
@@ -932,12 +933,37 @@ pub(super) async fn build_episodes(
         }
     };
 
-    let (disk_files, cached_eps, force_kitsu_fallback, monitored_lookup, quality_tags) = tokio::join!(
+    let pending_fut = async move {
+        let mut episodes = std::collections::HashSet::<i32>::new();
+        if let Some(id) = db_id {
+            // Routed packs use their saved coverage; the root episode
+            // list is authoritative only when no routes were saved.
+            let lists = sqlx::query_scalar::<_, String>(
+                "SELECT g.episode_numbers FROM grabbed_torrents g
+                 WHERE g.state = 'pending' AND g.series_id = ?1
+                 AND NOT EXISTS (SELECT 1 FROM grabbed_torrent_series r WHERE r.grab_id = g.id)
+                 UNION ALL SELECT r.episode_numbers FROM grabbed_torrent_series r
+                 JOIN grabbed_torrents g ON g.id = r.grab_id
+                 WHERE g.state = 'pending' AND r.series_id = ?1",
+            )
+            .bind(id)
+            .fetch_all(db)
+            .await
+            .unwrap_or_default();
+            for list in lists {
+                episodes.extend(serde_json::from_str::<Vec<i32>>(&list).unwrap_or_default());
+            }
+        }
+        episodes
+    };
+
+    let (disk_files, cached_eps, force_kitsu_fallback, monitored_lookup, quality_tags, pending) = tokio::join!(
         disk_files_fut,
         cached_eps_fut,
         force_kitsu_fallback_enabled(db),
         monitored_fut,
         quality_tags_fut,
+        pending_fut,
     );
     let cached_matches_force =
         !force_kitsu_fallback || cached_eps.values().any(|ep| ep.source == "kitsu");
@@ -1218,6 +1244,7 @@ pub(super) async fn build_episodes(
             title_native: ep_title_native,
             aired: ep_aired,
             on_disk,
+            pending_grab: pending.contains(&ep_num),
             downloaded,
             quality: display_quality,
             quality_state,
@@ -1315,6 +1342,7 @@ pub(super) async fn build_episodes(
                 title_native: String::new(),
                 aired: String::new(),
                 on_disk: true,
+                pending_grab: pending.contains(&ep),
                 // This branch only runs when the file already exists under
                 // media_root (on_disk=true), so `downloaded` is
                 // unconditionally true regardless of tag state.
@@ -1376,6 +1404,7 @@ pub(super) async fn build_episodes(
                 title_native: String::new(),
                 aired: String::new(),
                 on_disk: false,
+                pending_grab: pending.contains(&ep_num),
                 downloaded,
                 quality: tag.quality_tag.clone(),
                 quality_state: tag.state.clone(),
