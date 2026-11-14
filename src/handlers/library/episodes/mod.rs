@@ -542,6 +542,12 @@ async fn delete_episode_file_owned(
                         .resolve_grab_client(grab.download_client_id, &grab.hash)
                         .await
                     else {
+                        // The library file is already gone. Retire its
+                        // import provenance even when the stamped client
+                        // is disabled, so restore cannot attribute a
+                        // different file to this deleted import. Leave
+                        // the unavailable client's payload untouched.
+                        let _ = grabbed_torrents::mark_removed(&state.db, grab.id).await;
                         continue;
                     };
                     let delete_result = client.delete(&grab.hash, true).await;
@@ -908,7 +914,8 @@ pub async fn cancel_pending_episode(
     .ok()
     .flatten();
     let tag_is_grabbed = matches!(tag_state.as_deref(), Some("grabbed"));
-    if tag_is_grabbed
+    if pending.is_empty()
+        && tag_is_grabbed
         && let Ok(stuck) =
             grabbed_torrents::find_imported_for_episode(&state.db, tracked.id, episode_number).await
     {
@@ -972,6 +979,7 @@ pub async fn cancel_pending_episode(
     );
 
     let mut removed_count = 0;
+    let mut repaired_imported_drift = false;
     let mut torrent_failures: Vec<String> = Vec::new();
     for grab in &pending {
         if !grab.hash.is_empty() {
@@ -997,7 +1005,16 @@ pub async fn cancel_pending_episode(
             }
         }
 
-        if let Err(e) = grabbed_torrents::mark_removed(&state.db, grab.id).await {
+        let result = if grab.state == "pending" {
+            // An upgrade can share a slot with an existing completed
+            // file. Cancel only this attempt, preserving that file's
+            // completed tag and history (and unrelated or pinned tags).
+            grabbed_torrents::cancel_pending_grab(&state.db, grab).await
+        } else {
+            repaired_imported_drift = true;
+            grabbed_torrents::mark_removed(&state.db, grab.id).await
+        };
+        if let Err(e) = result {
             logger::warn(
                 &state.db,
                 LogCategory::Library,
@@ -1013,7 +1030,10 @@ pub async fn cancel_pending_episode(
         }
     }
 
-    let _ = episode_tags::clear_tags_for_removal(&state.db, tracked.id, &[episode_number]).await;
+    if repaired_imported_drift {
+        let _ =
+            episode_tags::clear_tags_for_removal(&state.db, tracked.id, &[episode_number]).await;
+    }
 
     logger::info(
         &state.db,
@@ -1340,11 +1360,12 @@ pub async fn episode_download_progress(
             // series page open through a qBittorrent restart marked them
             // all removed, so they finished downloading and were never
             // imported. Post-processing keeps a failed client's grabs
-            // pending the same way. A grab whose client row is gone (or
-            // a legacy grab with no stamp) waits for a fully clean poll.
+            // pending the same way. A disabled or missing stamped
+            // client has not answered; only a legacy unstamped grab
+            // can use a fully clean poll as its fallback.
             let listing_came_back = match grab.download_client_id {
-                Some(id) if pool.clients.contains_key(&id) => !failed_clients.contains(&id),
-                _ => failed_clients.is_empty(),
+                Some(id) => pool.clients.contains_key(&id) && !failed_clients.contains(&id),
+                None => failed_clients.is_empty(),
             };
             if listing_came_back
                 && crate::services::post_processing::grab_is_stale(&grab.grabbed_at, 30)

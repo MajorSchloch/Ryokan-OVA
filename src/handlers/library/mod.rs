@@ -316,6 +316,9 @@ pub struct Episode {
     pub title_native: String,
     pub aired: String,
     pub on_disk: bool,
+    /// A pending acquisition owns this episode, independently of the
+    /// existing file and its displayed quality (an upgrade can coexist).
+    pub pending_grab: bool,
     /// Sonarr-parity split (#14): true when the episode's download is
     /// complete regardless of whether it's been imported into
     /// media_root. Specifically: `on_disk OR tag.state == "completed"`.
