@@ -17,6 +17,7 @@ function updateEpisodeRow(epNum, state, group) {
         if (!numCell || parseInt(numCell.textContent.trim()) !== epNum) continue;
 
         if (state === 'grabbed') {
+            row.dataset.grabPending = 'true';
             row.classList.remove('ep-row-unmonitored', 'ep-row-missing', 'ep-row-unaired');
             row.classList.add('ep-row-queued');
             const qualityCell = row.querySelector('.ep-col-quality');
@@ -28,6 +29,7 @@ function updateEpisodeRow(epNum, state, group) {
                 qualityCell.innerHTML = '<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:0%"></div></div><span class="dl-progress-text">0.0%</span></div>';
             }
         } else if (state === 'deleted') {
+            row.dataset.grabPending = 'false';
             // Strip both have/queued so a cancelled pending row doesn't
             // stay visually styled as queued (grey progress-bar row)
             // after the text content switches to "Missing". The prior
@@ -71,7 +73,8 @@ function updateEpisodeRow(epNum, state, group) {
 }
 
 // Keep the modal-footer Cancel-Pending button visibility in sync with
-// the episode row's `ep-row-queued` class. Called from showEpisodeDetail
+// the episode's pending attempt, including upgrades with a file on disk.
+// Called from showEpisodeDetail
 // (initial open), updateEpisodeRow, and refreshEpisodeRows after they
 // mutate the row. Bails when the modal is closed or showing a different
 // episode so callers don't have to gate. The modal starts with
@@ -87,7 +90,7 @@ function syncCancelPendingButton(epNum) {
     for (const row of rows) {
         const numCell = row.querySelector('.ep-col-num');
         if (!numCell || parseInt(numCell.textContent.trim()) !== epNum) continue;
-        isPending = row.classList.contains('ep-row-queued');
+        isPending = row.dataset.grabPending === 'true' || row.classList.contains('ep-row-queued');
         break;
     }
     cancelBtn.style.display = isPending ? '' : 'none';
@@ -374,6 +377,7 @@ function refreshEpisodeRows(options) {
 // because the dataset is read on demand, not on every poll tick.
 function syncEpisodeDataset(row, ep) {
     row.dataset.monitored = String(ep.monitored);
+    row.dataset.grabPending = ep.pending_grab ? 'true' : 'false';
     // Keep the row's unaired marker fresh so optimistic patches
     // (updateEpisodeRow's 'deleted' flip) restore the right state.
     if (typeof ep.unaired === 'boolean') {
