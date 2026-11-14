@@ -220,6 +220,150 @@ async fn delete_finishes_catalog_and_client_cleanup_after_request_disconnect() {
 }
 
 #[tokio::test]
+async fn delete_with_disabled_client_retires_import_provenance_before_restore() {
+    let f = Fixture::new().await;
+    let source = f._tmp.path().join("download.mkv");
+    std::fs::write(&source, VIDEO).unwrap();
+    sqlx::query("INSERT INTO download_clients (id, name, kind, url, enabled) VALUES (7, 'Held client', 'qbittorrent', 'http://127.0.0.1:1', 0)")
+        .execute(&f.db).await.unwrap();
+    sqlx::query("UPDATE grabbed_torrents SET download_client_id = 7, torrent_name = 'Wrong reboot (2020)', imported_source_paths = ? WHERE id = ?")
+        .bind(serde_json::to_string(&[source.to_str().unwrap()]).unwrap())
+        .bind(f.grab_id).execute(&f.db).await.unwrap();
+    let unrelated =
+        seed_grabbed_torrent(&f.db, f.series_id, "unrelated", "Keep episode 70", &[70]).await;
+    grabbed_torrents::mark_imported(&f.db, unrelated)
+        .await
+        .unwrap();
+
+    let state = build_test_app_state(f.db.clone(), None);
+    let response =
+        episodes::delete_episode_file(State(state.clone()), HxRequest(false), Path((1519, 6)))
+            .await;
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    assert!(!f.video.exists());
+    assert_eq!(
+        std::fs::read(&source).unwrap(),
+        VIDEO,
+        "disabled client payload must remain intact"
+    );
+    let states: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, state FROM grabbed_torrents ORDER BY id")
+            .fetch_all(&f.db)
+            .await
+            .unwrap();
+    assert_eq!(
+        states,
+        vec![
+            (f.grab_id, "removed".into()),
+            (unrelated, "imported".into())
+        ]
+    );
+
+    let entries = bin::list_entries(&f.bin).await.unwrap();
+    assert_eq!(entries.len(), 1);
+    let response = recycle::restore(State(state), Path(entries[0].entry_id.clone())).await;
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    f.assert_library_bytes();
+    assert_eq!(std::fs::read(&source).unwrap(), VIDEO);
+    for ep in [6, 7] {
+        let history = episode_tags::get_grab_history(&f.db, f.series_id, ep)
+            .await
+            .unwrap();
+        let restored = history.iter().find(|h| h.state == "completed").unwrap();
+        assert_eq!(
+            restored.file_name,
+            f.video.file_name().unwrap().to_str().unwrap()
+        );
+        assert_eq!(
+            restored.release_title,
+            format!(
+                "Season 01/{}",
+                f.video.file_name().unwrap().to_str().unwrap()
+            )
+        );
+        assert!(history.iter().any(|h| h.state == "removed"));
+    }
+}
+
+#[tokio::test]
+async fn cancel_disabled_client_upgrade_preserves_existing_file_and_completed_history() {
+    for pending_tag in [false, true] {
+        let f = Fixture::new().await;
+        let candidate =
+            seed_grabbed_torrent(&f.db, f.series_id, "candidate", "Wrong reboot", &[6]).await;
+        sqlx::query("INSERT INTO episode_grab_history (series_id, episode_number, quality_tag, release_title, state) VALUES (?, 6, 'WEBDL-1080p', 'Wrong reboot', 'grabbed')")
+            .bind(f.series_id).execute(&f.db).await.unwrap();
+        if pending_tag {
+            sqlx::query("UPDATE episode_quality_tags SET state = 'grabbed', release_title = 'Wrong reboot' WHERE series_id = ? AND episode_number = 6")
+                .bind(f.series_id).execute(&f.db).await.unwrap();
+        }
+        let state = build_test_app_state(f.db.clone(), None);
+        let (status, body) = episodes::cancel_pending_episode(State(state), Path((1519, 6))).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body.0["cancelled"], 1);
+        f.assert_library_bytes();
+        let states: Vec<(i64, String)> =
+            sqlx::query_as("SELECT id, state FROM grabbed_torrents ORDER BY id")
+                .fetch_all(&f.db)
+                .await
+                .unwrap();
+        assert_eq!(
+            states,
+            vec![
+                (f.grab_id, "imported".into()),
+                (candidate, "removed".into())
+            ]
+        );
+        let history = episode_tags::get_grab_history(&f.db, f.series_id, 6)
+            .await
+            .unwrap();
+        assert!(
+            history
+                .iter()
+                .any(|h| h.release_title == "Show" && h.state == "completed")
+        );
+        assert!(
+            history
+                .iter()
+                .any(|h| h.release_title == "Wrong reboot" && h.state == "removed")
+        );
+        let tags = episode_tags::get_for_series(&f.db, f.series_id)
+            .await
+            .unwrap();
+        assert_eq!(tags[&7].state, "completed");
+        if pending_tag {
+            assert!(!tags.contains_key(&6));
+        } else {
+            assert_eq!(tags[&6].state, "completed");
+        }
+    }
+}
+
+#[tokio::test]
+async fn cancel_without_pending_owner_still_repairs_imported_tag_drift() {
+    let f = Fixture::new().await;
+    sqlx::query("UPDATE episode_quality_tags SET state = 'grabbed' WHERE series_id = ? AND episode_number = 6")
+        .bind(f.series_id).execute(&f.db).await.unwrap();
+    let state = build_test_app_state(f.db.clone(), None);
+    let (status, body) = episodes::cancel_pending_episode(State(state), Path((1519, 6))).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(body.0["cancelled"], 1);
+    f.assert_library_bytes();
+    let state: String = sqlx::query_scalar("SELECT state FROM grabbed_torrents WHERE id = ?")
+        .bind(f.grab_id)
+        .fetch_one(&f.db)
+        .await
+        .unwrap();
+    assert_eq!(state, "removed");
+    assert!(
+        !episode_tags::get_for_series(&f.db, f.series_id)
+            .await
+            .unwrap()
+            .contains_key(&6)
+    );
+}
+
+#[tokio::test]
 async fn restore_retains_import_locks_and_retags_after_request_disconnect() {
     let f = Fixture::new().await;
     let outcome = bin::recycle(

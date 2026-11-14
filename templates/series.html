@@ -431,7 +431,7 @@
                    optimistic patches (cancel-pending's "deleted" flip in
                    series.js) can restore the correct no-file state
                    without waiting for the next /episodes poll. #}
-                <tr class="{% if ep.downloaded %}ep-row-have{% else if ep.quality_state == "grabbed" %}ep-row-queued{% else if ep.quality_state == "failed" %}ep-row-missing{% else if !ep.monitored %}ep-row-unmonitored{% else if ep.unaired %}ep-row-unaired{% else %}ep-row-missing{% endif %}" data-unaired="{{ ep.unaired }}" data-monitored="{{ ep.monitored }}">
+                <tr class="{% if ep.downloaded %}ep-row-have{% else if ep.quality_state == "grabbed" %}ep-row-queued{% else if ep.quality_state == "failed" %}ep-row-missing{% else if !ep.monitored %}ep-row-unmonitored{% else if ep.unaired %}ep-row-unaired{% else %}ep-row-missing{% endif %}" data-unaired="{{ ep.unaired }}" data-monitored="{{ ep.monitored }}" data-grab-pending="{{ ep.pending_grab }}">
                     <td class="ep-col-status">
                         {% if ep.on_disk %}
                         <span class="ep-status-icon ep-have" title="On disk">

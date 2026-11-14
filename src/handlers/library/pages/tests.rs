@@ -49,6 +49,94 @@ fn empty_anime_detail(id: i64, title_english: &str, episodes: Option<i32>) -> an
     }
 }
 
+#[tokio::test]
+async fn on_disk_upgrade_pending_state_uses_saved_ownership_not_display_quality() {
+    use crate::models::grabbed_torrents::{self, GrabSeriesRoute};
+    use crate::test_support::{in_memory_pool, seed_grabbed_torrent, seed_series};
+
+    let db = in_memory_pool().await;
+    let sid = seed_series(&db, 1519, "Show").await;
+    let sibling = seed_series(&db, 1520, "Sibling").await;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("Show")).unwrap();
+    std::fs::write(
+        root.path().join("Show/Show - S01E01-E02 [1080p WEB].mkv"),
+        b"original",
+    )
+    .unwrap();
+    sqlx::query("INSERT INTO episode_quality_tags (series_id, episode_number, quality_tag, state) VALUES (?, 1, 'WEBDL-1080p', 'completed')")
+        .bind(sid).execute(&db).await.unwrap();
+    let direct = seed_grabbed_torrent(&db, sid, "direct", "Upgrade", &[1]).await;
+    let routed = seed_grabbed_torrent(&db, sid, "routed", "Pack", &[3]).await;
+    grabbed_torrents::record_grab_series_routes(
+        &db,
+        &[
+            GrabSeriesRoute {
+                grab_id: routed,
+                series_id: sid,
+                file_indices: vec![0],
+                episode_numbers: vec![2],
+                matched_subtitle: String::new(),
+                episode_offset: 0,
+            },
+            GrabSeriesRoute {
+                grab_id: routed,
+                series_id: sibling,
+                file_indices: vec![1],
+                episode_numbers: vec![99],
+                matched_subtitle: String::new(),
+                episode_offset: 0,
+            },
+        ],
+    )
+    .await
+    .unwrap();
+    let detail = empty_anime_detail(1519, "Show", Some(3));
+    let (episodes, ..) = build_episodes(
+        &db,
+        &detail,
+        Some(sid),
+        "Show",
+        root.path().to_str().unwrap(),
+    )
+    .await;
+    for number in [1, 2] {
+        let episode = episodes.iter().find(|e| e.number == number).unwrap();
+        assert!(episode.on_disk);
+        assert_eq!(episode.quality_state, "disk");
+        assert!(
+            episode.pending_grab,
+            "parsed disk quality must not hide an upgrade"
+        );
+        assert_eq!(serde_json::to_value(episode).unwrap()["pending_grab"], true);
+    }
+    assert!(
+        !episodes
+            .iter()
+            .find(|e| e.number == 3)
+            .unwrap()
+            .pending_grab,
+        "saved routes supersede root numbering"
+    );
+    for id in [direct, routed] {
+        grabbed_torrents::mark_removed(&db, id).await.unwrap();
+    }
+    let (episodes, ..) = build_episodes(
+        &db,
+        &detail,
+        Some(sid),
+        "Show",
+        root.path().to_str().unwrap(),
+    )
+    .await;
+    assert!(episodes.iter().all(|e| !e.pending_grab));
+    assert!(episodes.iter().find(|e| e.number == 1).unwrap().on_disk);
+    assert_eq!(
+        episode_tags::get_for_series(&db, sid).await.unwrap()[&1].state,
+        "completed"
+    );
+}
+
 /// Issue #45: a BD release can partition a series into more files
 /// than AniList reports (Owarimonogatari S1 — AL says 12 eps, the
 /// [smol] BD has 13 files because it splits the 48-min aired ep 1
