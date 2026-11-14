@@ -210,7 +210,11 @@ pub(super) fn finish(mut p: CardProgress) -> CardProgress {
 
 pub(super) fn aggregate<'a>(rows: impl Iterator<Item = &'a CardProgress>) -> CardProgress {
     let mut p = CardProgress::default();
+    p.files.complete_scan = true;
+    p.availability_known = true;
     for row in rows {
+        p.availability_known &= row.availability_known;
+        p.files.add(&row.files);
         p.monitored |= row.monitored;
         p.downloaded += row.downloaded;
         p.downloading += row.downloading;
@@ -310,6 +314,7 @@ pub(super) async fn load(
         slots.retain(|ep| plausible_episode_count((*ep).into()).is_some());
         let (next_airing, next_airing_at) = next_label(row, facts, detail, now);
         let mut p = CardProgress {
+            availability_known: facts.have.is_some() && facts.missing.is_some(),
             added_date: added_label(&row.added_at),
             following: followed.contains(&row.id),
             next_airing_at,
@@ -352,6 +357,12 @@ pub(super) async fn load(
             }
         }
         result.insert(row.id, finish(p));
+    }
+    let summaries = super::summary::load(db, root, library).await?;
+    for (id, files) in summaries {
+        if let Some(progress) = result.get_mut(&id) {
+            progress.files = files;
+        }
     }
     Ok(result)
 }

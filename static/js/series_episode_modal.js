@@ -12,6 +12,8 @@
 var _currentEpNum = null;
 
 function showEpisodeDetail(epNum, btn) {
+    var deletionNote=document.getElementById('episode-delete-note'); if(deletionNote) deletionNote.value='';
+
     const filename = btn.dataset.filename || '';
     const size = btn.dataset.size || '';
     const onDisk = btn.dataset.onDisk === 'true';

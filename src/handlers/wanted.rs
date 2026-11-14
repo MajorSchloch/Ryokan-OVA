@@ -316,23 +316,23 @@ async fn effective_cutoff_rows(
     tags: &HashMap<i64, HashMap<i32, episode_tags::EpisodeQualityTag>>,
 ) -> Vec<WantedRow> {
     let ids: Vec<_> = library.iter().map(|release| release.id).collect();
-    let configs = match crate::services::language_preferences::effective_configs(
-        &state.db, cfg, &ids,
-    )
-    .await
-    {
-        Ok(value) => value,
-        Err(reason) => {
-            logger::warn(
-                &state.db,
-                LogCategory::Library,
-                "Wanted check held: release language settings unavailable",
-                &reason,
-            )
-            .await;
-            return Vec::new();
-        }
-    };
+    let configs =
+        match crate::services::language_preferences::resolve_snapshot(&state.db, cfg, &ids).await {
+            Ok(value) => value
+                .into_iter()
+                .filter_map(|(id, p)| p.ok().map(|p| (id, p.config)))
+                .collect(),
+            Err(reason) => {
+                logger::warn(
+                    &state.db,
+                    LogCategory::Library,
+                    "Wanted check held: release language settings unavailable",
+                    &reason,
+                )
+                .await;
+                return Vec::new();
+            }
+        };
     let observed = observe_library(state, &configs, library, disk).await;
     let mut rows = Vec::new();
     for release in library {

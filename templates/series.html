@@ -4,6 +4,10 @@
 {% block title %} - {% if title_language == "romaji" %}{% if !detail.title_romaji.is_empty() %}{{ detail.title_romaji }}{% else if !detail.title_english.is_empty() %}{{ detail.title_english }}{% else %}{{ detail.title_native }}{% endif %}{% else if title_language == "native" %}{% if !detail.title_native.is_empty() %}{{ detail.title_native }}{% else if !detail.title_romaji.is_empty() %}{{ detail.title_romaji }}{% else %}{{ detail.title_english }}{% endif %}{% else %}{% if !detail.title_english.is_empty() %}{{ detail.title_english }}{% else if !detail.title_romaji.is_empty() %}{{ detail.title_romaji }}{% else %}{{ detail.title_native }}{% endif %}{% endif %}{% endblock %}
 
 {% block content %}
+<div data-title-page data-default-tab="episodes">
+<nav class="management-breadcrumb" aria-label="Library navigation"><a href="/?individual=0" data-library-back>Library</a>{% if let Some((parent_id,parent_title)) = parent_franchise %}<span aria-hidden="true">/</span><a href="/franchises/{{ parent_id }}" data-franchise-back>{{ parent_title }}</a>{% endif %}<span aria-hidden="true">/</span><span>Release</span></nav>
+<nav class="management-tabs" aria-label="Release sections"><a href="?tab=episodes" data-title-tab="episodes">Episodes</a><a href="?tab=downloads" data-title-tab="downloads">Downloads</a><a href="?tab=activity" data-title-tab="activity">Activity</a><a href="?tab=settings" data-title-tab="settings">Settings</a></nav>
+
 <!-- Banner -->
 {% if !detail.banner_url.is_empty() %}
 <div class="detail-banner">
@@ -170,9 +174,11 @@
 {% endif %}
 
 
+<section data-title-panel="settings">
+<details class="management-panel other-titles"><summary>Other titles and synonyms</summary><dl><dt>English</dt><dd>{{ detail.title_english }}</dd><dt>Romaji</dt><dd>{{ detail.title_romaji }}</dd><dt>Native</dt><dd>{{ detail.title_native }}</dd></dl>{% if !detail.synonyms.is_empty() %}<p>Provider synonyms</p><ul class="title-chips">{% for alias in detail.synonyms %}<li>{{ alias }}</li>{% endfor %}</ul>{% endif %}</details>
 <!-- Folder mapping -->
 {% if is_tracked %}
-<div class="detail-section folder-section">
+<details class="detail-section folder-section"><summary>Advanced organization</summary>
     <div class="folder-row">
         <span class="folder-label">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
@@ -184,7 +190,7 @@
         <span class="folder-path">{{ media_root }}/{{ folder_name }}</span>
         {% endif %}
     </div>
-</div>
+</details>
 {% endif %}
 
 
@@ -192,7 +198,7 @@
 <div class="detail-section monitoring-section">
     <div class="monitoring-card">
         <div class="monitoring-row">
-            <span class="folder-label">Monitoring:</span>
+            <span class="folder-label">Monitor episodes:</span><p class="form-hint">Monitoring controls missing and future episodes. Searches follow your app setting; use Search to request one explicitly.</p>
             <div class="monitoring-controls">
                 {# Issue #166 — declarative HTMX. `change` triggers the
                    POST; the server returns `HX-Refresh: true` for the
@@ -262,16 +268,13 @@
                 </div>
             </div>
         </div>
-        {% if let Some(languages) = language_preferences %}
-        <div class="monitoring-divider"></div>
-        {% include "partials/library/languages.html" %}
-        {% endif %}
+
         {# #23 — Per-series search overrides. Both fields are blank by
            default; leaving them blank inherits the global defaults from
            Settings → Quality (rendered as placeholders here). #}
         <div class="monitoring-divider"></div>
-        <details class="monitoring-row" id="advanced-search-panel">
-            <summary class="folder-label" style="cursor:pointer">Advanced search overrides</summary>
+        <section class="monitoring-row" id="advanced-search-panel">
+            <h3 class="folder-label">Manual alternate titles</h3>
             {# Issue #166 — HTMX-driven save. The form posts to
                `/api/library/search-overrides` with `series_id` as a
                hidden field; the server returns a rendered
@@ -285,6 +288,11 @@
                 hx-swap="innerHTML">
                 <input type="hidden" name="series_id" value="{% if let Some(db_id_val) = db_id %}{{ db_id_val }}{% endif %}">
                 <div class="form-group" style="margin:0">
+                    <label for="series-alternate-titles">Alternate titles</label>
+                    <textarea data-alias-editor name="alternate_titles" id="series-alternate-titles" rows="2" placeholder="One per line">{{ alternate_titles }}</textarea>
+                    <span class="form-hint">Other names release groups use for this series, one per line. Automatic search and RSS only take a release that names the series exactly, so this is where a group's own name for it goes.</span>
+                </div>
+<details><summary>Advanced search overrides</summary>                <div class="form-group" style="margin:0">
                     <label for="series-custom-query-tokens">Custom query tokens</label>
                     <input type="text" name="custom_query_tokens" id="series-custom-query-tokens" value="{{ custom_query_tokens }}"
                         placeholder="{% if !default_custom_query_tokens.is_empty() %}global: {{ default_custom_query_tokens }}{% else %}e.g. bd 1080p{% endif %}">
@@ -296,21 +304,21 @@
                         placeholder="{% if !default_restrict_to_uploader.is_empty() %}global: {{ default_restrict_to_uploader }}{% else %}(none){% endif %}">
                     <span class="form-hint">Only show releases from this Nyaa account for this series. Blank uses the global default.</span>
                 </div>
-                <div class="form-group" style="margin:0">
-                    <label for="series-alternate-titles">Alternate titles</label>
-                    <textarea name="alternate_titles" id="series-alternate-titles" rows="2" placeholder="One per line">{{ alternate_titles }}</textarea>
-                    <span class="form-hint">Other names release groups use for this series, one per line. Automatic search and RSS only take a release that names the series exactly, so this is where a group's own name for it goes.</span>
-                </div>
-                <div style="display:flex;gap:8px;align-items:center">
+
+                </details><div style="display:flex;gap:8px;align-items:center">
                     <button type="submit" class="btn btn-primary">Save</button>
                     <span class="form-hint" id="series-search-overrides-status"></span>
                 </div>
             </form>
-        </details>
+        </section>
     </div>
 </div>
 {% endif %}
 
+{% if let Some(requirements) = requirements %}{% include "partials/library/requirements.html" %}{% else %}<p class="form-hint">Add this release to configure its requirements.</p>{% endif %}
+</section>
+<section data-title-panel="episodes">
+{% include "partials/library/file_summary.html" %}
 <!-- Episodes -->
 {% if !episodes.is_empty() || ep_total > 0 %}
 <div class="season-section">
@@ -423,7 +431,7 @@
                    optimistic patches (cancel-pending's "deleted" flip in
                    series.js) can restore the correct no-file state
                    without waiting for the next /episodes poll. #}
-                <tr class="{% if ep.downloaded %}ep-row-have{% else if ep.quality_state == "grabbed" %}ep-row-queued{% else if ep.unaired %}ep-row-unaired{% else %}ep-row-missing{% endif %}" data-unaired="{{ ep.unaired }}">
+                <tr class="{% if ep.downloaded %}ep-row-have{% else if ep.quality_state == "grabbed" %}ep-row-queued{% else if ep.quality_state == "failed" %}ep-row-missing{% else if !ep.monitored %}ep-row-unmonitored{% else if ep.unaired %}ep-row-unaired{% else %}ep-row-missing{% endif %}" data-unaired="{{ ep.unaired }}" data-monitored="{{ ep.monitored }}">
                     <td class="ep-col-status">
                         {% if ep.on_disk %}
                         <span class="ep-status-icon ep-have" title="On disk">
@@ -433,6 +441,10 @@
                         <span class="ep-status-icon ep-have" title="Downloaded, not imported">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
                         </span>
+                        {% else if ep.quality_state == "failed" %}
+                        <span class="ep-status-icon ep-missing" title="Needs attention"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 7v6M12 16h.01"/></svg></span>
+                        {% else if !ep.monitored %}
+                        <span class="ep-status-icon" title="Unmonitored"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/></svg></span>
                         {% else if ep.unaired %}
                         {# Clock icon, neutral color: nothing is wrong,
                            the episode just hasn't aired yet. Red X is
@@ -516,6 +528,8 @@
                             {% endif %}
                         {% else if ep.on_disk %}
                         <span class="tag tag-quality">UNKNOWN</span>
+                        {% else if !ep.monitored %}
+                        <span class="ep-unaired-label">Unmonitored</span>
                         {% else if ep.unaired %}
                         <span class="ep-unaired-label">Unaired</span>
                         {% else %}
@@ -524,6 +538,7 @@
                         {% if ep.needs_review && !ep.manual_override %}
                         <span class="tag tag-needs-review" title="Low-confidence tag">⚠ review</span>
                         {% endif %}
+                        {% if let Some(gate) = files.gates.get(&ep.number) %}{% include "partials/library/file_gate.html" %}{% endif %}
                     </td>
                     <td class="ep-col-actions">
                         {% if ep.can_auto_search %}
@@ -572,6 +587,10 @@
 </div>
 {% endif %}
 
+</section>
+<section data-title-panel="downloads" class="management-panel"><h3>Downloads</h3>{% if let Some(id) = db_id %}<div data-scoped-downloads="/library/title-downloads?series_id={{ id }}"><p>Open this tab to load its downloads.</p></div>{% else %}<p>Add this release to manage its downloads.</p>{% endif %}</section>
+<section data-title-panel="activity">{% include "partials/library/activity.html" %}</section>
+</div>
 <!-- Episode detail popup -->
 <div class="modal-backdrop" id="ep-detail-modal" style="display:none" onclick="closeEpisodeDetail(event)">
     <div class="modal modal-ep" onclick="event.stopPropagation()">
@@ -582,7 +601,7 @@
             </button>
         </div>
         <div class="modal-body">
-            <div id="ep-detail-body" class="ep-detail-info"></div>
+            <div id="ep-detail-body" class="ep-detail-info"></div><div id="episode-delete-note-fields" class="form-group" hidden><label for="episode-delete-note">Deletion note (optional)</label><textarea id="episode-delete-note" name="note" maxlength="1000" rows="2"></textarea></div>
         </div>
         <div class="modal-footer" id="ep-detail-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;align-items:center">
             {# HTMX migration (issue #129, Phase 2): per-episode delete is
@@ -594,7 +613,7 @@
                from the handler drives the toast + row update via the
                listener in `series_episode_modal.js`. The `hx-on::after:request`
                handler closes the modal on success. #}
-            <button class="btn-delete-file" id="btn-delete-file" style="display:none"
+            <button class="btn-delete-file" id="btn-delete-file" hx-include="#episode-delete-note" style="display:none"
                 hx-swap="none"
                 data-ryokan-confirm-title="Delete episode file"
                 data-ryokan-confirm-yes="Delete"
@@ -762,6 +781,7 @@
             </label>
             {% endif %}
         </div>
+        <label for="remove-series-note">Deletion note (optional)</label><textarea id="remove-series-note" maxlength="1000" rows="2"></textarea>
         <div class="modal-footer remove-series-footer">
             <button class="btn btn-secondary" type="button" id="remove-series-cancel">Cancel</button>
             <button class="btn btn-danger" type="button" id="remove-series-confirm">Remove from library</button>

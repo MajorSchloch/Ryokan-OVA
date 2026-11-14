@@ -985,7 +985,7 @@ async fn main() {
         )
         .route(
             "/api/series/{anilist_id}/delete-file/{episode_number}",
-            post(handlers::library::episodes::delete_episode_file),
+            post(handlers::library::episodes::delete_episode_file_with_note),
         )
         .route(
             "/api/series/{anilist_id}/cancel-pending/{episode_number}",

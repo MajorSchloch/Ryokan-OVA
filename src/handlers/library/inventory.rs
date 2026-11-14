@@ -15,14 +15,12 @@ pub(super) struct Inventory {
     pub future_frontier: Option<i32>,
     pub next_known: Option<(i64, i32, bool)>,
     pub missing: Option<Vec<i32>>,
-    pub next: Option<(i64, i32)>,
 }
 
 #[derive(Default)]
 struct Schedule {
     aired: BTreeSet<i32>,
     upcoming: BTreeSet<i32>,
-    next: Option<(i64, i32)>,
     next_known: Option<(i64, i32, bool)>,
     future_frontier: Option<i32>,
 }
@@ -83,10 +81,6 @@ pub(super) async fn load(
             if frontier {
                 schedule.future_frontier = Some(ep);
             }
-            if exact {
-                let candidate = (at, ep);
-                schedule.next = Some(schedule.next.map_or(candidate, |next| next.min(candidate)));
-            }
         }
     }
 
@@ -127,7 +121,6 @@ pub(super) async fn load(
                 future_frontier: schedule.future_frontier,
                 next_known: schedule.next_known,
                 missing,
-                next: schedule.next,
             },
         );
     }

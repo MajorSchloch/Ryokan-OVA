@@ -1,5 +1,5 @@
 //! One read-only row per Ryokan entry, plus follows outside the library.
-use super::inventory;
+
 use crate::{
     models::{config, release_follows, series},
     services::{anilist::plausible_episode_count, library_link::pick_title},
@@ -35,6 +35,7 @@ struct Entry {
     missing: Option<usize>,
     total: Option<i32>,
     next: Option<String>,
+    files: super::summary::FileSummary,
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -70,7 +71,8 @@ async fn load(db: &SqlitePool) -> Result<Table, sqlx::Error> {
         release_follows::list(db)
     )?;
     let cfg = cfg.unwrap_or_default();
-    let inventory = inventory::load(db, &cfg.media_root, &library).await?;
+    let progress = super::availability::load(db, &cfg.media_root, &library).await?;
+    let aliases = super::summary::titles(db, &library).await?;
     let mut follows: HashMap<_, _> = follows.into_iter().map(|f| (f.anilist_id, f)).collect();
     let mapped: HashMap<_, _> = sqlx::query_as::<_, (i64, i64)>(sqlx::AssertSqlSafe(format!(
         "{} SELECT l.series_id, l.anilist_id FROM local_anilist_ids l
@@ -83,7 +85,7 @@ async fn load(db: &SqlitePool) -> Result<Table, sqlx::Error> {
     .collect();
     let mut rows = Vec::new();
     for s in library {
-        let facts = &inventory[&s.id];
+        let facts = &progress[&s.id];
         let preferred = pick_title(
             &cfg.title_language,
             &s.title_english,
@@ -100,27 +102,20 @@ async fn load(db: &SqlitePool) -> Result<Table, sqlx::Error> {
             } else {
                 preferred.into()
             },
-            aliases: [
-                &s.title,
-                &s.title_english,
-                &s.title_romaji,
-                &s.title_native,
-                &s.alternate_titles,
-            ]
-            .into_iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(" "),
+            aliases: aliases.get(&s.id).cloned().unwrap_or_default(),
+            files: facts.files.clone(),
             href: super::detail::path(s.anilist_id),
             mode: s.monitor_mode_enum().as_str(),
             format: s.format.replace('_', " "),
             status: status_label(&s.status),
             followed,
             follow_only: false,
-            disk: facts.on_disk,
-            missing: facts.missing.as_ref().map(Vec::len),
+            disk: facts.files.complete_scan.then_some(facts.files.episodes),
+            missing: (facts.availability_known && facts.files.complete_scan && facts.unknown == 0)
+                .then_some(facts.missing as usize),
             total: s.episodes.and_then(|n| plausible_episode_count(n.into())),
-            next: facts.next.and_then(|(at, ep)| airing_label(at, ep)),
+            next: (!matches!(facts.next_airing.as_str(), "Finished" | "TBA"))
+                .then(|| facts.next_airing.clone()),
         });
     }
     // Deleted titles can still have a provider detail in the local cache.

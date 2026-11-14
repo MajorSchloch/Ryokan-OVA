@@ -1,0 +1,26 @@
+.management-tabs,.management-breadcrumb,.release-actions,.future-format-options { display:flex; flex-wrap:wrap; align-items:center; gap:12px; }
+.management-breadcrumb { margin-bottom:20px; color:var(--text-muted); font-size:.9rem; }
+.management-tabs { border-bottom:1px solid var(--border); margin:24px 0; gap:4px; }
+.management-tabs a { padding:12px 18px; color:var(--text-muted); text-decoration:none; border-bottom:3px solid transparent; }
+.management-tabs a[aria-current="page"] { color:var(--accent); border-color:var(--accent); }
+.management-tabs a:focus-visible,.file-gate summary:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+.management-panel { padding:20px; border:1px solid var(--border); border-radius:12px; background:var(--bg-card); margin:18px 0; }
+.management-panel h3 { margin:0 0 12px; }.management-panel p { overflow-wrap:anywhere; }
+.management-panel label { display:block; margin-bottom:6px; }.management-panel small { display:block; color:var(--text-muted); margin:6px 0 12px; }
+.requirement-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:20px; }
+.requirement-fields .form-group { margin:0; }.requirement-fields select,.requirement-fields input { width:100%; }
+.file-summary { color:var(--text-muted); font-size:.85rem; margin:12px 0; }.file-summary p { margin:5px 0; }.file-summary-quality { line-height:1.5; }
+.file-gate { margin-top:6px; font-size:.75rem; text-align:left; }.file-gate summary { display:flex; align-items:center; justify-content:center; gap:5px; cursor:pointer; }
+.file-gate p { max-width:320px; padding:10px; background:var(--bg); border:1px solid var(--border); border-radius:6px; white-space:normal; }
+.file-gate-target { color:var(--success,#65ba8b); }.file-gate-minimum { color:var(--accent); }.file-gate-unmet { color:var(--danger,#e77979); }.file-gate-unverified,.file-gate-disabled { color:var(--text-muted); }
+.franchise-filters { display:flex; flex-wrap:wrap; gap:14px; align-items:end; }.franchise-filters label { flex:1 1 170px; margin:0; }.franchise-filters input,.franchise-filters select { width:100%; margin-top:6px; }
+.franchise-release-card[hidden],[data-title-panel][hidden],[data-summary-part][hidden] { display:none !important; }
+.franchise-release-info { min-width:0; }.franchise-release-info h4 a { color:inherit; text-decoration:none; }.franchise-release-info h4 a:hover { text-decoration:underline; }
+.release-actions { margin-top:16px; gap:6px; }.future-format-options { margin:16px 0; align-items:start; }
+.activity-list { list-style:none; padding:0; }.activity-list li { padding:16px 0; border-bottom:1px solid var(--border); }.activity-heading { display:flex; justify-content:space-between; flex-wrap:wrap; gap:12px; }.activity-heading time { color:var(--text-muted); font-size:.8rem; }.activity-list p { margin:7px 0; }.activity-detail { white-space:pre-wrap; overflow-wrap:anywhere; }
+.library-display-options { margin:12px 0; }.library-display-options fieldset { display:flex; gap:16px; flex-wrap:wrap; padding:12px; }.library-display-options input { width:auto; }
+.title-chips { display:flex; flex-wrap:wrap; list-style:none; padding:0; gap:8px; }.title-chips li { padding:6px 10px; border:1px solid var(--border); border-radius:18px; overflow-wrap:anywhere; max-width:100%; }.title-chips button { border:0; background:none; color:inherit; cursor:pointer; margin-left:8px; padding:4px 8px; }.alias-editor { display:flex; gap:8px; flex-wrap:wrap; }.alias-editor ul { flex-basis:100%; }.alias-editor input { flex:1; min-width:180px; }
+#episode-delete-note { width:100%; margin-top:6px; }.other-titles dd { margin:5px 0 12px; overflow-wrap:anywhere; }
+@media(max-width:700px) { .requirement-fields { grid-template-columns:1fr; }.management-panel { padding:14px; }.management-tabs { gap:0; }.management-tabs a { padding:12px 10px; flex:1; text-align:center; font-size:.85rem; }.release-actions .btn { flex:1 1 auto; text-align:center; }.franchise-filters label { flex-basis:100%; } }
+.release-controls { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin-top:14px; }.release-controls label { font-size:.85rem; }.release-controls select { display:block; margin-top:6px; max-width:100%; }.release-controls .checkbox-row { display:flex; align-items:center; gap:6px; }.ep-row-unmonitored { color:var(--text-muted); }
+.alias-editor input { padding:10px 12px; background-color:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:var(--radius); }.alias-editor input:focus { outline:2px solid var(--accent); outline-offset:2px; }

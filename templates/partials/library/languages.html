@@ -10,8 +10,8 @@
                 <legend>Audio / dub</legend>
                 <label for="release-audio-mode">Audio choice</label>
                 <select id="release-audio-mode" name="audio_mode" data-language-mode>
-                    <option value="inherit"{% if languages.audio.mode == "inherit" %} selected{% endif %}>Use library default: {{ languages.audio.default_summary }}</option>
-                    <option value="any"{% if languages.audio.mode == "any" %} selected{% endif %}>Any audio language</option>
+                    <option value="inherit"{% if languages.audio.mode == "inherit" %} selected{% endif %}>Use inherited settings: {{ languages.audio.default_summary }}</option>
+                    <option value="any"{% if languages.audio.mode == "any" %} selected{% endif %}>No language requirement</option>
                     <option value="require"{% if languages.audio.mode == "require" %} selected{% endif %}>Choose audio languages</option>
                 </select>
                 <div class="language-choice-options">
@@ -34,7 +34,7 @@
                 <legend>Subtitles</legend>
                 <label for="release-subtitle-mode">Subtitle choice</label>
                 <select id="release-subtitle-mode" name="subtitle_mode" data-language-mode>
-                    <option value="inherit"{% if languages.subtitles.mode == "inherit" %} selected{% endif %}>Use library default: {{ languages.subtitles.default_summary }}</option>
+                    <option value="inherit"{% if languages.subtitles.mode == "inherit" %} selected{% endif %}>Use inherited settings: {{ languages.subtitles.default_summary }}</option>
                     <option value="any"{% if languages.subtitles.mode == "any" %} selected{% endif %}>Subtitles not required</option>
                     <option value="require"{% if languages.subtitles.mode == "require" %} selected{% endif %}>Choose subtitle languages</option>
                 </select>

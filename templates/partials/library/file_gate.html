@@ -1,0 +1,4 @@
+<details class="file-gate file-gate-{{ gate.state }}">
+    <summary><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">{% if gate.state == "target" %}<circle cx="12" cy="12" r="9"/><path d="m7 12 3 3 7-7"/>{% else if gate.state == "minimum" %}<path d="M12 20V4m-6 6 6-6 6 6"/>{% else if gate.state == "unmet" %}<path d="m12 3 10 18H2Z"/><path d="M12 9v5m0 3v1"/>{% else %}<circle cx="12" cy="12" r="9"/><path d="M9 8a3 3 0 0 1 6 1c0 2-3 2-3 5m0 3v1"/>{% endif %}</svg>{{ gate.label }}</summary>
+    <p>{{ gate.reason }}</p>
+</details>

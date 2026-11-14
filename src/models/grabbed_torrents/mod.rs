@@ -977,11 +977,43 @@ pub async fn stamp_client_content_path(
 }
 
 pub async fn mark_failed(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE grabbed_torrents SET state = 'failed' WHERE id = ?")
+    mark_failed_recorded(db, id, "Reason not recorded").await
+}
+
+pub async fn mark_failed_recorded(
+    db: &SqlitePool,
+    id: i64,
+    reason: &str,
+) -> Result<(), sqlx::Error> {
+    let updated = sqlx::query("UPDATE grabbed_torrents SET state='failed' WHERE id=?")
         .bind(id)
         .execute(db)
         .await?;
+    if updated.rows_affected() > 0 {
+        record_failure(db, id, reason).await;
+    }
     Ok(())
+}
+
+async fn record_failure(db: &SqlitePool, id: i64, reason: &str) {
+    if let Ok(Some((series_id, name, stamp))) = sqlx::query_as::<_, (i64, String, String)>(
+        "SELECT series_id,torrent_name,grabbed_at FROM grabbed_torrents WHERE id=?",
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await
+    {
+        let mut event = crate::models::library_activity::Event::new(
+            format!("failed:{id}:{stamp}:{reason}"),
+            "Failed",
+            Some(series_id),
+            "",
+            reason,
+        );
+        event.detail = name;
+        event.grab_id = Some(id);
+        crate::models::library_activity::append(db, event).await;
+    }
 }
 
 /// `mark_failed` plus a `failure_reason` the Downloads page and the
@@ -996,6 +1028,7 @@ pub async fn mark_failed_with_reason(
         .bind(id)
         .execute(db)
         .await?;
+    record_failure(db, id, reason).await;
     Ok(())
 }
 
@@ -1021,6 +1054,14 @@ pub(crate) async fn fail_pending_requirements_attempt(
     .bind(completed_seen_at)
     .execute(db)
     .await?;
+    if updated.rows_affected() == 1 {
+        record_failure(
+            db,
+            grab.id,
+            "Verified file requirements were not met; existing media was kept.",
+        )
+        .await;
+    }
     Ok(updated.rows_affected() == 1)
 }
 

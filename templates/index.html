@@ -78,7 +78,7 @@
                 <label class="checkbox-row"><input id="library-individual" type="checkbox"{% if individual %} checked{% endif %} onchange="this.form.requestSubmit()"> Show individual releases</label>
                 <noscript><button class="btn btn-secondary btn-sm" type="submit">Change view</button></noscript>
             </form>
-            <a href="/library/follows" class="btn btn-secondary btn-sm">Release follows</a>
+            <a class="btn btn-secondary" href="/library/activity">Activity</a><a href="/library/follows" class="btn btn-secondary btn-sm">Release follows</a>
             {# Two-part sort: key select + direction toggle. Option
                values are each key's DEFAULT direction (recent =
                newest first, title = A to Z, score = high first) so
@@ -169,6 +169,7 @@
     {% endif %}
 </div>
 {% else %}
+<details class="library-display-options"><summary class="btn btn-secondary btn-sm">Display options</summary><fieldset><legend>Card details</legend><label><input type="checkbox" data-summary-toggle="episodes" checked> Episode counts</label><label><input type="checkbox" data-summary-toggle="size" checked> Media size</label><label><input type="checkbox" data-summary-toggle="quality" checked> File checks</label></fieldset></details>
 <div class="library-grid" id="library-grid"{% if !individual && visible_franchise_count == 0 || individual && visible_release_count == 0 %} style="display: none"{% endif %}>
     {% for franchise in franchise_cards %}
     <a href="{{ franchise.path }}" class="franchise-card" data-library-card data-search-titles="{{ franchise.search_titles }}"{% if !franchise.matches_search %} style="display: none"{% endif %}>
@@ -183,6 +184,7 @@
             <p class="franchise-card-summary">{{ franchise.tracked }} release{% if franchise.tracked != 1 %}s{% endif %} in library{% if franchise.available > 0 %} &middot; {{ franchise.available }} more{% endif %}</p>
             {% if !franchise.formats.is_empty() %}<p class="franchise-card-formats">{{ franchise.formats }}</p>{% endif %}
             <p class="franchise-card-progress">{{ franchise.progress.label }}</p>
+            {% let files = &franchise.progress.files %}{% include "partials/library/file_summary.html" %}
             {% include "partials/library/availability_legend.html" %}
             {% if !franchise.next_airing.is_empty() %}<p class="card-date"><span>Next airing</span> {{ franchise.next_airing }}</p>{% endif %}
             {% if !franchise.added_date.is_empty() %}<p class="card-date"><span>Added</span> {{ franchise.added_date }}</p>{% endif %}
@@ -190,7 +192,7 @@
     </a>
     {% endfor %}
     {% for (s, prog) in cards %}
-    <a href="{{ crate::handlers::library::detail::path(s.anilist_id) }}" class="series-card" data-library-card id="series-{{ s.id }}"{% if hidden_release_ids.contains(&s.id) %} style="display: none"{% endif %}>
+    <a href="{{ crate::handlers::library::detail::path(s.anilist_id) }}" class="series-card" data-library-card data-search-titles="{{ search_titles.get(&s.id).cloned().unwrap_or_default() }}" id="series-{{ s.id }}"{% if hidden_release_ids.contains(&s.id) %} style="display: none"{% endif %}>
         {# Bulk-select checkbox overlay (issue #125). Hidden until the
            library grid enters .selecting mode (see static/js/index.js
            toggleBulkSelectMode). All click handling happens in a
@@ -237,6 +239,7 @@
                 {% endif %}
             </div>
             <p class="franchise-card-progress">{{ prog.label }}</p>
+            {% let files = &prog.files %}{% include "partials/library/file_summary.html" %}
             {% include "partials/library/availability_legend.html" %}
             {% if prog.next_airing.as_str() != "Finished" %}<p class="card-date"><span>Next airing</span> {{ prog.next_airing }}</p>{% endif %}
             {% if !prog.added_date.is_empty() %}<p class="card-date"><span>Added</span> {{ prog.added_date }}</p>{% endif %}
@@ -327,6 +330,7 @@
                 <span>Keep them off my watch-list sync. Only matters with a linked AniList or MyAnimeList account. Undo on Settings → Connections.</span>
             </label>
         </div>
+        <label for="bulk-delete-note">Deletion note for these titles (optional)</label><textarea id="bulk-delete-note" maxlength="1000" rows="2"></textarea>
         <div class="modal-footer remove-series-footer">
             <button type="button" class="btn btn-secondary" onclick="closeBulkDeleteModal(event)">Cancel</button>
             <button type="button" id="bulk-delete-confirm-btn" class="btn btn-danger" onclick="confirmBulkDelete()">Remove from library</button>
