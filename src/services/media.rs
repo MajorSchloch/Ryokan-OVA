@@ -1303,7 +1303,7 @@ fn parse_quality(lower: &str) -> String {
     }
 }
 
-fn format_size(bytes: u64) -> String {
+pub fn format_size(bytes: u64) -> String {
     if bytes == 0 {
         return String::new();
     }

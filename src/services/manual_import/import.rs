@@ -253,9 +253,9 @@ async fn resolve_series_row(
 struct Touched {
     row: series::Series,
     created: bool,
-    /// `(first episode, episode count, destination)` for every file
+    /// `(first episode, episode count, destination, replaced, previous paths)` for every file
     /// that landed.
-    landed: Vec<(i32, i32, PathBuf)>,
+    landed: Vec<(i32, i32, PathBuf, bool, Vec<PathBuf>)>,
 }
 
 /// The job, in two phases. Phase 1 lands files: per group, resolve
@@ -469,7 +469,7 @@ pub async fn run_import(
                 &naming::SeriesNames::from_series(&row),
                 1,
             ));
-        let mut landed: Vec<(i32, i32, PathBuf)> = Vec::new();
+        let mut landed: Vec<(i32, i32, PathBuf, bool, Vec<PathBuf>)> = Vec::new();
 
         for (file, fv) in group.files.iter().zip(view.files.iter()) {
             if cancel.load(Ordering::Relaxed) {
@@ -713,7 +713,13 @@ pub async fn run_import(
                         report.files_written += 1;
                     }
                     report.bytes_written += file.size_bytes;
-                    landed.push((ep, file.episode_count.max(1), dest));
+                    landed.push((
+                        ep,
+                        file.episode_count.max(1),
+                        dest,
+                        replacing,
+                        old.iter().map(|(path, _)| path.clone()).collect(),
+                    ));
                 }
                 Err(e) => {
                     gr.errors.push(format!("{}: {e}", file.rel_path));
@@ -785,7 +791,7 @@ pub async fn run_import(
             .ok()
             .flatten()
             .and_then(|c| c.detail.duration);
-        for (ep, count, dest) in &t.landed {
+        for (ep, count, dest, _, _) in &t.landed {
             // One `<episodedetails>` per episode the file holds (issue
             // #246); the usual file has one.
             let entries: Vec<nfo::EpisodeNfoEntry> = (*ep..*ep + *count)
@@ -832,6 +838,35 @@ pub async fn run_import(
         // gets from the library sweep, scoped to this series. Runs
         // even after a cancel so what landed is never left untagged.
         let _ = post_processing::scan_series_for_unclassified(state, t.row.id).await;
+        for (ep, count, path, replacing, previous) in &t.landed {
+            let mut event = crate::models::library_activity::Event::new(
+                format!(
+                    "manual:{}:{}:{}",
+                    t.row.id,
+                    path.display(),
+                    std::fs::metadata(path)
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_nanos())
+                        .unwrap_or_default()
+                ),
+                if *replacing { "Replaced" } else { "Imported" },
+                Some(t.row.id),
+                &series_title,
+                "Imported through the reviewed manual import selection.",
+            );
+            event.provider_id = Some(t.row.anilist_id);
+            event.detail = format!(
+                "Episodes {}–{} · {} · Previous files: {:?}",
+                ep,
+                ep + count - 1,
+                path.display(),
+                previous
+            );
+            crate::models::library_activity::append(&state.db, event).await;
+        }
+
         if cancelled {
             continue;
         }

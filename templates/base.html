@@ -79,6 +79,7 @@
     <link rel="stylesheet" href="/static/css/pages/index.css?v={{ crate::asset_version() }}">
     <link rel="stylesheet" href="/static/css/pages/recycle.css?v={{ crate::asset_version() }}">
     <link rel="stylesheet" href="/static/css/pages/search.css?v={{ crate::asset_version() }}">
+    <link rel="stylesheet" href="/static/css/pages/library_management.css?v={{ crate::asset_version() }}">
     <link rel="stylesheet" href="/static/css/pages/series.css?v={{ crate::asset_version() }}">
     <link rel="stylesheet" href="/static/css/pages/settings.css?v={{ crate::asset_version() }}">
     <link rel="stylesheet" href="/static/css/pages/system.css?v={{ crate::asset_version() }}">
@@ -361,6 +362,7 @@
        Surfaced by the boost-phase-b regression test on direct
        /downloads load. Per-page templates render their script tags
        into this block so they execute LAST. #}
-    {% block page_js %}{% endblock %}
+    <script src="/static/js/library_management.js?v={{ crate::asset_version() }}" defer></script>
+{% block page_js %}{% endblock %}
 </body>
 </html>

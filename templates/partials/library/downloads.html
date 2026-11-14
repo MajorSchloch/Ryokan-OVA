@@ -1,0 +1,7 @@
+<div class="scoped-downloads">
+    {% for error in errors %}<p class="alert alert-error" role="alert">{{ error }}</p>{% endfor %}
+    {% if rows.is_empty() %}<p>No active downloads recorded for this title.</p>{% else %}
+    <ul class="activity-list">{% for row in rows %}<li><strong>{{ row.name }}</strong><p>{{ row.state }} · {{ row.progress }} · {{ row.size }}</p>{% if row.shared %}<p class="form-hint">Shared download: client actions affect other releases too.</p>{% endif %}</li>{% endfor %}</ul>
+    {% endif %}
+    <a class="btn btn-secondary" href="/downloads">Manage download queue</a>
+</div>

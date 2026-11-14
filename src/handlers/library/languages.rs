@@ -140,7 +140,7 @@ impl LanguagePreferencesView {
             &preferences.audio_match,
             &cfg.required_audio_languages,
             &cfg.audio_language_match,
-            "Any audio language",
+            "No language requirement",
         );
         let subtitles = LanguageRow::new(
             &preferences.subtitle_languages,
@@ -158,7 +158,7 @@ impl LanguagePreferencesView {
                 .audio_match
                 .as_deref()
                 .unwrap_or(&cfg.audio_language_match),
-            "Any",
+            "No language requirement",
         );
         let subtitle_summary = summary(
             preferences
@@ -228,12 +228,27 @@ pub async fn load_view(
     let preferences = series_language_preferences::get(db, series_id)
         .await
         .map_err(|_| "Could not read release language settings.".to_string())?;
-    language_preferences::apply(cfg, &preferences)?;
+    let inherited = inherited_config(db, cfg, series_id).await?;
     Ok(LanguagePreferencesView::from_preferences(
         series_id,
-        cfg,
+        &inherited,
         &preferences,
     ))
+}
+
+async fn inherited_config(
+    db: &sqlx::SqlitePool,
+    cfg: &config::Config,
+    id: i64,
+) -> Result<config::Config, String> {
+    let row = series::get_by_id(db, id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("Release not found.")?;
+    match language_preferences::franchise_for_release(db, row.id).await? {
+        Some(page) => language_preferences::franchise_config(db, cfg, &page).await,
+        None => Ok(cfg.clone()),
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -431,7 +446,10 @@ pub async fn save_languages(
             &format!("/series/{}", release.id),
         );
     }
-    let mut saved = LanguagePreferencesView::from_preferences(release.id, &cfg, &preferences);
+    let inherited = inherited_config(&state.db, &cfg, release.id)
+        .await
+        .unwrap_or(cfg);
+    let mut saved = LanguagePreferencesView::from_preferences(release.id, &inherited, &preferences);
     saved.message =
         Some("Language settings saved. Existing files and upgrade settings are unchanged.".into());
     render(saved, release.title, true)

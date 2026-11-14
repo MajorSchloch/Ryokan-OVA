@@ -896,22 +896,19 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
     let tracked = series::get_all(&state.db)
         .await
         .map_err(|e| e.to_string())?;
-    let per_release_languages = crate::models::series_language_preferences::get_all(&state.db)
-        .await
-        .map_err(|_| {
-            "Language requirement: could not read release language settings.".to_string()
-        })?;
-    let inherited_languages =
-        crate::models::series_language_preferences::LanguagePreferences::default();
+    let effective_configs = crate::services::language_preferences::resolve_snapshot(
+        &state.db,
+        &cfg,
+        &tracked.iter().map(|s| s.id).collect::<Vec<_>>(),
+    )
+    .await?;
     let mut fetch_cfg = cfg.clone();
     for release in &tracked {
-        let effective = crate::services::language_preferences::apply(
-            &cfg,
-            per_release_languages
-                .get(&release.id)
-                .unwrap_or(&inherited_languages),
-        )?;
-        fetch_cfg.allow_non_english |= auto_search::allows_non_english(&effective);
+        let Some(Ok(effective_policy)) = effective_configs.get(&release.id) else {
+            continue;
+        };
+        let effective = &effective_policy.config;
+        fetch_cfg.allow_non_english |= auto_search::allows_non_english(effective);
     }
     let has_music_series = tracked.iter().any(|s| s.format == "MUSIC");
     let indexer_categories = crate::services::indexers::rss_categories(
@@ -1143,12 +1140,10 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             .await;
             continue;
         }
-        let cfg = crate::services::language_preferences::apply(
-            &cfg,
-            per_release_languages
-                .get(&found.series.id)
-                .unwrap_or(&inherited_languages),
-        )?;
+        let Some(Ok(effective_policy)) = effective_configs.get(&found.series.id) else {
+            continue;
+        };
+        let cfg = effective_policy.config.clone();
         let requirements = crate::services::media_requirements::Policy::from_config(&cfg);
 
         // Automatic paths take a release only when its title names the
@@ -1717,12 +1712,10 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         auto_search::seadex_hashes_for_rss(&state.db, seadex_needs_lookup, &pending_anilist_ids)
             .await;
     for cand in &mut pending {
-        let effective_cfg = crate::services::language_preferences::apply(
-            &cfg,
-            per_release_languages
-                .get(&cand.found.series.id)
-                .unwrap_or(&inherited_languages),
-        )?;
+        let Some(Ok(effective_policy)) = effective_configs.get(&cand.found.series.id) else {
+            continue;
+        };
+        let effective_cfg = effective_policy.config.clone();
         let hashes = seadex_hashes
             .get(&cand.found.series.anilist_id)
             .unwrap_or(&no_seadex_hashes);

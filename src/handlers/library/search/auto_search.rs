@@ -223,6 +223,37 @@ fn with_notes(report: &auto_search::AutoSearchReport, lines: Vec<String>) -> Str
         .join("\n")
 }
 
+async fn record_search_activity(
+    db: &SqlitePool,
+    id: Option<i64>,
+    result: &Result<auto_search::AutoSearchReport, (axum::http::StatusCode, String)>,
+) {
+    let Some(id) = id else { return };
+    let (action, reason, detail) = match result {
+        Ok(r) => (
+            "Search completed",
+            if r.cancelled {
+                "Search stopped because the library entry changed.".to_string()
+            } else {
+                format!(
+                    "{} releases queued; {} targets held or skipped. A queued release is not an imported file.",
+                    r.grabbed.len(),
+                    r.skipped.len()
+                )
+            },
+            serde_json::to_string(r).unwrap_or_default(),
+        ),
+        Err((_, e)) => ("Search failed", e.clone(), String::new()),
+    };
+    let key = format!(
+        "search:{id}:{}",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    );
+    let mut event = crate::models::library_activity::Event::new(key, action, Some(id), "", &reason);
+    event.detail = detail;
+    crate::models::library_activity::append(db, event).await;
+}
+
 async fn emit_auto_search_terminal(
     result: &Result<auto_search::AutoSearchReport, (axum::http::StatusCode, String)>,
 ) {
@@ -1407,6 +1438,7 @@ pub async fn auto_search_series(
             upgrades,
         )
         .await;
+        record_search_activity(&state_clone.db, series_id_for_grab, &result).await;
         emit_auto_search_terminal(&result).await;
         result
     }));
@@ -1504,6 +1536,7 @@ pub async fn auto_search_episode(
             UpgradeContext::default(),
         )
         .await;
+        record_search_activity(&state_clone.db, series_id_for_grab, &result).await;
         emit_auto_search_terminal(&result).await;
         result
     }));

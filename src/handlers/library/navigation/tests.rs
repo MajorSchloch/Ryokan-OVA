@@ -93,7 +93,7 @@ async fn parent_page_is_read_only_and_links_releases_by_provider_identity() {
     assert!(response.0.contains("/anime/anilist/100"));
     assert!(response.0.contains("/anime/anilist/200"));
     assert!(!response.0.contains(&format!("id=\"series-{}\"", first.id)));
-    assert!(response.0.contains("Choose releases &amp; follow"));
+    assert!(response.0.contains("Automatically add future releases"));
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM release_follows")
             .fetch_one(&db)

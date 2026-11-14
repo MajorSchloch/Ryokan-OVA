@@ -3,6 +3,60 @@
 pub mod follow;
 pub mod preview;
 
+#[derive(Default)]
+pub(crate) struct FutureFollowView {
+    pub fields: Vec<(String, String)>,
+    pub enabled: bool,
+    pub tv: bool,
+    pub movies: bool,
+    pub ovas: bool,
+    pub alternatives: bool,
+}
+
+/// Reuse the reviewed follow transaction while keeping current release choices
+/// fixed. This form only edits future discovery, never selects an outside title.
+pub(crate) async fn future_controls(
+    db: &SqlitePool,
+    page_id: &str,
+    seed: i64,
+) -> Result<FutureFollowView, sqlx::Error> {
+    let (folder, owner): (String, i64) =
+        sqlx::query_as("SELECT folder,owner_provider_id FROM library_franchises WHERE page_id=?")
+            .bind(page_id)
+            .fetch_one(db)
+            .await?;
+    let mut fields = vec![
+        (
+            "owner".into(),
+            if owner > 0 { owner } else { seed }.to_string(),
+        ),
+        ("name".into(), folder),
+        ("return_to".into(), format!("/franchises/{page_id}")),
+    ];
+    let plan = preview::draft(db, seed, &fields)
+        .await
+        .map_err(|(_, e)| sqlx::Error::Protocol(e.into()))?;
+    fields.extend([
+        ("selection".into(), "1".into()),
+        ("version".into(), plan.version.clone()),
+        ("future_controls".into(), "1".into()),
+    ]);
+    for row in &plan.rows {
+        if row.entry.series_id.is_some() && row.selected {
+            fields.push(("release".into(), row.entry.provider_id.to_string()));
+        }
+    }
+    Ok(FutureFollowView {
+        fields,
+        enabled: !plan.follows.is_empty()
+            && (plan.policy.tv || plan.policy.movies || plan.policy.ovas),
+        tv: plan.policy.tv || (!plan.policy.movies && !plan.policy.ovas),
+        movies: plan.policy.movies,
+        ovas: plan.policy.ovas,
+        alternatives: plan.policy.alternatives,
+    })
+}
+
 use crate::{
     models::{config, local_metadata, series},
     services::{

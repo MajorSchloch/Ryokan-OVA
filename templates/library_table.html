@@ -4,7 +4,7 @@
 <section id="library-table">
     <header class="page-header recycle-header">
         <h2>Library table</h2>
-        <nav aria-label="Library views">
+        <nav aria-label="Library views"><a class="btn btn-secondary" href="/library/activity">Activity</a>
             <a class="btn btn-secondary" href="/?view=poster">Poster view</a>
             <a class="btn btn-secondary" href="/library/groups">Grouped view</a>
         </nav>
@@ -64,6 +64,8 @@
                 <th data-key="missing"><button>Aired episodes missing</button></th>
                 <th data-key="total"><button>Total episodes</button></th>
                 <th data-key="next"><button>Next airing</button></th>
+                <th data-key="size"><button>Logical media size</button></th>
+                <th data-key="quality"><button>File checks</button></th>
                 <th hidden>Open entry</th>
             </tr></thead>
             <tbody>
@@ -78,6 +80,8 @@
                 <td{% if row.missing.unwrap_or(0) > 0 %} class="table-missing"{% endif %}>{% if let Some(n) = row.missing %}{{ n }}{% else if row.follow_only %}—{% else %}Unknown{% endif %}</td>
                 <td>{% if let Some(n) = row.total %}{{ n }}{% else %}Unknown{% endif %}</td>
                 <td>{% if let Some(next) = row.next %}{{ next }}{% else %}—{% endif %}</td>
+                <td data-value="{{ row.files.bytes }}">{{ row.files.size() }}</td>
+                <td>{{ row.files.quality() }}</td>
                 <td hidden><a href="{{ row.href }}" aria-label="Open {{ row.title }}">Open{% if row.follow_only %} follow{% endif %}</a></td>
             </tr>
             {% endfor %}

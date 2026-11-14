@@ -1,0 +1,11 @@
+<section class="management-panel" aria-labelledby="activity-heading">
+    <h3 id="activity-heading">Activity</h3>
+    <p class="form-hint">Recorded decisions describe the rules at that time. File badges use your current requirements.</p>
+    {% if activity.is_empty() %}<p>No recorded activity for this title.</p>{% else %}
+    <ol class="activity-list">{% for event in activity %}<li>
+        <div class="activity-heading"><strong>{{ event.action }}</strong><time>{{ event.occurred_at }}</time></div>
+        <p>{% if let Some(provider_id) = event.provider_id %}<a href="{{ crate::handlers::library::detail::path(*provider_id) }}">{{ event.title }}</a>{% else %}{{ event.title }}{% endif %}</p><p>{{ event.reason }}</p>
+        {% if !event.note.is_empty() %}<p><strong>Note:</strong> {{ event.note }}</p>{% endif %}
+        {% if !event.detail.is_empty() %}<details><summary>Details</summary><p class="activity-detail">{{ event.detail }}</p></details>{% endif %}
+    </li>{% endfor %}</ol>{% endif %}
+</section>
