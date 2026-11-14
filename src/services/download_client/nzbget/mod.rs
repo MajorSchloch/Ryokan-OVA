@@ -50,7 +50,9 @@ impl Job {
         if history {
             let status = self.status.split_once('/').unwrap_or((&self.status, ""));
             return match status {
-                ("DELETED", "MANUAL") => Removed,
+                // COPY discarded this exact duplicate. Reconcile its attempt
+                // without failed-download cleanup or adoption of the older job.
+                ("DELETED", "MANUAL" | "COPY") => Removed,
                 ("WARNING", "SKIPPED") if self.kind == "URL" => Errored,
                 ("SUCCESS", _) if self.kind == "NZB" => PausedComplete,
                 ("FAILURE", _) => Errored,

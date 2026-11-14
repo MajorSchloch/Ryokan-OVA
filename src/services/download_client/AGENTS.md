@@ -6,7 +6,7 @@
 
 - BT clients address torrents by **v1 infohash, lowercase hex at the trait boundary** — each impl case-munges internally for its wire format.
 - SABnzbd has no infohash. SAB hands back an opaque **`nzo_id`** (e.g. `"SABnzbd_nzo_abc123def"`) when an NZB is added, and every subsequent op keys off that. There's no formula to derive `nzo_id` from the NZB URL.
-- NZBGet history `DELETED/MANUAL` means the user cancelled the grab. Clear its pending episodes without starting a replacement search.
+- NZBGet history `DELETED/MANUAL` (user cancellation) and `DELETED/COPY` (an exact duplicate discarded by NZBGet) close only their own pending attempts. Preserve media and client history; do not start a replacement search.
 - NZBGet carries a Ryokan job key in `DupeKey` from URL submission through history. Resolve the current numeric `NZBID` before a queue action.
 - The trait method **`add_torrent_returning_id`** captures whatever opaque id the wire format uses and returns it — BT impls return the precomputed infohash unchanged; SAB returns the captured `nzo_id`. Callers persist the returned id on `grabbed_torrents.hash`. Subsequent ops receive that string as the trait's `info_hash` parameter and use it verbatim. Pattern lifted from Sonarr's `Download(...) -> string`.
 - The 40-char-hex contract only applies inside the four BT impls' add paths.
