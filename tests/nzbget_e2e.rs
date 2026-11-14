@@ -394,11 +394,29 @@ async fn failure_honors_remove_failed_off() {
 
 #[tokio::test]
 async fn manual_deletion_clears_pending_episode_without_a_replacement() {
-    check_manual_deletion(true).await;
-    check_manual_deletion(false).await;
+    check_deleted_history(true, "DELETED/MANUAL", None).await;
+    check_deleted_history(false, "DELETED/MANUAL", None).await;
 }
 
-async fn check_manual_deletion(import_enabled: bool) {
+#[tokio::test]
+async fn copy_duplicate_clears_only_its_pending_attempt_without_a_replacement() {
+    for import_enabled in [true, false] {
+        for tag in [
+            None,
+            Some(("completed", "Earlier release", false)),
+            Some(("grabbed", "Another release", false)),
+            Some(("grabbed", TITLE, true)),
+        ] {
+            check_deleted_history(import_enabled, "DELETED/COPY", tag).await;
+        }
+    }
+}
+
+async fn check_deleted_history(
+    import_enabled: bool,
+    status: &str,
+    preserved_tag: Option<(&str, &str, bool)>,
+) {
     let f = fixture(true).await;
     sqlx::query("UPDATE config SET auto_redownload_failed=1, post_processing_enabled=?")
         .bind(import_enabled)
@@ -409,10 +427,43 @@ async fn check_manual_deletion(import_enabled: bool) {
     sqlx::query("INSERT INTO episode_grab_history(series_id,episode_number,release_title,state)
                  SELECT series_id,episode_number,'Earlier release','completed' FROM episode_grab_history WHERE release_title=?")
         .bind(TITLE).execute(&f.app.db).await.unwrap();
-    f.daemon
-        .lock()
-        .unwrap()
-        .finish(&f.hash, "NZB", "DELETED/MANUAL");
+    sqlx::query("INSERT INTO episode_grab_history(series_id,episode_number,release_title,state)
+                 SELECT series_id,episode_number,'Another release','grabbed' FROM episode_grab_history WHERE release_title=?")
+        .bind(TITLE).execute(&f.app.db).await.unwrap();
+    if let Some((state, title, pinned)) = preserved_tag {
+        sqlx::query("UPDATE episode_quality_tags SET state=?,release_title=?,manual_override=? WHERE episode_number=7")
+            .bind(state).bind(title).bind(pinned).execute(&f.app.db).await.unwrap();
+    }
+    let tag_query = "SELECT state,release_title,manual_override,quality_tag,source,resolution FROM episode_quality_tags WHERE episode_number=7";
+    let mut expected_tag: Option<(String, String, bool, String, String, String)> =
+        if preserved_tag.is_some() {
+            sqlx::query_as(tag_query)
+                .fetch_optional(&f.app.db)
+                .await
+                .unwrap()
+        } else {
+            None
+        };
+    if let Some(tag) = &mut expected_tag
+        && tag.0 == "grabbed"
+        && tag.1 == TITLE
+        && tag.2
+    {
+        tag.0.clear();
+    }
+    let kept_file = f.tmp.path().join("library/existing-episode.mkv");
+    fs::write(&kept_file, b"keep existing media").unwrap();
+    let older_output = f.tmp.path().join("completed").join(TITLE);
+    fs::create_dir_all(&older_output).unwrap();
+    let older_file = older_output.join("Space Brothers - 07.mkv");
+    fs::write(&older_file, b"keep earlier download").unwrap();
+    let older_job = json!({"NZBID":91,"Kind":"NZB","Category":"ryokan","DupeKey":OTHER,
+        "NZBName":TITLE,"Status":"SUCCESS/UNPACK","DestDir":format!("/remote/ryokan/{TITLE}")});
+    {
+        let mut d = f.daemon.lock().unwrap();
+        d.history.push(older_job.clone());
+        d.finish(&f.hash, "NZB", status);
+    }
     tick(&f.app).await;
     tick(&f.app).await;
     let grab: (String, Option<String>) =
@@ -423,12 +474,13 @@ async fn check_manual_deletion(import_enabled: bool) {
             .unwrap();
     assert_eq!(grab.0, "removed");
     assert!(grab.1.unwrap_or_default().is_empty());
-    let tags: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM episode_quality_tags WHERE episode_number=7")
-            .fetch_one(&f.app.db)
-            .await
-            .unwrap();
-    assert_eq!(tags, 0);
+    let tag: Option<(String, String, bool, String, String, String)> = sqlx::query_as(tag_query)
+        .fetch_optional(&f.app.db)
+        .await
+        .unwrap();
+    assert_eq!(tag, expected_tag);
+    assert_eq!(fs::read(&kept_file).unwrap(), b"keep existing media");
+    assert_eq!(fs::read(&older_file).unwrap(), b"keep earlier download");
     let history: Vec<(String, String)> = sqlx::query_as(
         "SELECT release_title,state FROM episode_grab_history WHERE episode_number=7 ORDER BY id",
     )
@@ -439,13 +491,15 @@ async fn check_manual_deletion(import_enabled: bool) {
         history,
         [
             (TITLE.into(), "removed".into()),
-            ("Earlier release".into(), "completed".into())
+            ("Earlier release".into(), "completed".into()),
+            ("Another release".into(), "grabbed".into())
         ]
     );
     let d = f.daemon.lock().unwrap();
     assert_eq!(d.adds, 1);
     assert_eq!(d.queue, f.foreign);
     assert!(d.edits.is_empty());
+    assert_eq!(d.history[0], older_job);
 }
 
 #[tokio::test]
