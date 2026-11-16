@@ -255,6 +255,10 @@ def allowed(path, expected, refs, args):
     current = identity(path)
     if current != expected:
         raise ValueError("File identity changed; original retained")
+    unreferenced(path,current,refs)
+
+
+def unreferenced(path, current, refs):
     paths, covers, inodes, _ = refs
     if path in paths or any(path == p or p in path.parents for p in covers) or (current['device'],current['inode']) in inodes:
         raise ValueError("Another download, library or recovery entry references this file")
@@ -316,6 +320,15 @@ def stopped_lease(args):
         os.close(fd)
 
 
+def sync_move_parents(source, target):
+    for directory in dict.fromkeys((source.parent, target.parent)):
+        if directory.resolve() != directory:
+            raise ValueError("Movement parent uses a symlink")
+        fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:os.fsync(fd)
+        finally:os.close(fd)
+
+
 def move_entry(entry, restore=False):
     source = Path(entry['quarantine_path'] if restore else entry['original_path'])
     target = Path(entry['original_path'] if restore else entry['quarantine_path'])
@@ -335,10 +348,7 @@ def move_entry(entry, restore=False):
         # Preserve an unexpected replacement; put it back only without overwrite.
         rename_no_replace(target,source)
         raise ValueError("Source changed during movement; restored without overwrite")
-    for directory in {source.parent,target.parent}:
-        fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
-        try:os.fsync(fd)
-        finally:os.close(fd)
+    sync_move_parents(source, target)
 
 
 def execute(args, report, restore=False, inventory=native_inventory):
@@ -381,9 +391,11 @@ def execute(args, report, restore=False, inventory=native_inventory):
                     raise ValueError("File is not in the exact retirement manifest")
                 if not restore and not source.exists() and target.exists():
                     if identity(target)!=entry['identity']:raise ValueError("Quarantine identity differs")
+                    sync_move_parents(source,target)
                     entry['status']='quarantined';save();continue
                 if restore and source.exists() and not target.exists():
                     if identity(source)!=entry['identity']:raise ValueError("Original target differs; no overwrite permitted")
+                    sync_move_parents(source,target)
                     entry['status']='restored';entry['reason']='Exact original already present; no movement needed';save();continue
                 if restore and not source.exists() and target.exists():
                     if identity(target)!=entry['identity']:raise ValueError("Quarantine identity differs")
@@ -391,6 +403,7 @@ def execute(args, report, restore=False, inventory=native_inventory):
                 if entry['status'] in ('held','absent','restored'):
                     continue
                 if restore:
+                    unreferenced(target,identity(target),refs)
                     if source.exists() or source.is_symlink():raise ValueError("Restore target exists")
                     if source in refs[0] or any(source==p or p in source.parents for p in refs[1]):raise ValueError("Restore target is used by another job")
                 else:

@@ -93,6 +93,30 @@ class CleanupTests(unittest.TestCase):
         self.run_plan(report,True)
         self.assertEqual(entry['status'],'restored');self.assertTrue(self.source.exists())
 
+    def test_restore_keeps_quarantine_files_with_new_references(self):
+        report=self.run_plan(self.plan());entry=report['entries'][0]
+        link=self.backup.parent/'quarantine-pointer.mkv';link.symlink_to(entry['quarantine_path'])
+        self.run_plan(report,True)
+        self.assertEqual(entry['status'],'held');self.assertFalse(self.source.exists())
+        self.assertEqual(link.read_bytes(),b'original media')
+
+    def test_post_rename_fsync_failure_reconciles_only_after_durable_flush(self):
+        for restore in (False,True):
+            report=self.plan()
+            if restore:self.run_plan(report)
+            entry=report['entries'][0]
+            with patch.object(tool,'sync_move_parents',side_effect=OSError('fixture fsync failed')):
+                self.run_plan(report,restore)
+                self.assertEqual(entry['status'],'held')
+                # Retrying with an unavailable fsync must never stamp success.
+                self.run_plan(report,restore)
+                self.assertEqual(entry['status'],'held')
+            with patch.object(tool,'sync_move_parents',wraps=tool.sync_move_parents) as flush:
+                self.run_plan(report,restore)
+                self.assertTrue(flush.called)
+            self.assertEqual(entry['status'],'restored' if restore else 'quarantined')
+            if not restore:self.run_plan(report,True)
+
     def test_duplicate_paths_unbound_batch_and_other_quarantine_roots_rejected(self):
         for change in ('duplicate','destination','batch','root'):
             report=self.plan()
