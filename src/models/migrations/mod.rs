@@ -3018,6 +3018,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
             ("required_audio_languages", "TEXT NOT NULL DEFAULT ''"),
             ("audio_language_match", "TEXT NOT NULL DEFAULT 'all'"),
             ("minimum_torrent_seeders", "INTEGER NOT NULL DEFAULT 1"),
+            ("accepted_only_seeding", "INTEGER NOT NULL DEFAULT 0"),
             ("required_subtitle_languages", "TEXT NOT NULL DEFAULT ''"),
             ("subtitle_language_match", "TEXT NOT NULL DEFAULT 'all'"),
             ("media_requirements_enabled", "INTEGER NOT NULL DEFAULT 0"),
@@ -3291,6 +3292,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     crate::models::requirement_preferences::migrate(db).await?;
     crate::models::library_activity::migrate(db).await?;
 
+    super::seed_policy::init_table(db).await?;
     Ok(())
 }
 

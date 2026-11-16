@@ -17,7 +17,7 @@ use super::{
 };
 use crate::models::config::Config;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Policy {
     pub enabled: bool,
     pub minimum_resolution: Resolution,

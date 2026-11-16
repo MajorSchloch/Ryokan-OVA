@@ -1817,6 +1817,9 @@ async fn misgrab_sweep_re_searches_a_single_episode_and_grabs_the_next_candidate
 
     let anilist_id: i64 = 9006;
     let state = build_state().await;
+    ryokan::models::config::save_config(&state.db, &Config::default())
+        .await
+        .unwrap();
     let series_id = seed_series_with_cache(&state, anilist_id, "Research Show").await;
     let grab_id = seed_unhandled_misgrab(
         &state,

@@ -24,7 +24,7 @@ use sqlx::{Row, SqlitePool};
 
 /// Row shape for `download_clients`. Mirrors the schema 1:1; no
 /// derived columns.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DownloadClientRow {
     pub id: i64,
     pub name: String,

@@ -231,6 +231,10 @@ pub async fn remove_failed_from_client(state: &AppState, grab: &GrabbedTorrent) 
     else {
         return;
     };
+    let _config_guard = crate::handlers::settings::CONFIG_WRITE_LOCK.lock().await;
+    if crate::services::seed_policy::retain_rejected_source(state, grab, &client).await {
+        return;
+    }
     if client.protocol() != "usenet"
         && grabbed_torrents::respects_seed_rules(&state.db, &grab.hash).await
     {

@@ -340,7 +340,10 @@ pub async fn remove_and_blocklist(
         .await
     {
         Some(client) if client.protocol() != "usenet" => {
-            if grabbed_torrents::respects_seed_rules(&state.db, &grab.hash).await {
+            let _config_guard = crate::handlers::settings::CONFIG_WRITE_LOCK.lock().await;
+            if crate::services::seed_policy::retain_rejected_source(state, grab, &client).await {
+                action = MisgrabAction::RemovedNoDelete;
+            } else if grabbed_torrents::respects_seed_rules(&state.db, &grab.hash).await {
                 logger::info(
                     &state.db,
                     LogCategory::DownloadClient,
@@ -807,6 +810,9 @@ mod tests {
     #[tokio::test]
     async fn sweep_removes_blocklists_and_marks_action_for_misgrab() {
         let db = pool().await;
+        crate::models::config::save_config(&db, &crate::models::config::Config::default())
+            .await
+            .unwrap();
         let sid = seed(
             &db,
             21521,
