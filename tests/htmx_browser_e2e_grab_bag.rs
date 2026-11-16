@@ -279,7 +279,7 @@ impl ryokan::services::download_client::DownloadClient for QueueClient {
 async fn queue_row_actions_send_the_hash_as_data_not_code() {
     // The queue's buttons used to build `onclick="pauseTorrent('<id>')"`
     // from the client's id, so an id with a quote ran as script. Both
-    // renderers (the server's first paint and renderQueue's poll) are
+    // server renders (the first page and the queue fragment poll) are
     // clicked, and each must post the id verbatim.
     let db = in_memory_pool().await;
     let token = seed_user_session(&db).await;
@@ -302,15 +302,15 @@ async fn queue_row_actions_send_the_hash_as_data_not_code() {
         let pause = "#queue-container button[title=\"Pause\"]";
         for round in 1..=2 {
             if round == 2 {
-                // Re-render through renderQueue, whose name cell has no
-                // title attribute, and click its button.
+                // Mark the current table. A successful fragment refresh must
+                // replace it before the second action.
                 client
-                    .execute("loadQueue();", vec![])
+                    .execute("document.querySelector('#queue-container .dl-torrent-name').dataset.pollSentinel = 'old'; loadQueue();", vec![])
                     .await
                     .map_err(|e| format!("loadQueue: {e}"))?;
                 wait_for_js_truthy(
                     &client,
-                    "!document.querySelector('#queue-container .dl-torrent-name').hasAttribute('title')",
+                    "!document.querySelector('#queue-container .dl-torrent-name').hasAttribute('data-poll-sentinel')",
                     Duration::from_secs(5),
                 )
                 .await?;

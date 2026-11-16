@@ -1,0 +1,3 @@
+<div class="rss-table-wrap"><table class="rss-table"><thead><tr><th>Source</th><th>Reason / status</th><th>Client action</th><th>Last checked (UTC)</th></tr></thead><tbody>
+{% for review in reviews %}<tr><td><div class="dl-torrent-name" title="{{ review.name }}">{{ review.name }}</div><details><summary>Source ID</summary>Client {{ review.client_id }} · {{ review.hash }}</details></td><td>{{ review.reason }}</td><td>{{ review.control }}</td><td>{{ review.checked_at }}</td></tr>{% endfor %}
+</tbody></table></div>
