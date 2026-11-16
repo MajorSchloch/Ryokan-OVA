@@ -14,6 +14,8 @@ use std::sync::Arc;
 use crate::AppState;
 use crate::models::grabbed_torrents;
 use crate::services::download_client::{DownloadClient, DownloadItemState};
+mod cleanup;
+use std::collections::HashSet;
 
 /// Route a queue-action (pause/resume/delete) to the right client by
 /// looking up the grab row for `hash` and resolving its
@@ -36,6 +38,9 @@ struct QueueTorrentView {
     state_label: String,
     state_badge_class: String,
     is_paused: bool,
+    can_resume: bool,
+    protocol_label: String,
+    detail: String,
 }
 
 fn format_size(bytes: i64) -> String {
@@ -124,6 +129,9 @@ fn torrent_to_view(t: &crate::services::download_client::DownloadItem) -> QueueT
             t.state_kind,
             DownloadItemState::Paused | DownloadItemState::PausedComplete
         ),
+        can_resume: true,
+        protocol_label: "Torrent".into(),
+        detail: String::new(),
     }
 }
 
@@ -137,16 +145,59 @@ struct DownloadsTemplate {
     history: Vec<grabbed_torrents::GrabbedTorrentWithSeries>,
     blocklist: Vec<grabbed_torrents::GrabbedTorrentWithSeries>,
     title_language: String,
+    source_jobs: Vec<QueueTorrentView>,
     seed_reviews: Vec<crate::models::seed_policy::Review>,
+    seed_accepted: Vec<crate::models::seed_policy::Review>,
+    seed_previous: Vec<crate::models::seed_policy::Review>,
     accepted_only_seeding: bool,
     retire_unaccepted_sources: bool,
-    source_retirements: Vec<crate::models::seed_policy::Retirement>,
+    source_retirements: Vec<cleanup::RetirementView>,
     seed_check_running: bool,
+    cleanup_summary: String,
+    cleanup_error: String,
 }
 
 #[derive(Deserialize)]
 pub struct DownloadsQuery {
     tab: Option<String>,
+    fragment: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "partials/downloads/queue.html")]
+struct QueueTemplate<'a> {
+    queue: &'a [QueueTorrentView],
+    queue_error: &'a str,
+}
+
+fn work_view(
+    item: &crate::services::download_client::DownloadItem,
+    protocol: &str,
+    pending: bool,
+    known: bool,
+) -> Option<QueueTorrentView> {
+    if protocol == "torrent" && item.state_kind.is_complete() && known && !pending {
+        return None;
+    }
+    let mut view = torrent_to_view(item);
+    view.protocol_label = if protocol == "usenet" {
+        "Usenet"
+    } else {
+        "Torrent"
+    }
+    .into();
+    if !known && item.state_kind.is_complete() {
+        view.state_label = "Import status unavailable".into();
+    } else if pending && item.state_kind.is_complete() {
+        view.state_label = "Awaiting import".into();
+    } else if protocol == "usenet" && item.state_kind.is_complete() {
+        view.state_label = "Downloaded".into();
+    }
+    if item.state_kind == DownloadItemState::Warning {
+        view.state_label = "Needs review".into();
+        view.detail = item.state.clone();
+    }
+    Some(view)
 }
 
 /// User-facing label for a `download_clients.kind` value. Matches the
@@ -176,7 +227,9 @@ fn normalize_tab(tab: Option<String>) -> String {
 pub async fn downloads_page(
     State(state): State<AppState>,
     Query(params): Query<DownloadsQuery>,
-) -> Html<String> {
+) -> Response {
+    let source_fragment = params.fragment.as_deref() == Some("sources");
+    let fragment = params.fragment.as_deref() == Some("queue") || source_fragment;
     let tab = normalize_tab(params.tab);
 
     // Load once up-front so history/blocklist queries can honor the
@@ -189,7 +242,24 @@ pub async fn downloads_page(
         .map(|c| c.title_language)
         .unwrap_or_else(|| "english".to_string());
 
-    let (queue, queue_error) = if tab == "queue" {
+    let all_reviews = if tab == "seeding" {
+        crate::models::seed_policy::list(&state.db)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let mut source_jobs = Vec::new();
+    let mut current_sources = HashSet::new();
+    let pending_result = sqlx::query_scalar::<_, String>(
+        "SELECT lower(hash) FROM grabbed_torrents WHERE state='pending'",
+    )
+    .fetch_all(&state.db)
+    .await;
+    let import_known = pending_result.is_ok();
+    let pending: HashSet<_> = pending_result.unwrap_or_default().into_iter().collect();
+    let mut any_client_ok = false;
+    let (queue, queue_error) = if tab == "queue" || tab == "seeding" {
         // Fan out across every enabled client so SAB / Usenet jobs
         // appear alongside torrent jobs in the queue. A single
         // client erroring (e.g. SAB unreachable) doesn't blank the
@@ -201,11 +271,23 @@ pub async fn downloads_page(
                 "No download client is configured. Add one under Settings → Download Clients to see its queue here.".to_string(),
             )
         } else {
-            let mut torrents: Vec<crate::services::download_client::DownloadItem> = Vec::new();
+            let mut torrents = Vec::new();
             let mut errors: Vec<(i64, String)> = Vec::new();
             for (id, c) in pool.clients.iter() {
                 match c.list_scoped().await {
-                    Ok(mut items) => torrents.append(&mut items),
+                    Ok(items) => {
+                        any_client_ok = true;
+                        for item in items {
+                            if c.protocol() == "torrent"
+                                && item.state_kind.is_complete()
+                                && item.state_kind != DownloadItemState::CheckingSeed
+                                && item.progress == 1.0
+                            {
+                                current_sources.insert((*id, item.hash.to_ascii_lowercase()));
+                            }
+                            torrents.push((*id, c.protocol(), item));
+                        }
+                    }
                     Err(e) => errors.push((*id, e)),
                 }
             }
@@ -219,15 +301,35 @@ pub async fn downloads_page(
                 )
             };
             torrents.sort_by(|a, b| {
-                let a_down = if is_downloading(a.state_kind) { 0 } else { 1 };
-                let b_down = if is_downloading(b.state_kind) { 0 } else { 1 };
+                let a_down = if is_downloading(a.2.state_kind) { 0 } else { 1 };
+                let b_down = if is_downloading(b.2.state_kind) { 0 } else { 1 };
                 a_down.cmp(&b_down).then(
-                    b.progress
-                        .partial_cmp(&a.progress)
+                    b.2.progress
+                        .partial_cmp(&a.2.progress)
                         .unwrap_or(std::cmp::Ordering::Equal),
                 )
             });
-            let views = torrents.iter().map(torrent_to_view).collect();
+            let views = torrents
+                .iter()
+                .filter_map(|(id, protocol, item)| {
+                    let view = work_view(
+                        item,
+                        protocol,
+                        pending.contains(&item.hash.to_ascii_lowercase()),
+                        import_known,
+                    );
+                    if view.is_none() {
+                        let mut source = torrent_to_view(item);
+                        source.can_resume = all_reviews.iter().any(|r| {
+                            r.client_id == *id
+                                && r.hash.eq_ignore_ascii_case(&item.hash)
+                                && r.verdict == "Accepted"
+                        });
+                        source_jobs.push(source);
+                    }
+                    view
+                })
+                .collect();
             let error_msg = if errors.is_empty() {
                 String::new()
             } else {
@@ -284,6 +386,33 @@ pub async fn downloads_page(
     } else {
         (Vec::new(), String::new())
     };
+    let queue_error = if import_known {
+        queue_error
+    } else {
+        format!("{queue_error} Import status is unavailable; completed jobs remain visible.")
+    };
+    if fragment {
+        if !any_client_ok {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Download clients are unavailable. The last displayed queue is retained.",
+            )
+                .into_response();
+        }
+        return Html(
+            QueueTemplate {
+                queue: if source_fragment {
+                    &source_jobs
+                } else {
+                    &queue
+                },
+                queue_error: &queue_error,
+            }
+            .render()
+            .unwrap_or_default(),
+        )
+        .into_response();
+    }
 
     let history = if tab == "history" {
         grabbed_torrents::get_all_with_series(&state.db, 500, &title_language)
@@ -301,13 +430,18 @@ pub async fn downloads_page(
         Vec::new()
     };
 
-    let seed_reviews = if tab == "seeding" {
-        crate::models::seed_policy::list(&state.db)
-            .await
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let mut seed_reviews = Vec::new();
+    let mut seed_accepted = Vec::new();
+    let mut seed_previous = Vec::new();
+    for r in all_reviews {
+        if !current_sources.contains(&(r.client_id, r.hash.to_ascii_lowercase())) {
+            seed_previous.push(r);
+        } else if r.verdict == "Accepted" {
+            seed_accepted.push(r);
+        } else {
+            seed_reviews.push(r);
+        }
+    }
     let accepted_only_seeding = crate::models::config::get_config(&state.db)
         .await
         .ok()
@@ -319,14 +453,31 @@ pub async fn downloads_page(
         .ok()
         .flatten()
         .is_some_and(|c| c.retire_unaccepted_sources);
-    let source_retirements = if tab == "seeding" {
+    let records = if tab == "seeding" {
         crate::models::seed_policy::retirements(&state.db)
             .await
             .unwrap_or_default()
     } else {
         Vec::new()
     };
+    let cleanup = if tab == "seeding" {
+        cleanup::load().await
+    } else {
+        cleanup::History::default()
+    };
+    let source_retirements = records
+        .into_iter()
+        .map(|record| cleanup::RetirementView {
+            cleanup: cleanup.for_source(record.client_id, &record.hash),
+            record,
+        })
+        .collect();
     let template = DownloadsTemplate {
+        source_jobs,
+        seed_accepted,
+        seed_previous,
+        cleanup_summary: cleanup.summary(),
+        cleanup_error: cleanup.error,
         retire_unaccepted_sources,
         source_retirements,
         seed_reviews,
@@ -340,7 +491,7 @@ pub async fn downloads_page(
         blocklist,
         title_language: title_language.clone(),
     };
-    Html(template.render().unwrap_or_default())
+    Html(template.render().unwrap_or_default()).into_response()
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -525,6 +676,79 @@ mod tests {
         for (v, _, badge, _) in all_variants_with_expected() {
             assert_eq!(state_badge_class(v), badge, "badge mismatch for {v:?}");
         }
+    }
+
+    fn item(kind: DownloadItemState) -> crate::services::download_client::DownloadItem {
+        crate::services::download_client::DownloadItem {
+            hash: "a".repeat(40),
+            name: "Fixture".into(),
+            size: 1024,
+            progress: 1.0,
+            dlspeed: 0,
+            state: "native warning".into(),
+            category: String::new(),
+            eta: 0,
+            save_path: String::new(),
+            content_path: String::new(),
+            state_kind: kind,
+            seeding_done: false,
+        }
+    }
+
+    #[test]
+    fn completed_sources_leave_work_queue_only_when_import_state_is_known() {
+        let complete = item(DownloadItemState::PausedComplete);
+        assert!(work_view(&complete, "torrent", false, true).is_none());
+        assert_eq!(
+            work_view(&complete, "torrent", true, true)
+                .unwrap()
+                .state_label,
+            "Awaiting import"
+        );
+        assert_eq!(
+            work_view(&complete, "torrent", false, false)
+                .unwrap()
+                .state_label,
+            "Import status unavailable"
+        );
+        assert!(
+            work_view(
+                &item(DownloadItemState::Downloading),
+                "torrent",
+                false,
+                true
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn usenet_completion_and_native_warnings_have_truthful_labels() {
+        assert_eq!(
+            work_view(&item(DownloadItemState::Seeding), "usenet", false, true)
+                .unwrap()
+                .state_label,
+            "Downloaded"
+        );
+        let warning = work_view(&item(DownloadItemState::Warning), "usenet", false, true).unwrap();
+        assert_eq!(warning.state_label, "Needs review");
+        assert_eq!(warning.detail, "native warning");
+    }
+
+    #[test]
+    fn partial_client_error_keeps_healthy_rows_and_source_resume_gate() {
+        let mut source = torrent_to_view(&item(DownloadItemState::PausedComplete));
+        source.can_resume = false;
+        let html = QueueTemplate {
+            queue: &[source],
+            queue_error: "Other client unavailable",
+        }
+        .render()
+        .unwrap();
+        assert!(html.contains("Other client unavailable"));
+        assert!(html.contains("Fixture"));
+        assert!(!html.contains("data-dl-action=\"resume\""));
+        assert!(html.contains("data-dl-action=\"delete\""));
     }
 
     // ── format_size ───────────────────────────────────────────────────
