@@ -21,6 +21,9 @@ fn default_subtitle_check() -> bool {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Stop completed torrents unless their original source files pass review.
+    #[serde(default)]
+    pub accepted_only_seeding: bool,
     /// Legacy single-client discriminator. Pre-multi-client routing
     /// this picked which concrete `DownloadClient` impl `AppState`
     /// initialized at startup. Today the multi-client pool reads from
@@ -282,6 +285,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            accepted_only_seeding: false,
             active_client: "qbittorrent".to_string(),
             qbit_url: String::new(),
             qbit_user: String::new(),
@@ -377,6 +381,7 @@ impl Default for Config {
 
 #[derive(Debug, FromRow)]
 struct ConfigRow {
+    accepted_only_seeding: i64,
     active_client: String,
     qbit_url: String,
     qbit_user: String,
@@ -524,12 +529,13 @@ pub async fn get_naming_prefs<'e>(db: impl sqlx::SqliteExecutor<'e>) -> NamingPr
 
 pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> {
     let row: Option<ConfigRow> = sqlx::query_as(
-        "SELECT active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, rss_master_enabled, disable_nyaa_rss, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, autobrr_api_key, upgrade_search_enabled, custom_format_minimum_score, proper_policy, custom_format_cutoff_score, custom_format_upgrade_increment, auto_redownload_failed, import_extra_files, extra_file_extensions, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader, grab_preview_mode, external_sync_interval_minutes, nyaa_download_client_id, manual_search_auto_add, recycle_bin_path, recycle_bin_age_days, series_folder_format, season_folder_format, episode_file_format, backup_schedule, backup_directory, backup_retention_count, backup_include_artwork, misgrab_auto_remove, import_stall_hours, nyaa_enabled, default_allow_upgrades, required_subtitle_languages, subtitle_language_match, media_requirements_enabled, minimum_resolution, target_resolution, minimum_subtitle_check, target_subtitle_check, required_audio_languages, audio_language_match, minimum_torrent_seeders FROM config WHERE id = 1",
+        "SELECT accepted_only_seeding, active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, rss_master_enabled, disable_nyaa_rss, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, autobrr_api_key, upgrade_search_enabled, custom_format_minimum_score, proper_policy, custom_format_cutoff_score, custom_format_upgrade_increment, auto_redownload_failed, import_extra_files, extra_file_extensions, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader, grab_preview_mode, external_sync_interval_minutes, nyaa_download_client_id, manual_search_auto_add, recycle_bin_path, recycle_bin_age_days, series_folder_format, season_folder_format, episode_file_format, backup_schedule, backup_directory, backup_retention_count, backup_include_artwork, misgrab_auto_remove, import_stall_hours, nyaa_enabled, default_allow_upgrades, required_subtitle_languages, subtitle_language_match, media_requirements_enabled, minimum_resolution, target_resolution, minimum_subtitle_check, target_subtitle_check, required_audio_languages, audio_language_match, minimum_torrent_seeders FROM config WHERE id = 1",
     )
     .fetch_optional(db)
     .await?;
 
     Ok(row.map(|r| Config {
+        accepted_only_seeding: r.accepted_only_seeding != 0,
         active_client: r.active_client,
         qbit_url: r.qbit_url,
         qbit_user: r.qbit_user,
@@ -625,8 +631,8 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
 pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO config (id, active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, rss_master_enabled, disable_nyaa_rss, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, autobrr_api_key, upgrade_search_enabled, custom_format_minimum_score, proper_policy, custom_format_cutoff_score, custom_format_upgrade_increment, auto_redownload_failed, import_extra_files, extra_file_extensions, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader, grab_preview_mode, external_sync_interval_minutes, manual_search_auto_add, recycle_bin_path, recycle_bin_age_days, series_folder_format, season_folder_format, episode_file_format, backup_schedule, backup_directory, backup_retention_count, backup_include_artwork, misgrab_auto_remove, import_stall_hours, nyaa_enabled, default_allow_upgrades, required_subtitle_languages, subtitle_language_match, media_requirements_enabled, minimum_resolution, target_resolution, minimum_subtitle_check, target_subtitle_check, required_audio_languages, audio_language_match, minimum_torrent_seeders)
-        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO config (id, active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, rss_master_enabled, disable_nyaa_rss, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, autobrr_api_key, upgrade_search_enabled, custom_format_minimum_score, proper_policy, custom_format_cutoff_score, custom_format_upgrade_increment, auto_redownload_failed, import_extra_files, extra_file_extensions, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader, grab_preview_mode, external_sync_interval_minutes, manual_search_auto_add, recycle_bin_path, recycle_bin_age_days, series_folder_format, season_folder_format, episode_file_format, backup_schedule, backup_directory, backup_retention_count, backup_include_artwork, misgrab_auto_remove, import_stall_hours, nyaa_enabled, default_allow_upgrades, required_subtitle_languages, subtitle_language_match, media_requirements_enabled, minimum_resolution, target_resolution, minimum_subtitle_check, target_subtitle_check, required_audio_languages, audio_language_match, minimum_torrent_seeders, accepted_only_seeding)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             active_client = excluded.active_client,
             qbit_url = excluded.qbit_url,
@@ -708,6 +714,7 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
             required_audio_languages = excluded.required_audio_languages,
             audio_language_match = excluded.audio_language_match,
             minimum_torrent_seeders = excluded.minimum_torrent_seeders,
+            accepted_only_seeding = excluded.accepted_only_seeding,
             subtitle_language_match = excluded.subtitle_language_match,
             media_requirements_enabled = excluded.media_requirements_enabled,
             minimum_resolution = excluded.minimum_resolution,
@@ -816,6 +823,7 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
     .bind(&config.required_audio_languages)
     .bind(&config.audio_language_match)
     .bind(config.minimum_torrent_seeders)
+    .bind(i64::from(config.accepted_only_seeding))
     .execute(db)
     .await?;
 

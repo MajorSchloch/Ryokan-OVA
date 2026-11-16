@@ -14,6 +14,7 @@
     {% endif %}
 
     <p class="form-hint" style="margin-bottom: 16px;">Grabs go to the default client unless an indexer is pinned to another one on the <a href="/settings?tab=indexers">Indexers</a> tab.</p>
+    <p class="form-hint"><a href="/downloads?tab=seeding">Accepted-only seeding and source review</a>: keep rejected or unverified torrent files paused for review.</p>
     {% let rows = download_clients.clone() %}
     {%~ include "partials/settings/download_clients/list.html" ~%}
 </div>

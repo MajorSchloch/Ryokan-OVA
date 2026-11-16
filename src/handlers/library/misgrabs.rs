@@ -797,6 +797,9 @@ mod tests {
     #[tokio::test]
     async fn dismiss_on_flagged_row_removes_and_blocklists() {
         let db = in_memory_pool().await;
+        crate::models::config::save_config(&db, &crate::models::config::Config::default())
+            .await
+            .unwrap();
         let sid = seed(&db).await;
         let id = flagged_misgrab(&db, sid).await;
         let client = Arc::new(RecordingClient::default());

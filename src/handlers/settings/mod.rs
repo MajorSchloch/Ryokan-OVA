@@ -1497,6 +1497,9 @@ pub async fn settings_submit(
             .as_ref()
             .map(|c| c.audio_language_match.clone())
             .unwrap_or_else(|| "all".into()),
+        accepted_only_seeding: existing_cfg
+            .as_ref()
+            .is_some_and(|c| c.accepted_only_seeding),
         minimum_torrent_seeders: existing_cfg
             .as_ref()
             .map(|c| c.minimum_torrent_seeders)

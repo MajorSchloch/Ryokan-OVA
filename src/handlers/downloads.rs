@@ -137,6 +137,9 @@ struct DownloadsTemplate {
     history: Vec<grabbed_torrents::GrabbedTorrentWithSeries>,
     blocklist: Vec<grabbed_torrents::GrabbedTorrentWithSeries>,
     title_language: String,
+    seed_reviews: Vec<crate::models::seed_policy::Review>,
+    accepted_only_seeding: bool,
+    seed_check_running: bool,
 }
 
 #[derive(Deserialize)]
@@ -161,6 +164,7 @@ fn client_kind_display(kind: &str) -> &'static str {
 
 fn normalize_tab(tab: Option<String>) -> String {
     match tab.as_deref() {
+        Some("seeding") => "seeding".to_string(),
         Some("history") => "history".to_string(),
         Some("blocklist") => "blocklist".to_string(),
         _ => "queue".to_string(),
@@ -295,7 +299,23 @@ pub async fn downloads_page(
         Vec::new()
     };
 
+    let seed_reviews = if tab == "seeding" {
+        crate::models::seed_policy::list(&state.db)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let accepted_only_seeding = crate::models::config::get_config(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|c| c.accepted_only_seeding);
+    let seed_check_running = crate::services::seed_policy::CHECK_LOCK.try_lock().is_err();
     let template = DownloadsTemplate {
+        seed_reviews,
+        accepted_only_seeding,
+        seed_check_running,
         page: "downloads".to_string(),
         tab,
         queue,
@@ -626,4 +646,67 @@ mod tests {
             assert_eq!(view.is_paused, expected_paused, "is_paused for {v:?}");
         }
     }
+}
+
+#[derive(Deserialize)]
+pub struct SeedingSettingsForm {
+    #[serde(default)]
+    enabled: Option<String>,
+}
+
+/// Separate form: saving other settings cannot clear this switch.
+pub async fn seeding_settings(
+    State(state): State<AppState>,
+    HxRequest(hx): HxRequest,
+    Form(form): Form<SeedingSettingsForm>,
+) -> Response {
+    let _guard = crate::handlers::settings::CONFIG_WRITE_LOCK.lock().await;
+    let mut cfg = match crate::models::config::get_config(&state.db).await {
+        Ok(Some(c)) => c,
+        _ => return (StatusCode::INTERNAL_SERVER_ERROR, "Settings unavailable").into_response(),
+    };
+    cfg.accepted_only_seeding = form.enabled.is_some();
+    if crate::models::config::save_config(&state.db, &cfg)
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not save seeding policy",
+        )
+            .into_response();
+    }
+    crate::handlers::responses::htmx_aware_redirect(hx, "/downloads?tab=seeding").into_response()
+}
+
+/// Owned operation: navigation or a page disconnect cannot interrupt review.
+pub async fn check_seed_sources(
+    State(state): State<AppState>,
+    HxRequest(hx): HxRequest,
+) -> Response {
+    let Ok(guard) = crate::services::seed_policy::CHECK_LOCK
+        .clone()
+        .try_lock_owned()
+    else {
+        return (StatusCode::CONFLICT, "A source check is already running").into_response();
+    };
+    tokio::spawn(async move {
+        let _guard = guard;
+        // Hold unknown completed jobs before any potentially slow source probes.
+        let result = async {
+            crate::services::seed_policy::check_all(&state, false).await?;
+            crate::services::seed_policy::check_all(&state, true).await
+        }
+        .await;
+        if let Err(e) = result {
+            crate::services::logger::warn(
+                &state.db,
+                crate::models::log::LogCategory::DownloadClient,
+                "Torrent source check failed",
+                &e,
+            )
+            .await;
+        }
+    });
+    crate::handlers::responses::htmx_aware_redirect(hx, "/downloads?tab=seeding").into_response()
 }
