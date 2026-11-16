@@ -131,6 +131,10 @@ pub(super) async fn remove_after_import(
     } else {
         return;
     };
+    // A review hold always retains the original source files.
+    if cfg.accepted_only_seeding && client.protocol() == "torrent" {
+        return;
+    }
     remove_from_client(state, cfg, grab, client, reason).await;
 }
 
@@ -233,6 +237,27 @@ pub async fn sweep_finished_seeds_now(state: &AppState) -> Result<SweepReport, S
             report.gone += 1;
             continue;
         };
+        if client.protocol() == "torrent" {
+            let current_cfg = config::get_config(&state.db)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("Settings unavailable")?;
+            if current_cfg.accepted_only_seeding
+                && crate::services::seed_policy::evaluate(
+                    state,
+                    &current_cfg,
+                    client_id,
+                    item,
+                    &client,
+                    false,
+                )
+                .await
+                    != crate::services::seed_policy::Decision::Accepted
+            {
+                report.waiting += 1;
+                continue;
+            }
+        }
         let reason = if client.protocol() == "usenet" {
             item.state_kind
                 .is_complete()
@@ -326,6 +351,53 @@ async fn remove_from_client(
     client: &Arc<dyn DownloadClient>,
     reason: RemovalReason,
 ) -> bool {
+    // A sweep that started before a policy change must not delete a review hold.
+    let _config_guard = crate::handlers::settings::CONFIG_WRITE_LOCK.lock().await;
+    if client.protocol() == "torrent" {
+        let Ok(Some(current_cfg)) = config::get_config(&state.db).await else {
+            return false;
+        };
+        if current_cfg.accepted_only_seeding {
+            let Some(client_id) = grab.download_client_id else {
+                return false;
+            };
+            let same_client = state
+                .download_clients
+                .read()
+                .await
+                .clients
+                .get(&client_id)
+                .is_some_and(|c| Arc::ptr_eq(c, client));
+            if !same_client {
+                return false;
+            }
+            let Ok(items) = client.list_scoped().await else {
+                return false;
+            };
+            let Some(item) = items
+                .iter()
+                .find(|i| i.hash.eq_ignore_ascii_case(&grab.hash))
+            else {
+                return false;
+            };
+            if reason == RemovalReason::SeedingDone && !item.seeding_done {
+                return false;
+            }
+            if crate::services::seed_policy::evaluate(
+                state,
+                &current_cfg,
+                client_id,
+                item,
+                client,
+                false,
+            )
+            .await
+                != crate::services::seed_policy::Decision::Accepted
+            {
+                return false;
+            }
+        }
+    }
     if let Err(e) = client.delete(&grab.hash, true).await {
         logger::warn(
             &state.db,

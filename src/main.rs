@@ -1034,6 +1034,14 @@ async fn main() {
         .route("/api/torrents", get(handlers::search::get_torrents))
         .route("/downloads", get(handlers::downloads::downloads_page))
         .route(
+            "/downloads/seeding/settings",
+            post(handlers::downloads::seeding_settings),
+        )
+        .route(
+            "/downloads/seeding/check",
+            post(handlers::downloads::check_seed_sources),
+        )
+        .route(
             "/api/downloads/pause",
             post(handlers::downloads::api_pause_torrent),
         )
@@ -2452,6 +2460,7 @@ async fn main() {
                         // Issue #228: remove imported torrents whose
                         // client reports seeding finished (throttled to
                         // every 5 minutes inside).
+                        services::seed_policy::tick(&pp_state).await;
                         services::post_processing::sweep_finished_seeds(&pp_state).await;
                         let _ = models::scheduled_tasks::mark_finished(
                             &pp_state.db,

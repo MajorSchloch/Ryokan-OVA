@@ -302,6 +302,52 @@ pub async fn inspect_with_sidecars(
     Ok(info)
 }
 
+/// Cache-only source inspection. The caller supplies only subtitle paths in
+/// the native torrent manifest, never adjacent library or downloaded files.
+pub async fn inspect_cached_source(
+    db: &SqlitePool,
+    video: &Path,
+    candidates: &[PathBuf],
+    videos_in_download: usize,
+) -> Result<MediaInfo, String> {
+    let before = tokio::fs::metadata(video)
+        .await
+        .map_err(|e| e.to_string())?;
+    let identity = FileIdentity::from_metadata(&before).map_err(|e| e.to_string())?;
+    let json = crate::models::media_probe_cache::get_identified(
+        db,
+        &video.to_string_lossy(),
+        &identity.cache_key(),
+    )
+    .await
+    .ok_or("Original source file has no current probe; check source files")?;
+    let mut info = parse_probe_json(&json, identity.clone(), true).map_err(|e| e.to_string())?;
+    let span = video
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|name| media::parse_episode_span(&name.to_ascii_lowercase()));
+    let filtered: Vec<_> = candidates
+        .iter()
+        .filter(|p| is_subtitle_path(p))
+        .cloned()
+        .collect();
+    let mut matched = extras::find_subtitles(video, span, &filtered, videos_in_download);
+    matched.dedup();
+    if matched.len() > SIDECAR_COUNT_CAP {
+        return Err("Too many source subtitles".into());
+    }
+    for path in matched {
+        info.subtitles.push(inspect_sidecar(video, &path).await);
+    }
+    let after = tokio::fs::metadata(video)
+        .await
+        .map_err(|e| e.to_string())?;
+    if FileIdentity::from_metadata(&after).map_err(|e| e.to_string())? != identity {
+        return Err("Source file changed during inspection".into());
+    }
+    Ok(info)
+}
+
 fn is_subtitle_path(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())

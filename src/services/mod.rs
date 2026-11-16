@@ -85,3 +85,5 @@ pub mod user_score;
 
 pub mod release_availability;
 pub mod release_follows;
+
+pub mod seed_policy;
