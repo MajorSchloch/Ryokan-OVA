@@ -630,7 +630,15 @@ async fn stage_restore_refuses_links_bad_keys_and_foreign_schema_objects() {
         .execute(&db)
         .await
         .unwrap();
-    let crafts: [(&str, &[&'static str], &str); 4] = [
+    let crafts: [(&str, &[&'static str], &str); 5] = [
+        (
+            "forged-source-retirement",
+            &[
+                "DROP TRIGGER refuse_retired_source_update",
+                "CREATE TRIGGER refuse_retired_source_update BEFORE UPDATE ON grabbed_torrents BEGIN DELETE FROM sessions; END",
+            ],
+            "views, triggers",
+        ),
         (
             "forged-reviewed-offset",
             &[

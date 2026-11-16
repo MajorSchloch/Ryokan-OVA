@@ -1002,7 +1002,7 @@ async fn prepare_staged_database(path: &Path, sanitized: bool) -> Result<(), Res
             "ryokan.db has no config table, so it is not a Ryokan database".to_string(),
         ));
     }
-    // Ryokan uses tables, indexes, and one fixed trigger on series. A crafted
+    // Ryokan uses tables, indexes, and a fixed set of canonical triggers. A crafted
     // database used anything else to survive the restore: `sessions` as
     // a view over a hidden table with an INSTEAD OF trigger turned the
     // purge below into a no-op and kept a planted login valid even past
@@ -1013,10 +1013,16 @@ async fn prepare_staged_database(path: &Path, sanitized: bool) -> Result<(), Res
     let foreign_objects: i64 = sqlx::query_scalar(
         "SELECT (SELECT COUNT(*) FROM sqlite_master WHERE lower(type) NOT IN ('table', 'index') \
                  AND NOT (type IS 'trigger' AND name IS 'series_clear_reviewed_offset' \
-                          AND tbl_name IS 'series' AND sql IS ?)) \
+                          AND tbl_name IS 'series' AND sql IS ?) \
+                 AND NOT (type IS 'trigger' AND name IS 'refuse_retired_source_insert' \
+                          AND tbl_name IS 'grabbed_torrents' AND sql IS ?) \
+                 AND NOT (type IS 'trigger' AND name IS 'refuse_retired_source_update' \
+                          AND tbl_name IS 'grabbed_torrents' AND sql IS ?)) \
               + (SELECT COUNT(*) FROM pragma_table_list WHERE schema = 'main' AND type != 'table')",
     )
     .bind(crate::models::migrations::REVIEWED_OFFSET_TRIGGER.replacen(" IF NOT EXISTS", "", 1))
+    .bind(crate::models::seed_policy::RETIREMENT_INSERT_TRIGGER.replacen(" IF NOT EXISTS", "", 1))
+    .bind(crate::models::seed_policy::RETIREMENT_UPDATE_TRIGGER.replacen(" IF NOT EXISTS", "", 1))
     .fetch_one(&pool)
     .await
     .unwrap_or(1);

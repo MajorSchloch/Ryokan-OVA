@@ -29,10 +29,14 @@
     <h3>Accepted-only seeding</h3>
     <p>Keep seeding only when the original source videos have a complete accepted import and meet each release's current minimum requirements. The upgrade target does not affect seeding.</p>
     <form method="post" action="/downloads/seeding/settings">
-        <label><input type="checkbox" name="enabled" {% if accepted_only_seeding %}checked{% endif %}> Stop completed rejected or unverified torrents</label>
+        <div class="setting-rows">
+            <label class="checkbox-row"><input type="checkbox" name="enabled" {% if accepted_only_seeding %}checked{% endif %}><span>Stop completed rejected or unverified torrents</span></label>
+            <label class="checkbox-row"><input type="checkbox" name="retire_unaccepted" {% if retire_unaccepted_sources %}checked{% endif %}><span>Automatically remove and block rejected or unverifiable sources; keep their files</span></label>
+        </div>
         <button class="btn btn-primary" type="submit">Save seeding policy</button>
     </form>
     <p class="form-hint">Checks run after post-processing, about once a minute. Source files are retained. This policy never resumes stopped jobs and keeps the client's seed limits. BitTorrent can upload pieces during download and before the next check.</p>
+    <p class="form-hint">Automatic removal requires the stop policy above. Ryokan checks original files before it decides. Temporary access or inspection failures, shared ownership and open file selections stay paused for review. Removal blocks only the exact source hash. Library files, import history and recovery files stay intact.</p>
     <form method="post" action="/downloads/seeding/check">
         <button class="btn btn-secondary" type="submit" {% if seed_check_running %}disabled{% endif %}>Check original source files</button>
     </form>
@@ -42,6 +46,16 @@
     <div class="rss-table-wrap"><table class="rss-table"><thead><tr><th>Source</th><th>Decision</th><th>Reason</th><th>Client control</th><th>Checked (UTC)</th></tr></thead><tbody>
     {% for review in seed_reviews %}<tr><td><div class="dl-torrent-name">{{ review.name }}</div><small>Client {{ review.client_id }} · {{ review.hash }}</small></td><td>{{ review.verdict }}</td><td>{{ review.reason }}</td><td>{{ review.control }}</td><td>{{ review.checked_at }}</td></tr>{% endfor %}
     </tbody></table></div>{% endif %}
+    {% if !source_retirements.is_empty() %}
+    <details><summary>Removed or blocked sources ({{ source_retirements.len() }})</summary>
+    <p>Source files remain in the download folder. Reconsider clears this policy block only. It does not download or resume anything, and it does not clear older failure blocks.</p>
+    <div class="rss-table-wrap"><table class="rss-table"><thead><tr><th>Source</th><th>Recorded reason</th><th>Status</th><th>Action</th></tr></thead><tbody>
+    {% for source in source_retirements %}<tr>
+        <td><div class="dl-torrent-name">{{ source.name }}</div><small>Client {{ source.client_id }} · {{ source.hash }}</small></td>
+        <td>{{ source.retirement_reason }}</td><td>{% if source.retired_at.is_some() %}Removed; files retained{% else %}Blocked; removal pending{% endif %}</td>
+        <td><form method="post" action="/downloads/seeding/reconsider"><input type="hidden" name="client_id" value="{{ source.client_id }}"><input type="hidden" name="hash" value="{{ source.hash }}"><button class="btn btn-secondary" type="submit">Reconsider</button></form></td>
+    </tr>{% endfor %}</tbody></table></div></details>
+    {% endif %}
 </div>
 {% else if tab == "queue" %}
 <div class="rss-panel">

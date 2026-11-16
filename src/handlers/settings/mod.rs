@@ -1500,6 +1500,9 @@ pub async fn settings_submit(
         accepted_only_seeding: existing_cfg
             .as_ref()
             .is_some_and(|c| c.accepted_only_seeding),
+        retire_unaccepted_sources: existing_cfg
+            .as_ref()
+            .is_some_and(|c| c.retire_unaccepted_sources),
         minimum_torrent_seeders: existing_cfg
             .as_ref()
             .map(|c| c.minimum_torrent_seeders)

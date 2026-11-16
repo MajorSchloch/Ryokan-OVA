@@ -1,5 +1,6 @@
 //! Continued seeding is permitted only for reviewed original source files.
-//! This is pause-only: native seed limits and every user stop remain intact.
+//! The default is pause-only; optional retirement removes jobs but keeps files.
+//! Accepted jobs retain native seed limits and every user stop.
 //! BitTorrent may upload pieces while downloading or before the next check.
 use crate::{
     AppState,
@@ -20,13 +21,15 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, LazyLock},
 };
+mod retirement;
 
 pub static CHECK_LOCK: LazyLock<Arc<tokio::sync::Mutex<()>>> =
     LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(())));
 
-#[derive(Debug, FromRow, PartialEq, Eq)]
+#[derive(Debug, serde::Serialize, FromRow, PartialEq, Eq)]
 struct Owner {
     id: i64,
+    grabbed_at: String,
     series_id: i64,
     state: String,
     imported_at: Option<String>,
@@ -40,7 +43,7 @@ struct Owner {
 
 async fn owners(db: &SqlitePool, hash: &str) -> Result<Vec<Owner>, String> {
     sqlx::query_as(
-        "SELECT id, series_id, state, imported_at, import_mode, imported_source_paths,
+        "SELECT id, grabbed_at, series_id, state, imported_at, import_mode, imported_source_paths,
         imported_episode_coverage, verification, failure_reason, download_client_id
         FROM grabbed_torrents WHERE lower(hash)=?",
     )
@@ -69,6 +72,68 @@ fn unknown(s: impl Into<String>) -> Decision {
     Decision::Unverified(s.into())
 }
 
+/// Eligibility is a typed result of this check, never inferred from UI labels.
+struct Evaluation {
+    decision: Decision,
+    can_retire: bool,
+}
+impl Evaluation {
+    fn stable(decision: Decision) -> Self {
+        Self {
+            decision,
+            can_retire: true,
+        }
+    }
+    fn hold(reason: impl Into<String>) -> Self {
+        Self {
+            decision: unknown(reason),
+            can_retire: false,
+        }
+    }
+}
+
+fn inspected_failure(policy: &Policy, info: &media_info::MediaInfo, reason: String) -> Evaluation {
+    let settings_valid = (!policy.enabled
+        || (policy.minimum_resolution != crate::services::source::Resolution::Unknown
+            && policy.target_resolution != crate::services::source::Resolution::Unknown
+            && policy.target_resolution.rank() >= policy.minimum_resolution.rank()))
+        && [
+            (
+                policy.required_languages.as_slice(),
+                policy.language_match.as_str(),
+            ),
+            (
+                policy.required_audio_languages.as_slice(),
+                policy.audio_language_match.as_str(),
+            ),
+        ]
+        .iter()
+        .all(|(languages, mode)| {
+            languages.is_empty()
+                || (matches!(*mode, "all" | "any")
+                    && languages
+                        .iter()
+                        .all(|l| media_info::normalize_language(l).is_some()))
+        });
+    let incomplete_sidecar = info.subtitles.iter().any(|s| {
+        !s.valid
+            && !matches!(
+                s.validation_status.as_str(),
+                "invalid_encoding" | "empty_subtitle" | "no_valid_timed_text" | "empty_track"
+            )
+    });
+    if !settings_valid || incomplete_sidecar {
+        return Evaluation::hold(reason);
+    }
+    let known_failure = policy.minimum_failure_is_content_rejection(info)
+        || (!policy.enabled && info.subtitles.iter().all(|s| s.language.is_some()));
+    Evaluation::stable(if known_failure {
+        Decision::Rejected(reason)
+    } else {
+        unknown(reason)
+    })
+}
+
 #[derive(Debug)]
 struct Slot {
     series_id: i64,
@@ -83,7 +148,7 @@ async fn bind_slots(
     owner: &Owner,
     hash: &str,
     files: &[(usize, &str, bool)],
-) -> Result<BTreeMap<usize, Slot>, String> {
+) -> Result<Option<BTreeMap<usize, Slot>>, String> {
     let videos: Vec<_> = files
         .iter()
         .copied()
@@ -107,7 +172,8 @@ async fn bind_slots(
                     },
                 ))
             })
-            .collect();
+            .collect::<Result<_, _>>()
+            .map(Some);
     }
     if let Some(snapshot) = grabbed_torrents::get_numbering_snapshot(db, owner.id)
         .await
@@ -128,11 +194,12 @@ async fn bind_slots(
                     },
                 ))
             })
-            .collect();
+            .collect::<Result<_, _>>()
+            .map(Some);
     }
-    let mapping = grabbed_torrents::get_release_mapping(db, owner.id)
-        .await?
-        .ok_or("No saved source-file mapping; review required")?;
+    let Some(mapping) = grabbed_torrents::get_release_mapping(db, owner.id).await? else {
+        return Ok(None);
+    };
     if mapping.bound_source().is_some() {
         let names: Vec<_> = files.iter().map(|(_, n, w)| (*n, *w)).collect();
         mapping.validate_bound_files(hash, &names)?;
@@ -161,7 +228,7 @@ async fn bind_slots(
             },
         );
     }
-    Ok(result)
+    Ok(Some(result))
 }
 
 async fn safe_path(root: &Path, name: &str, excluded: &[PathBuf]) -> Result<PathBuf, String> {
@@ -205,9 +272,21 @@ pub async fn evaluate(
     client: &Arc<dyn DownloadClient>,
     probe_sources: bool,
 ) -> Decision {
+    review(state, cfg, client_id, item, client, probe_sources)
+        .await
+        .decision
+}
+async fn review(
+    state: &AppState,
+    cfg: &Config,
+    client_id: i64,
+    item: &DownloadItem,
+    client: &Arc<dyn DownloadClient>,
+    probe_sources: bool,
+) -> Evaluation {
     match evaluate_inner(state, cfg, client_id, item, client, probe_sources).await {
         Ok(d) => d,
-        Err(reason) => unknown(reason),
+        Err(reason) => Evaluation::hold(reason),
     }
 }
 async fn evaluate_inner(
@@ -217,7 +296,7 @@ async fn evaluate_inner(
     item: &DownloadItem,
     client: &Arc<dyn DownloadClient>,
     probe_sources: bool,
-) -> Result<Decision, String> {
+) -> Result<Evaluation, String> {
     if client.protocol() != "torrent" || normalize_info_hash(&item.hash).is_none() {
         return Err("Not a supported torrent identity".into());
     }
@@ -237,13 +316,16 @@ async fn evaluate_inner(
         return Err("Torrent has unresolved or conflicting ownership".into());
     }
     let owner = &owned[0];
+    if owner.import_mode.as_deref() == Some("move") {
+        return Err("Moved sources require review".into());
+    }
     if owner.verification.as_deref() == Some("misgrab")
         || matches!(owner.state.as_str(), "failed" | "removed" | "cancelled")
     {
-        return Ok(Decision::Rejected(format!(
+        return Ok(Evaluation::stable(Decision::Rejected(format!(
             "Import state: {}. {}",
             owner.state, owner.failure_reason
-        )));
+        ))));
     }
     if !matches!(owner.state.as_str(), "imported" | "replaced")
         || owner.imported_at.is_none()
@@ -255,7 +337,14 @@ async fn evaluate_inner(
         owner.verification.as_deref(),
         Some("verified" | "whitelisted")
     ) {
-        return Err("Source title identity was not verified".into());
+        return Ok(Evaluation::stable(unknown(
+            "Source title identity was not verified",
+        )));
+    }
+    if owner.imported_episode_coverage.is_none() || owner.imported_source_paths.is_none() {
+        return Ok(Evaluation::stable(unknown(
+            "Legacy import has no saved actual coverage or original source paths",
+        )));
     }
     let coverage: BTreeMap<i64, Vec<i32>> = serde_json::from_str(
         owner
@@ -272,7 +361,9 @@ async fn evaluate_inner(
     )
     .map_err(|_| "Invalid imported source paths")?;
     if coverage.is_empty() || paths.is_empty() {
-        return Err("Import did not establish source ownership".into());
+        return Ok(Evaluation::stable(unknown(
+            "Import did not establish source ownership",
+        )));
     }
     if item.save_path.is_empty() {
         return Err("Client did not report a download root".into());
@@ -357,7 +448,11 @@ async fn evaluate_inner(
         .iter()
         .filter(|f| post_processing::is_video_file(&f.name))
         .count();
-    let slots = bind_slots(&state.db, owner, &item.hash, &manifest).await?;
+    let Some(slots) = bind_slots(&state.db, owner, &item.hash, &manifest).await? else {
+        return Ok(Evaluation::stable(unknown(
+            "No saved source-file mapping; source cannot be certified",
+        )));
+    };
     let ids: Vec<_> = slots
         .values()
         .map(|s| s.series_id)
@@ -366,6 +461,7 @@ async fn evaluate_inner(
         .collect();
     let settings = language_preferences::resolve_snapshot(&state.db, cfg, &ids).await?;
     let mut identities = Vec::new();
+    let mut rejection: Option<Evaluation> = None;
     for (i, path) in &media {
         let slot = slots
             .get(i)
@@ -411,9 +507,7 @@ async fn evaluate_inner(
             media_info::inspect_cached_source(&state.db, path, &sidecars, total_videos).await?;
         identities.push((path.clone(), info.identity.clone()));
         let policy = Policy::from_config(effective);
-        if let Err(reason) = policy.validate_minimum(&info) {
-            return Ok(Decision::Rejected(format!("{}: {reason}", files[*i].name)));
-        }
+        let mut failure = policy.validate_minimum(&info).err();
         // The importer also enforces required subtitles in legacy quality mode.
         if !policy.enabled {
             let verdict = media_info::evaluate_subtitle_requirements(
@@ -422,11 +516,15 @@ async fn evaluate_inner(
                 &policy.language_match,
             );
             if !verdict.satisfied {
-                return Ok(Decision::Rejected(format!(
-                    "{}: {}",
-                    files[*i].name,
-                    verdict.reasons.join("; ")
-                )));
+                failure.get_or_insert(verdict.reasons.join("; "));
+            }
+        }
+        if let Some(reason) = failure {
+            let failed = inspected_failure(&policy, &info, format!("{}: {reason}", files[*i].name));
+            if let Some(existing) = &mut rejection {
+                existing.can_retire &= failed.can_retire;
+            } else {
+                rejection = Some(failed);
             }
         }
     }
@@ -469,7 +567,10 @@ async fn evaluate_inner(
     if owners(&state.db, &item.hash).await? != owned {
         return Err("Import ownership changed during source review".into());
     }
-    Ok(Decision::Accepted)
+    Ok(rejection.unwrap_or(Evaluation {
+        decision: Decision::Accepted,
+        can_retire: false,
+    }))
 }
 fn same_manifest(a: &[DownloadFile], b: &[DownloadFile]) -> bool {
     a.len() == b.len()
@@ -731,6 +832,21 @@ pub async fn tick(state: &AppState) {
             &e,
         )
         .await;
+    }
+    if let Ok(guard) = CHECK_LOCK.clone().try_lock_owned() {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            if let Err(e) = retirement::run(&state).await {
+                crate::services::logger::warn(
+                    &state.db,
+                    crate::models::log::LogCategory::DownloadClient,
+                    "Automatic source removal deferred; files retained",
+                    &e,
+                )
+                .await;
+            }
+        });
     }
 }
 
