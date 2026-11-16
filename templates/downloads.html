@@ -21,11 +21,45 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
         Blocklist{% if !blocklist.is_empty() %} ({{ blocklist.len() }}){% endif %}
     </a>
-    <a href="/downloads?tab=seeding" class="system-tab {% if tab == "seeding" %}active{% endif %}">Seeding review</a>
+    <a href="/downloads?tab=seeding" class="system-tab {% if tab == "seeding" %}active{% endif %}">Sources &amp; cleanup</a>
 </div>
 
 {% if tab == "seeding" %}
-<div class="rss-panel">
+<div class="rss-panel dl-sources">
+    <h3>Sources &amp; cleanup</h3>
+    <p>Accepted sources may seed within their client limits. Uncertain sources stay paused for review.</p>
+    <div class="dl-summary" aria-label="Source overview">
+        <span><strong>{{ seed_reviews.len() }}</strong> need review</span>
+        <span><strong>{{ seed_accepted.len() }}</strong> accepted for seeding</span>
+        <span><strong>{{ source_retirements.len() }}</strong> removed or blocked</span>
+    </div>
+    {% if !queue_error.is_empty() %}<div class="alert alert-warn" role="status">{{ queue_error }} Counts include only currently reported sources.</div>{% endif %}
+    <p>{{ cleanup_summary }}</p>
+    {% if !cleanup_error.is_empty() %}<div class="alert alert-warn">{{ cleanup_error }}</div>{% endif %}
+    <div id="queue-error" class="alert alert-warn" role="status" hidden></div>
+    <details class="dl-section"><summary>Client job controls</summary>
+    <p>Pause or remove a completed source job. Resume is available only for accepted sources. Removal keeps files unless you explicitly choose otherwise.</p>
+    <div id="source-job-controls">{% let queue = source_jobs %}{% let queue_error = "" %}{% include "partials/downloads/queue.html" %}</div>
+    </details>
+    <h4>Needs review</h4>
+    {% if seed_reviews.is_empty() %}<p>No current source holds were reported.</p>{% else %}
+    {% let reviews = seed_reviews %}{% include "partials/downloads/source_reviews.html" %}{% endif %}
+    <details class="dl-section"><summary>Accepted for seeding ({{ seed_accepted.len() }})</summary>
+    <p>These sources meet their effective minimum requirements. Existing stops and native seed limits remain in force.</p>
+    {% let reviews = seed_accepted %}{% include "partials/downloads/source_reviews.html" %}</details>
+    {% if !source_retirements.is_empty() %}
+    <details><summary>Removed or blocked sources ({{ source_retirements.len() }})</summary>
+    <p>Job removal and file cleanup are recorded separately. Reconsider clears this policy block only. It does not download or resume anything, and it does not clear older failure blocks.</p>
+    <div class="rss-table-wrap"><table class="rss-table"><thead><tr><th>Source</th><th>Recorded reason</th><th>Job / block</th><th>Recorded file cleanup</th><th>Action</th></tr></thead><tbody>
+    {% for source in source_retirements %}<tr>
+        <td><div class="dl-torrent-name">{{ source.record.name }}</div><small>Client {{ source.record.client_id }} · {{ source.record.hash }}</small></td>
+        <td>{{ source.record.retirement_reason }}</td><td>{% if source.record.retired_at.is_some() %}Removed · blocked{% else %}Blocked · removal pending{% endif %}</td><td>{{ source.cleanup }}</td>
+        <td><form method="post" action="/downloads/seeding/reconsider"><input type="hidden" name="client_id" value="{{ source.record.client_id }}"><input type="hidden" name="hash" value="{{ source.record.hash }}"><button class="btn btn-secondary" type="submit">Reconsider</button></form></td>
+    </tr>{% endfor %}</tbody></table></div></details>
+    {% endif %}
+
+    {% if !seed_previous.is_empty() %}<details class="dl-section"><summary>Previous or unavailable observations ({{ seed_previous.len() }})</summary><p>These saved checks do not confirm a current client job.</p>{% let reviews = seed_previous %}{% include "partials/downloads/source_reviews.html" %}</details>{% endif %}
+    <details class="dl-section"><summary>Policy settings &amp; recovery details</summary>
     <h3>Accepted-only seeding</h3>
     <p>Keep seeding only when the original source videos have a complete accepted import and meet each release's current minimum requirements. The upgrade target does not affect seeding.</p>
     <form method="post" action="/downloads/seeding/settings">
@@ -42,56 +76,15 @@
     </form>
     {% if seed_check_running %}<p role="status">Source check running. You can leave this page. Reload to see the latest results.</p>{% endif %}
     <p class="form-hint">This check can inspect older source files. It does not search, download, delete, change file selections or resume jobs. With the policy off, it records a preview only. Results show the last check, not a historical import decision. Unresolved ownership, legacy coverage and unavailable files stay unverified.</p>
-    {% if seed_reviews.is_empty() %}<p>No source reviews recorded yet.</p>{% else %}
-    <div class="rss-table-wrap"><table class="rss-table"><thead><tr><th>Source</th><th>Decision</th><th>Reason</th><th>Client control</th><th>Checked (UTC)</th></tr></thead><tbody>
-    {% for review in seed_reviews %}<tr><td><div class="dl-torrent-name">{{ review.name }}</div><small>Client {{ review.client_id }} · {{ review.hash }}</small></td><td>{{ review.verdict }}</td><td>{{ review.reason }}</td><td>{{ review.control }}</td><td>{{ review.checked_at }}</td></tr>{% endfor %}
-    </tbody></table></div>{% endif %}
-    {% if !source_retirements.is_empty() %}
-    <details><summary>Removed or blocked sources ({{ source_retirements.len() }})</summary>
-    <p>Source files remain in the download folder. Reconsider clears this policy block only. It does not download or resume anything, and it does not clear older failure blocks.</p>
-    <div class="rss-table-wrap"><table class="rss-table"><thead><tr><th>Source</th><th>Recorded reason</th><th>Status</th><th>Action</th></tr></thead><tbody>
-    {% for source in source_retirements %}<tr>
-        <td><div class="dl-torrent-name">{{ source.name }}</div><small>Client {{ source.client_id }} · {{ source.hash }}</small></td>
-        <td>{{ source.retirement_reason }}</td><td>{% if source.retired_at.is_some() %}Removed; files retained{% else %}Blocked; removal pending{% endif %}</td>
-        <td><form method="post" action="/downloads/seeding/reconsider"><input type="hidden" name="client_id" value="{{ source.client_id }}"><input type="hidden" name="hash" value="{{ source.hash }}"><button class="btn btn-secondary" type="submit">Reconsider</button></form></td>
-    </tr>{% endfor %}</tbody></table></div></details>
-    {% endif %}
+
+    <details><summary>Recovery details</summary><p>Quarantine keeps exact files with no automatic expiry. It does not clear source blocks or resume downloads. Administrative restore uses the saved cleanup receipt, refuses existing targets, and keeps the source blocked. The bounded cleanup tool is <code>scripts/source_cleanup.py</code>; use its <code>restore</code> command with the receipt on the server.</p></details>
+    </details>
 </div>
 {% else if tab == "queue" %}
 <div class="rss-panel">
+    <div id="queue-error" class="alert alert-warn" role="status" hidden></div>
     <div id="queue-container">
-        {% if !queue_error.is_empty() %}
-        <div class="alert alert-warn" role="status">{{ queue_error }}</div>
-        {% else if queue.is_empty() %}
-        <div class="logs-empty">
-            <p>No active downloads.</p>
-            <p class="form-hint">New grabs land here automatically; via RSS, auto-search, or a manual grab from the Search tab.</p>
-        </div>
-        {% else %}
-        <div class="rss-table-wrap"><table class="rss-table"><thead><tr>
-            <th>Name</th><th>Size</th><th>Progress</th><th>Speed</th><th>ETA</th><th>Status</th><th>Actions</th>
-        </tr></thead><tbody>
-        {% for t in queue %}
-        <tr data-hash="{{ t.hash }}">
-            <td><div class="dl-torrent-name" title="{{ t.name }}">{{ t.name }}</div></td>
-            <td>{{ t.size_display }}</td>
-            <td><div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:{{ t.progress_pct }}%"></div></div><span class="dl-progress-text">{{ t.progress_pct }}%</span></div></td>
-            <td>{{ t.speed_display }}</td>
-            <td>{{ t.eta_display }}</td>
-            <td><span class="log-badge {{ t.state_badge_class }}">{{ t.state_label }}</span></td>
-            <td class="dl-actions">
-                {% if t.is_paused %}
-                <button class="btn btn-ghost btn-sm" data-dl-action="resume" title="Resume"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>
-                {% else %}
-                <button class="btn btn-ghost btn-sm" data-dl-action="pause" title="Pause"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg></button>
-                {% endif %}
-                <button class="btn btn-ghost btn-sm" data-dl-action="copy" title="Copy infohash"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
-                <button class="btn btn-ghost btn-sm" data-dl-action="delete" title="Remove"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg></button>
-            </td>
-        </tr>
-        {% endfor %}
-        </tbody></table></div>
-        {% endif %}
+        {% include "partials/downloads/queue.html" %}
     </div>
 </div>
 
