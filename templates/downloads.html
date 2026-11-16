@@ -21,9 +21,29 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
         Blocklist{% if !blocklist.is_empty() %} ({{ blocklist.len() }}){% endif %}
     </a>
+    <a href="/downloads?tab=seeding" class="system-tab {% if tab == "seeding" %}active{% endif %}">Seeding review</a>
 </div>
 
-{% if tab == "queue" %}
+{% if tab == "seeding" %}
+<div class="rss-panel">
+    <h3>Accepted-only seeding</h3>
+    <p>Keep seeding only when the original source videos have a complete accepted import and meet each release's current minimum requirements. The upgrade target does not affect seeding.</p>
+    <form method="post" action="/downloads/seeding/settings">
+        <label><input type="checkbox" name="enabled" {% if accepted_only_seeding %}checked{% endif %}> Stop completed rejected or unverified torrents</label>
+        <button class="btn btn-primary" type="submit">Save seeding policy</button>
+    </form>
+    <p class="form-hint">Checks run after post-processing, about once a minute. Source files are retained. This policy never resumes stopped jobs and keeps the client's seed limits. BitTorrent can upload pieces during download and before the next check.</p>
+    <form method="post" action="/downloads/seeding/check">
+        <button class="btn btn-secondary" type="submit" {% if seed_check_running %}disabled{% endif %}>Check original source files</button>
+    </form>
+    {% if seed_check_running %}<p role="status">Source check running. You can leave this page. Reload to see the latest results.</p>{% endif %}
+    <p class="form-hint">This check can inspect older source files. It does not search, download, delete, change file selections or resume jobs. With the policy off, it records a preview only. Results show the last check, not a historical import decision. Unresolved ownership, legacy coverage and unavailable files stay unverified.</p>
+    {% if seed_reviews.is_empty() %}<p>No source reviews recorded yet.</p>{% else %}
+    <div class="rss-table-wrap"><table class="rss-table"><thead><tr><th>Source</th><th>Decision</th><th>Reason</th><th>Client control</th><th>Checked (UTC)</th></tr></thead><tbody>
+    {% for review in seed_reviews %}<tr><td><div class="dl-torrent-name">{{ review.name }}</div><small>Client {{ review.client_id }} · {{ review.hash }}</small></td><td>{{ review.verdict }}</td><td>{{ review.reason }}</td><td>{{ review.control }}</td><td>{{ review.checked_at }}</td></tr>{% endfor %}
+    </tbody></table></div>{% endif %}
+</div>
+{% else if tab == "queue" %}
 <div class="rss-panel">
     <div id="queue-container">
         {% if !queue_error.is_empty() %}

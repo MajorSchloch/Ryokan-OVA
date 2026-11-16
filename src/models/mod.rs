@@ -37,3 +37,5 @@ pub use migrations::migrate;
 pub mod library_activity;
 pub mod release_follows;
 pub mod requirement_preferences;
+
+pub mod seed_policy;

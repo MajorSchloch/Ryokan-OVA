@@ -116,6 +116,18 @@ Pick the tab for your client. Each one covers preparation steps inside the clien
 
     The client uses HTTP Basic authentication and JSON-RPC. [Official NZBGet API reference](https://nzbget.com/documentation/api/)
 
+## Accepted-only seeding
+
+Open **Downloads → Seeding review** to check original torrent files. The policy is off by default. With it off, **Check original source files** records a preview without client control actions. Enable **Stop completed rejected or unverified torrents** to enforce the results after post-processing, about once a minute.
+
+Acceptance requires a complete native source manifest, saved source-file ownership, actual import coverage, current probe facts, and the effective minimum requirements for every available video. The check uses app defaults, franchise settings, and release overrides. The upgrade target does not control seeding: an acceptable 720p file can seed while Ryokan seeks a 1080p upgrade. A library copy, a Tdarr conversion, a release name, or an old Imported label cannot certify the source.
+
+Rejected and unverified completed torrents are stopped with their files retained. A partial selection must account for other downloaded media too: file priorities do not prevent uploads. Missing legacy coverage, ambiguous mappings, changed source files, unavailable mounts, and unresolved owners require review. The explicit source check can populate missing probe facts; it cannot invent missing ownership or numbering evidence. Routine checks use the cache and do not launch probes.
+
+This policy never resumes stopped jobs, changes file priorities, or changes native seed limits. An accepted job that is already paused stays paused. Rejected sources are also retained when automatic failure or misgrab cleanup would remove them; blocklisting and replacement-search rules still apply. Completed-download cleanup can remove only a source that passes a fresh acceptance check. Usenet jobs are unaffected. The client must keep source files itself; Ryokan cannot prevent a native client rule from deleting them.
+
+BitTorrent can upload pieces during download and before the next check. This feature controls continued seeding after completion. It does not guarantee zero uploads before verification.
+
 ## Seeding rules and removal after import
 
 An indexer row can carry a **Seed Ratio** and a **Seed Time** (minutes). Ryokan passes them to the download client when it adds a grab from that indexer, and its own delete actions (deleting an episode, replacing it with an upgrade) leave such a torrent in the client so the client's rules decide when seeding ends. The one exception is a torrent imported in Move mode, which cannot seed once its file has moved. What the client does with the rules, and what "finished seeding" means to it, differs per client:
