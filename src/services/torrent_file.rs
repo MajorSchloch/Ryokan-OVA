@@ -137,9 +137,140 @@ pub async fn fetch_torrent_info_hash(url: &str) -> Option<String> {
         .flatten()
 }
 
+/// A single bounded read binds a public HTTP torrent to an exact native
+/// identity. Do not let the daemon fetch the URL a second time. Private or
+/// webseed-dependent sources need review rather than a lossy conversion.
+pub(crate) async fn public_source_magnet(url: &str) -> Result<(String, String), String> {
+    let response = HTTP_CLIENT
+        .get(url)
+        .send()
+        .await
+        .map_err(|_| "Source identity unavailable; no download started")?;
+    if !response.status().is_success() {
+        return Err("Source identity unavailable; no download started".into());
+    }
+    let body = super::http_body::read_capped(response, TORRENT_BODY_CAP)
+        .await
+        .map_err(|_| "Source identity unavailable; no download started")?;
+    tokio::task::spawn_blocking(move || public_magnet_from_bytes(&body))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn fields(bytes: &[u8], start: usize) -> Option<Vec<(&[u8], usize, usize)>> {
+    if bytes.get(start) != Some(&b'd') {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut pos = start + 1;
+    while bytes.get(pos) != Some(&b'e') {
+        let (key, value) = bencode_string(bytes, pos)?;
+        let end = bencode_end(bytes, value, 0)?;
+        out.push((key, value, end));
+        pos = end;
+        if out.len() > 4096 {
+            return None;
+        }
+    }
+    Some(out)
+}
+fn trackers(bytes: &[u8], pos: usize, depth: usize, out: &mut Vec<String>) -> Option<()> {
+    if depth > 4 || out.len() >= 128 {
+        return None;
+    }
+    if bytes.get(pos) == Some(&b'l') {
+        let mut pos = pos + 1;
+        while bytes.get(pos) != Some(&b'e') {
+            trackers(bytes, pos, depth + 1, out)?;
+            pos = bencode_end(bytes, pos, 0)?;
+        }
+    } else {
+        let (raw, _) = bencode_string(bytes, pos)?;
+        let tracker = std::str::from_utf8(raw).ok()?;
+        if tracker.len() > 4096 {
+            return None;
+        }
+        let parsed = reqwest::Url::parse(tracker).ok()?;
+        if !matches!(parsed.scheme(), "http" | "https" | "udp") {
+            return None;
+        }
+        out.push(tracker.to_owned());
+    }
+    Some(())
+}
+fn public_magnet_from_bytes(bytes: &[u8]) -> Result<(String, String), String> {
+    let hash =
+        torrent_info_hash(bytes).ok_or("Source identity unavailable; no download started")?;
+    let fields = fields(bytes, 0).ok_or("Source metadata unavailable; review required")?;
+    let mut announced = Vec::new();
+    for (key, start, end) in fields {
+        match key {
+            b"info" => {
+                let info = self::fields(bytes, start)
+                    .ok_or("Source metadata unavailable; review required")?;
+                if info
+                    .iter()
+                    .any(|(k, a, b)| *k == b"private" && &bytes[*a..*b] != b"i0e")
+                {
+                    return Err("Private HTTP torrent requires review; exact source dispatch cannot preserve its transport metadata".into());
+                }
+            }
+            b"announce" | b"announce-list" => trackers(bytes, start, 0, &mut announced)
+                .ok_or("Source tracker metadata cannot be preserved; review required")?,
+            b"url-list" | b"httpseeds" if !matches!(&bytes[start..end], b"le" | b"0:") => {
+                return Err("HTTP webseed source requires review; exact source dispatch cannot preserve its transport metadata".into());
+            }
+            _ => {}
+        }
+    }
+    announced.sort();
+    announced.dedup();
+    let mut magnet =
+        reqwest::Url::parse(&format!("magnet:?xt=urn:btih:{hash}")).map_err(|e| e.to_string())?;
+    for tracker in announced {
+        magnet.query_pairs_mut().append_pair("tr", &tracker);
+    }
+    Ok((hash, magnet.into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_http_source_retains_tracker_and_binds_one_canonical_identity() {
+        let tracker = "https://tracker.test/announce?key=fixture";
+        let body = format!(
+            "d8:announce{}:{}4:infod6:lengthi5e4:name5:a.mkv12:piece lengthi16384e6:pieces0:ee",
+            tracker.len(),
+            tracker
+        );
+        let (hash, magnet) = public_magnet_from_bytes(body.as_bytes()).unwrap();
+        assert_eq!(Some(hash.clone()), torrent_info_hash(body.as_bytes()));
+        let parsed = reqwest::Url::parse(&magnet).unwrap();
+        let pairs: Vec<_> = parsed.query_pairs().collect();
+        assert_eq!(pairs.iter().filter(|(k, _)| k == "xt").count(), 1);
+        assert!(
+            pairs
+                .iter()
+                .any(|(k, v)| k == "xt" && v == &format!("urn:btih:{hash}"))
+        );
+        assert!(pairs.iter().any(|(k, v)| k == "tr" && v == tracker));
+    }
+
+    #[test]
+    fn private_and_webseed_http_sources_hold_instead_of_losing_transport_metadata() {
+        for body in [
+            "d4:infod6:lengthi5e4:name5:a.mkv7:privatei1eee",
+            "d8:url-list17:https://web.test/4:infod6:lengthi5e4:name5:a.mkvee",
+        ] {
+            assert!(
+                public_magnet_from_bytes(body.as_bytes())
+                    .unwrap_err()
+                    .contains("requires review")
+            );
+        }
+    }
 
     #[test]
     fn magnet_hashes_read_in_hex_and_base32() {
