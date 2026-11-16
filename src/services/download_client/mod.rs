@@ -43,6 +43,7 @@ pub mod transmission;
 
 pub mod nzbget;
 pub mod sabnzbd;
+pub(crate) mod source_guard;
 
 /// Refuse a release URL that isn't `magnet:`, `http://` or `https://`
 /// before it reaches a client. Every client implementation calls this
@@ -729,6 +730,14 @@ pub async fn rebuild_clients_cache(cache: &crate::DownloadClientsCache, db: &sql
                 }
                 _ => {}
             }
+            let c = if c.protocol() == "torrent" {
+                Arc::new(source_guard::SourceGuard {
+                    db: db.clone(),
+                    inner: c,
+                }) as Arc<dyn DownloadClient>
+            } else {
+                c
+            };
             clients.insert(row.id, c);
         }
     }

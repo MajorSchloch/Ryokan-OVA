@@ -1042,6 +1042,10 @@ async fn main() {
             post(handlers::downloads::check_seed_sources),
         )
         .route(
+            "/downloads/seeding/reconsider",
+            post(handlers::downloads::reconsider_seed_source),
+        )
+        .route(
             "/api/downloads/pause",
             post(handlers::downloads::api_pause_torrent),
         )

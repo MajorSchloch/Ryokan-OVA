@@ -139,6 +139,8 @@ struct DownloadsTemplate {
     title_language: String,
     seed_reviews: Vec<crate::models::seed_policy::Review>,
     accepted_only_seeding: bool,
+    retire_unaccepted_sources: bool,
+    source_retirements: Vec<crate::models::seed_policy::Retirement>,
     seed_check_running: bool,
 }
 
@@ -312,7 +314,21 @@ pub async fn downloads_page(
         .flatten()
         .is_some_and(|c| c.accepted_only_seeding);
     let seed_check_running = crate::services::seed_policy::CHECK_LOCK.try_lock().is_err();
+    let retire_unaccepted_sources = crate::models::config::get_config(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|c| c.retire_unaccepted_sources);
+    let source_retirements = if tab == "seeding" {
+        crate::models::seed_policy::retirements(&state.db)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let template = DownloadsTemplate {
+        retire_unaccepted_sources,
+        source_retirements,
         seed_reviews,
         accepted_only_seeding,
         seed_check_running,
@@ -652,6 +668,8 @@ mod tests {
 pub struct SeedingSettingsForm {
     #[serde(default)]
     enabled: Option<String>,
+    #[serde(default)]
+    retire_unaccepted: Option<String>,
 }
 
 /// Separate form: saving other settings cannot clear this switch.
@@ -666,6 +684,7 @@ pub async fn seeding_settings(
         _ => return (StatusCode::INTERNAL_SERVER_ERROR, "Settings unavailable").into_response(),
     };
     cfg.accepted_only_seeding = form.enabled.is_some();
+    cfg.retire_unaccepted_sources = form.retire_unaccepted.is_some();
     if crate::models::config::save_config(&state.db, &cfg)
         .await
         .is_err()
@@ -673,6 +692,38 @@ pub async fn seeding_settings(
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             "Could not save seeding policy",
+        )
+            .into_response();
+    }
+    crate::handlers::responses::htmx_aware_redirect(hx, "/downloads?tab=seeding").into_response()
+}
+
+#[derive(Deserialize)]
+pub struct ReconsiderSourceForm {
+    client_id: i64,
+    hash: String,
+}
+/// Reconsideration clears only this policy exclusion. Older failure blocks and
+/// all verification requirements remain. It starts no download or seed job.
+pub async fn reconsider_seed_source(
+    State(state): State<AppState>,
+    HxRequest(hx): HxRequest,
+    Form(form): Form<ReconsiderSourceForm>,
+) -> Response {
+    let Some(hash) = crate::services::download_client::normalize_info_hash(&form.hash) else {
+        return (StatusCode::BAD_REQUEST, "Invalid source identity").into_response();
+    };
+    let _config = crate::handlers::settings::CONFIG_WRITE_LOCK.lock().await;
+    let _source = crate::services::download_client::source_guard::SOURCE_ACTION_LOCK
+        .write()
+        .await;
+    if crate::models::seed_policy::unblock(&state.db, form.client_id, &hash)
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not reconsider source",
         )
             .into_response();
     }

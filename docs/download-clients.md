@@ -128,6 +128,16 @@ This policy never resumes stopped jobs, changes file priorities, or changes nati
 
 BitTorrent can upload pieces during download and before the next check. This feature controls continued seeding after completion. It does not guarantee zero uploads before verification.
 
+### Automatic source removal
+
+Enable **Automatically remove and block rejected or unverifiable sources; keep their files** to reduce routine review. Both policy switches must be on. Ryokan checks missing probe facts in one background operation. Stable rejected or unverifiable completions can then be removed from the client and blocked by exact hash. This does not block a title or franchise. The operation retains source payloads, library files, recovery files, and historical import results. It does not start replacement searches or resume accepted jobs.
+
+Unavailable mounts or clients, failed probes, changing files or manifests, invalid settings, shared owners, moved imports, and open file selections remain holds. They do not become permanent exclusions. Removal failures retain their block and retry. After native removal, catalog bookkeeping and the recorded activity reason finish together. Source payload cleanup requires a separate operation; native **delete files** is not used.
+
+Removed sources are under **Removed or blocked sources**. **Reconsider** clears only that policy exclusion. It does not acquire or resume anything, and it does not clear older failed-download blocks. Policy exclusions remain active if automatic removal is later disabled. Source blocks also apply to direct grabs, file-picker completion, and resume actions.
+
+When exclusions exist, public HTTP torrents are read once and sent as an exact magnet with their announce trackers. Private or webseed-dependent HTTP sources stay on hold because this conversion cannot preserve their transport metadata. Native HTTP compatibility remains when no policy exclusions exist. Conflicting magnet identities require review.
+
 ## Seeding rules and removal after import
 
 An indexer row can carry a **Seed Ratio** and a **Seed Time** (minutes). Ryokan passes them to the download client when it adds a grab from that indexer, and its own delete actions (deleting an episode, replacing it with an upgrade) leave such a torrent in the client so the client's rules decide when seeding ends. The one exception is a torrent imported in Move mode, which cannot seed once its file has moved. What the client does with the rules, and what "finished seeding" means to it, differs per client:

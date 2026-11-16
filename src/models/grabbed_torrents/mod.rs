@@ -1600,6 +1600,9 @@ pub async fn is_blocklisted_for(
     if hash.is_empty() {
         return Ok(false);
     }
+    if super::seed_policy::is_blocked(db, hash).await? {
+        return Ok(true);
+    }
     let existing: Option<i64> = sqlx::query_scalar(
         "SELECT id FROM grabbed_torrents WHERE hash = ? AND state = 'failed' \
            AND (COALESCE(failure_reason, '') != 'misgrab' OR series_id = ?) LIMIT 1",
@@ -2272,6 +2275,13 @@ pub async fn is_blocklisted_release(
     hash: &str,
     title: &str,
 ) -> bool {
+    // A read failure cannot authorize a previously excluded source.
+    if super::seed_policy::is_blocked(db, hash)
+        .await
+        .unwrap_or(true)
+    {
+        return true;
+    }
     sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM grabbed_torrents \
          WHERE state = 'failed' \
@@ -2296,21 +2306,28 @@ pub async fn is_blocklisted_release(
 pub struct BlocklistSnapshot {
     pub hashes: std::collections::HashSet<String>,
     pub titles: std::collections::HashSet<String>,
+    unavailable: bool,
 }
 
 impl BlocklistSnapshot {
     pub fn rejects(&self, hash: &str, title: &str) -> bool {
-        (!hash.is_empty() && self.hashes.contains(&hash.to_ascii_lowercase()))
+        self.unavailable
+            || (!hash.is_empty() && self.hashes.contains(&hash.to_ascii_lowercase()))
             || self.titles.contains(&title.to_lowercase())
     }
 
     pub fn is_empty(&self) -> bool {
-        self.hashes.is_empty() && self.titles.is_empty()
+        !self.unavailable && self.hashes.is_empty() && self.titles.is_empty()
     }
 }
 
 pub async fn blocklist_snapshot(db: &SqlitePool, anilist_id: i64) -> BlocklistSnapshot {
     let mut snapshot = BlocklistSnapshot::default();
+    match sqlx::query_scalar::<_, String>("SELECT hash FROM torrent_seed_reviews WHERE blocked_at IS NOT NULL AND unblocked_at IS NULL")
+        .fetch_all(db).await {
+        Ok(hashes) => snapshot.hashes.extend(hashes.into_iter().map(|h|h.to_ascii_lowercase())),
+        Err(_) => snapshot.unavailable = true,
+    }
     // Two indexed reads instead of one joined scan: failed hashes come
     // off `idx_grabbed_torrents_state`, and the titles only for the
     // series being searched through the partial
