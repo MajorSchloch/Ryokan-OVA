@@ -27,14 +27,23 @@ struct Client {
     fail_stop: AtomicBool,
     change_manifest: AtomicBool,
     reads: AtomicUsize,
+    allow_delete: AtomicBool,
+    deleted: AtomicBool,
+    fail_delete: AtomicBool,
+    deletes: AtomicUsize,
+    allow_add: AtomicBool,
+    adds: Mutex<Vec<(String, String)>>,
+    seed_rules: Mutex<Vec<crate::services::download_client::SeedRules>>,
 }
 #[async_trait]
 impl DownloadClient for Client {
     async fn test(&self) -> Result<String, String> {
         Ok("test".into())
     }
-    async fn add_torrent(&self, _: &str, _: &str) -> Result<AddOutcome, String> {
-        panic!("must not acquire")
+    async fn add_torrent(&self, url: &str, hash: &str) -> Result<AddOutcome, String> {
+        assert!(self.allow_add.load(Ordering::SeqCst), "must not acquire");
+        self.adds.lock().unwrap().push((url.into(), hash.into()));
+        Ok(AddOutcome::Added)
     }
     async fn add_torrent_with_file_filter(
         &self,
@@ -47,6 +56,9 @@ impl DownloadClient for Client {
     async fn list_scoped(&self) -> Result<Vec<DownloadItem>, String> {
         if self.fail_list.load(Ordering::SeqCst) {
             return Err("listing unavailable".into());
+        }
+        if self.deleted.load(Ordering::SeqCst) {
+            return Ok(Vec::new());
         }
         Ok(vec![self.item.lock().unwrap().clone()])
     }
@@ -64,7 +76,7 @@ impl DownloadClient for Client {
         }
         let mut files = self.files.lock().unwrap().clone();
         if self.change_manifest.load(Ordering::SeqCst)
-            && self.reads.fetch_add(1, Ordering::SeqCst) > 0
+            && self.reads.fetch_add(1, Ordering::SeqCst) % 2 == 1
         {
             files[0].wanted = false;
         }
@@ -81,11 +93,30 @@ impl DownloadClient for Client {
     async fn resume(&self, _: &str) -> Result<(), String> {
         panic!("must never resume")
     }
-    async fn delete(&self, _: &str, _: bool) -> Result<(), String> {
-        panic!("must never delete")
+    async fn delete(&self, hash: &str, delete_files: bool) -> Result<(), String> {
+        assert!(
+            self.allow_delete.load(Ordering::SeqCst),
+            "must not delete without opt-in"
+        );
+        assert_eq!(hash, HASH);
+        assert!(!delete_files, "must never delete payloads");
+        self.deletes.fetch_add(1, Ordering::SeqCst);
+        if self.fail_delete.load(Ordering::SeqCst) {
+            return Err("removal unavailable".into());
+        }
+        self.deleted.store(true, Ordering::SeqCst);
+        Ok(())
     }
     async fn set_file_wanted(&self, _: &str, _: &[usize], _: bool) -> Result<(), String> {
         panic!("must preserve selection")
+    }
+    async fn set_seed_rules(
+        &self,
+        _hash: &str,
+        rules: crate::services::download_client::SeedRules,
+    ) -> Result<(), String> {
+        self.seed_rules.lock().unwrap().push(rules);
+        Ok(())
     }
     fn sonarr_impl_name(&self) -> &'static str {
         "QBittorrent"
@@ -188,6 +219,13 @@ async fn fixture() -> Fixture {
         fail_stop: AtomicBool::new(false),
         change_manifest: AtomicBool::new(false),
         reads: AtomicUsize::new(0),
+        allow_delete: AtomicBool::new(false),
+        deleted: AtomicBool::new(false),
+        fail_delete: AtomicBool::new(false),
+        deletes: AtomicUsize::new(0),
+        allow_add: AtomicBool::new(false),
+        adds: Mutex::new(Vec::new()),
+        seed_rules: Mutex::new(Vec::new()),
     });
     let state = build_test_app_state(db, Some(client.clone()));
     let f = Fixture {
@@ -202,6 +240,8 @@ async fn fixture() -> Fixture {
     cache(&f, 720, "jpn", Some("eng")).await;
     f
 }
+
+mod retirement_tests;
 async fn cache(f: &Fixture, height: u32, audio: &str, subs: Option<&str>) {
     let mut streams = vec![
         serde_json::json!({"index":0,"codec_type":"video","codec_name":"h264","width":height*16/9,"height":height}),
@@ -506,6 +546,7 @@ async fn bound_proof_uses_full_native_manifest_including_non_video_files() {
         bind_slots(&f.state.db, &owner, HASH, &manifest)
             .await
             .unwrap()
+            .unwrap()
             .len(),
         12
     );
@@ -675,6 +716,13 @@ async fn failed_client_listing_does_not_skip_healthy_clients() {
         fail_stop: AtomicBool::new(false),
         change_manifest: AtomicBool::new(false),
         reads: AtomicUsize::new(0),
+        allow_delete: AtomicBool::new(false),
+        deleted: AtomicBool::new(false),
+        fail_delete: AtomicBool::new(false),
+        deletes: AtomicUsize::new(0),
+        allow_add: AtomicBool::new(false),
+        adds: Mutex::new(Vec::new()),
+        seed_rules: Mutex::new(Vec::new()),
     });
     let current_pool = f.state.download_clients.read().await.clone();
     let mut pool = crate::DownloadClientPool {

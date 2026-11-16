@@ -3019,6 +3019,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
             ("audio_language_match", "TEXT NOT NULL DEFAULT 'all'"),
             ("minimum_torrent_seeders", "INTEGER NOT NULL DEFAULT 1"),
             ("accepted_only_seeding", "INTEGER NOT NULL DEFAULT 0"),
+            ("retire_unaccepted_sources", "INTEGER NOT NULL DEFAULT 0"),
             ("required_subtitle_languages", "TEXT NOT NULL DEFAULT ''"),
             ("subtitle_language_match", "TEXT NOT NULL DEFAULT 'all'"),
             ("media_requirements_enabled", "INTEGER NOT NULL DEFAULT 0"),
