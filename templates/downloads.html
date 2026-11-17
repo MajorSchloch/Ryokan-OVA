@@ -39,7 +39,7 @@
     <div id="queue-error" class="alert alert-warn" role="status" hidden></div>
     <details class="dl-section"><summary>Client job controls</summary>
     <p>Pause or remove a completed source job. Resume is available only for accepted sources. Removal keeps files unless you explicitly choose otherwise.</p>
-    <div id="source-job-controls">{% let queue = source_jobs %}{% let queue_error = "" %}{% include "partials/downloads/queue.html" %}</div>
+    <div id="source-job-controls">{% let queue = source_jobs %}{% let queue_error = "" %}{% let source_controls = true %}{% include "partials/downloads/queue.html" %}</div>
     </details>
     <h4>Needs review</h4>
     {% if seed_reviews.is_empty() %}<p>No current source holds were reported.</p>{% else %}
@@ -84,6 +84,7 @@
 <div class="rss-panel">
     <div id="queue-error" class="alert alert-warn" role="status" hidden></div>
     <div id="queue-container">
+        {% let source_controls = false %}
         {% include "partials/downloads/queue.html" %}
     </div>
 </div>
