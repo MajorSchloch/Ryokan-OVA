@@ -116,7 +116,8 @@
 .calendar-period-label { margin: 0 0 4px; font-size: 16px; }
 .calendar-period-heading small { display: block; margin: 0; }
 .calendar-date-form label { font-size: 12px; color: var(--text-dim); }
-.calendar-date-form input[type="date"] {
+.calendar-date-form input[type="date"],
+.calendar-date-form select {
     max-width: 160px;
     min-width: 0;
     height: 40px;
@@ -589,3 +590,15 @@
     .discovery-card { flex-wrap: wrap; }
     .discovery-info { min-width: 60%; }
 }
+
+.calendar-file-status { margin: .35rem .65rem .65rem; font-size: .8rem; color: var(--text-dim); }
+.calendar-file-status summary { display: flex; align-items: center; gap: .35rem; cursor: pointer; min-height: 28px; }
+.calendar-file-status summary svg { flex-shrink: 0; }
+.calendar-file-status p { margin: .45rem 0; overflow-wrap: anywhere; }
+.calendar-file-status-available summary { color: var(--green); }
+.calendar-file-status-missing summary { color: var(--red); }
+.calendar-file-status-pending summary { color: var(--accent); }
+.calendar-month-entry { min-width: 0; }
+.calendar-month-entry .calendar-file-status { margin: 0 .3rem .4rem; font-size: .7rem; }
+.calendar-date-form select { max-width: 210px; }
+@media (max-width: 600px) { .calendar-file-status summary { min-height: 44px; } .calendar-date-form select { max-width: 100%; } }

@@ -131,7 +131,7 @@ pub async fn fetch_upcoming(
         let title_english: String = r.try_get("title_english").unwrap_or_default();
         let title_native: String = r.try_get("title_native").unwrap_or_default();
         let cover_url: String = r.try_get("cover_url").unwrap_or_default();
-        let monitor_mode: String = r.try_get("monitor_mode").unwrap_or_default();
+        let monitored: bool = r.try_get("episode_monitored").unwrap_or(false);
         let episode: i32 = r.try_get::<i64, _>("episode").unwrap_or(0) as i32;
         let airing_at: i64 = r.try_get("airing_at").unwrap_or(0);
         let duration_minutes: i32 = r.try_get::<i64, _>("duration_minutes").unwrap_or(24) as i32;
@@ -162,7 +162,7 @@ pub async fn fetch_upcoming(
             episode,
             airing_at,
             duration_minutes,
-            monitored: monitor_mode != "none",
+            monitored,
             cover_url,
             search_haystack,
         });
@@ -175,6 +175,7 @@ pub async fn fetch_upcoming(
 const BASE_QUERY_ALL: &str = "\
 SELECT s.id AS series_id, s.anilist_id, s.title, s.title_romaji, s.title_english, \
        s.title_native, s.cover_url, s.monitor_mode, \
+       COALESCE((SELECT m.monitored FROM episode_monitor_state m WHERE m.series_id=s.id AND m.episode_number=ea.episode), s.monitor_mode!='none') AS episode_monitored, \
        ea.episode, ea.airing_at, ea.duration_minutes \
 FROM episode_airings ea \
 JOIN series s ON s.id = ea.series_id \
@@ -185,10 +186,11 @@ ORDER BY ea.airing_at ASC";
 const BASE_QUERY_MONITORED: &str = "\
 SELECT s.id AS series_id, s.anilist_id, s.title, s.title_romaji, s.title_english, \
        s.title_native, s.cover_url, s.monitor_mode, \
+       COALESCE((SELECT m.monitored FROM episode_monitor_state m WHERE m.series_id=s.id AND m.episode_number=ea.episode), s.monitor_mode!='none') AS episode_monitored, \
        ea.episode, ea.airing_at, ea.duration_minutes \
 FROM episode_airings ea \
 JOIN series s ON s.id = ea.series_id \
-WHERE s.anilist_id > 0 AND s.monitor_mode != 'none' \
+WHERE s.anilist_id > 0 AND COALESCE((SELECT m.monitored FROM episode_monitor_state m WHERE m.series_id=s.id AND m.episode_number=ea.episode), s.monitor_mode!='none') \
   AND ea.airing_at >= ? AND ea.airing_at < ? \
 ORDER BY ea.airing_at ASC";
 

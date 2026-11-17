@@ -25,7 +25,7 @@ Ryokan saves the UTC date when you start the follow. It checks AniList when you 
 
 TV series, short TV series, and online series qualify by default. Movies and OVAs have separate switches. **Alternative versions** lets Ryokan follow that relationship. An alternative movie requires both **Movies** and **Alternative versions**. An excluded sequel movie can still lead Ryokan to a qualifying TV season.
 
-Ryokan monitors all episodes of each new entry and applies your default upgrade setting. It keeps the monitoring and upgrade settings of existing entries and skips titles on your sync exclusion list. A follow never searches the original episodes. RSS handles new releases. Episodes that aired during downtime are available for search on the Wanted page.
+Ryokan monitors all episodes of each new entry and applies your default upgrade setting. It keeps the monitoring and upgrade settings of existing entries and skips titles on your sync exclusion list. A follow never searches the original episodes. RSS handles new releases. Recent episode recovery checks monitored gaps within its configured window. Older episodes remain available for search on the Wanted page.
 
 ## Can I run multiple Ryokan instances?
 

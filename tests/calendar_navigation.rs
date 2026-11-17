@@ -15,8 +15,25 @@ use tower::ServiceExt;
 
 async fn app() -> Router {
     let db = in_memory_pool().await;
+    let root = std::sync::Arc::new(tempfile::tempdir().unwrap());
+    std::fs::create_dir(root.path().join("Calendar feature")).unwrap();
+    std::fs::write(
+        root.path()
+            .join("Calendar feature/Calendar feature - S01E31.mkv"),
+        b"file",
+    )
+    .unwrap();
+    ryokan::models::config::save_config(
+        &db,
+        &ryokan::models::config::Config {
+            media_root: root.path().to_string_lossy().into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     let series = seed_series(&db, 100, "Calendar feature").await;
-    sqlx::query("UPDATE series SET monitor_mode='all' WHERE id=?")
+    sqlx::query("UPDATE series SET monitor_mode='all',folder_name='Calendar feature' WHERE id=?")
         .bind(series)
         .execute(&db)
         .await
@@ -29,7 +46,9 @@ async fn app() -> Router {
         sqlx::query("INSERT INTO episode_airings(series_id,episode,airing_at,duration_minutes) VALUES(?,?,?,24)")
             .bind(series).bind(day as i32).bind(at).execute(&db).await.unwrap();
     }
+    sqlx::query("INSERT INTO grabbed_torrents(hash,torrent_name,series_id,episode_numbers,state) VALUES('pending','fixture',?,'[7]','pending')").bind(series).execute(&db).await.unwrap();
     Router::new()
+        .layer(axum::Extension(root))
         .route("/calendar", get(calendar::page))
         .route("/static/{*path}", get(asset))
         .with_state(build_test_app_state(db, None))
@@ -135,4 +154,47 @@ async fn calendar_navigation_browser() {
         .unwrap();
     server.abort();
     assert!(result.success());
+}
+
+#[tokio::test]
+async fn availability_filter_is_shared_by_full_partial_list_and_grid_and_preserves_dates() {
+    let app = app().await;
+    for (range, status, expected) in [
+        ("day", "missing", true),
+        ("day", "available", false),
+        ("month", "pending", true),
+    ] {
+        for partial in [false, true] {
+            let url = format!(
+                "/calendar?range={range}&date=2026-01-01&status={status}&monitored=true&search=Calendar"
+            );
+            let mut request = Request::builder().uri(&url);
+            if partial {
+                request = request.header("HX-Request", "true");
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let body = String::from_utf8(
+                axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap();
+            assert_eq!(
+                body.contains(&format!(
+                    "class=\"calendar-file-status calendar-file-status-{status}\""
+                )),
+                expected,
+                "{body}"
+            );
+            assert!(body.contains(&format!("status={status}")));
+            assert!(body.contains("monitored=true"));
+            assert!(body.contains("search=Calendar"));
+            assert!(!body.contains("calendar-file-status-unknown"));
+        }
+    }
 }

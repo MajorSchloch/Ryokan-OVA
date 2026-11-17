@@ -27,11 +27,15 @@ When to come here:
 
 The RSS poll cadence is set in **Settings → General → RSS Sync Interval**. Manual sync is the **Sync RSS Now** button on this tab, or **Run now** on the `rss_sync` row under Scheduled Tasks.
 
+Recent episode recovery also checks aired, monitored TV and online-series episodes missing from the library. Configure it under **Settings → General → Automatic new episodes**. It is enabled by default, covers the last seven days, and uses the RSS interval. The window can be set from 1 to 30 days. Each pass checks at most 12 missing episodes, with unchecked and least recently checked episodes first. The RSS master switch holds both RSS and this recovery task; disabling only Nyaa RSS does not stop other feeds.
+
+Recovery uses the existing search, source blocks, language and quality requirements, and failed-download retry limit. It holds cancelled jobs, manual protections, unresolved import failures, ambiguous packs, and existing native jobs. It does not change torrent selections or resume stopped jobs. Check Activity for queued, held, or error outcomes. A queue entry still needs a successful verified import. Older gaps remain available on Wanted. Daily quality upgrades cover files already on disk.
+
 ## Scheduled Tasks
 
 Status of Ryokan's background tasks: external_sync (watch-list sync), post_processing (move imported files into the library), grab_sweep (reconcile pending grabs against the download client's state), upgrade_search (look for better releases of already-grabbed episodes), library_classify, metadata_refresh, airing_refresh (refreshes the air times that show up on the [Calendar](calendar.md)), and a handful more.
 
-Each row shows the schedule, whether the task is enabled, the last run's status and detail, when it last started and finished, and a **Run now** button.
+Each row shows the schedule, whether the task is enabled, the last run's status and detail, when it last started and finished. Tasks with a manual action also show **Run now**.
 
 When to come here:
 

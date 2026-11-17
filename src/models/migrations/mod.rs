@@ -3294,6 +3294,16 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     crate::models::library_activity::migrate(db).await?;
 
     super::seed_policy::init_table(db).await?;
+    if !column_exists(db, "config", "recent_episode_search_enabled").await {
+        sqlx::query("ALTER TABLE config ADD COLUMN recent_episode_search_enabled INTEGER NOT NULL DEFAULT 1").execute(db).await?;
+    }
+    if !column_exists(db, "config", "recent_episode_search_days").await {
+        sqlx::query(
+            "ALTER TABLE config ADD COLUMN recent_episode_search_days INTEGER NOT NULL DEFAULT 7",
+        )
+        .execute(db)
+        .await?;
+    }
     Ok(())
 }
 

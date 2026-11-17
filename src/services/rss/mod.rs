@@ -1,3 +1,4 @@
+mod history;
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
@@ -99,7 +100,7 @@ async fn record_availability_hold(
     .await;
 }
 
-static RSS_SYNC_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+pub(crate) static RSS_SYNC_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 // ── Pre-compiled regexes ───────────────────────────────────────────────────
@@ -654,15 +655,9 @@ pub async fn sync_once(state: &AppState, trigger: &str) -> Result<SyncSummary, S
     let run_id = rss::start_run(&state.db, trigger)
         .await
         .map_err(|e| e.to_string())?;
-    let result = match tokio::time::timeout(
-        std::time::Duration::from_secs(300),
-        sync_once_inner(state, trigger),
-    )
-    .await
-    {
-        Ok(inner) => inner,
-        Err(_) => Err("RSS sync timed out after 5 minutes".to_string()),
-    };
+    // Each provider/native request retains its own deadline. Cancelling the
+    // complete pass after a native add can strand its durable ownership.
+    let result = sync_once_inner(state, trigger).await;
 
     match &result {
         Ok(summary) => {
@@ -893,6 +888,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         });
     }
 
+    let acquisition_settings = history::Settings::capture(state, &cfg).await?;
     let tracked = series::get_all(&state.db)
         .await
         .map_err(|e| e.to_string())?;
@@ -918,14 +914,9 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
     for row in &tracked {
         let _ = monitoring_service::ensure_series_monitoring_rows(&state.db, row).await;
     }
-    // multi-rss commit F — `nyaa_client` is used only for the
-    // Nyaa-specific `load_canonical_history` lookup (description-
-    // body fetches against nyaa.si). The per-item grab dispatch
-    // resolves a per-source client via `resolve_dispatch_for_item`
-    // inside the grab loop below — Nyaa items route through the
-    // Nyaa pin, indexer-RSS items through the indexer's pin,
-    // direct-feed items through the feed's own pin.
-    let (nyaa_client, _nyaa_client_id) = match state
+    // Current durable owners protect every source. Native Nyaa-client jobs
+    // without an owner provide an additional conservative queue guard.
+    let (nyaa_client, nyaa_client_id) = match state
         .client_for_nyaa_with_id(cfg.nyaa_download_client_id)
         .await
     {
@@ -975,7 +966,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
     let blacklist = quality::parse_group_list(&cfg.blocked_groups);
     let all_meta = load_series_meta(&state.db, &tracked).await;
     let mut canonical_history =
-        load_canonical_history(&state.db, nyaa_client.as_deref(), &all_meta).await;
+        history::load(&state.db, nyaa_client.as_deref(), nyaa_client_id, &all_meta).await?;
 
     // Cache on-disk episode scans per folder to avoid repeated filesystem walks.
     let mut disk_cache: HashMap<String, Vec<media::EpisodeFile>> = HashMap::new();
@@ -1645,7 +1636,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         let incoming_version = media::parse_release_revision(&item.title).version;
         let history_reason = if canonical_history.contains(&found, item.is_batch, incoming_version)
         {
-            Some("Logical episode is already queued or was grabbed earlier".to_string())
+            Some("Logical episode already has a current queued owner".to_string())
         } else if !decision.is_upgrade
             && let Some(queued) =
                 canonical_history.lower_revision(&found, item.is_batch, incoming_version)
@@ -1970,6 +1961,98 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             .await;
             continue;
         }
+        // Coordinate final admission with imports and search retries. The
+        // finite RSS pass already holds RSS_SYNC_LOCK; provider work above
+        // stays outside the import/configuration locks.
+        let _post_processing = crate::services::post_processing::POST_PROC_LOCK
+            .lock()
+            .await;
+        let _config = crate::handlers::settings::CONFIG_WRITE_LOCK.lock().await;
+        let stable = if let (Some(Ok(policy)), Some(monitored)) = (
+            effective_configs.get(&cand.found.series.id),
+            monitored_cache.get(&cand.found.series.id),
+        ) {
+            acquisition_settings
+                .recheck(state, &cand.found.series, &policy.config, monitored)
+                .await
+        } else {
+            Err("Current release policy or monitoring could not be checked".into())
+        };
+        let current_client =
+            resolve_dispatch_for_item(state, &cfg, &cand.item, &direct_feed_pins).await;
+        let same_client = current_client.as_ref().is_some_and(|(current, id)| {
+            *id == dispatch_client_id && std::sync::Arc::ptr_eq(current, &client)
+        });
+        if stable.is_err() || !same_client {
+            skipped += 1;
+            record_availability_hold(
+                state,
+                &cand.item,
+                &cand.item_key,
+                &cand.found,
+                &stable
+                    .err()
+                    .unwrap_or_else(|| "Download client changed during RSS discovery".into()),
+            )
+            .await;
+            continue;
+        }
+        if !cand.is_upgrade {
+            let mut hold = None;
+            for ep in &cand.found.resolved_eps {
+                if let Err(reason) = crate::services::recent_episodes::retry_allowed(
+                    &state.db,
+                    &cfg,
+                    cand.found.series.id,
+                    *ep,
+                )
+                .await
+                {
+                    hold = Some(reason);
+                    break;
+                }
+            }
+            let slots = media::library_slots(
+                cfg.media_root.clone(),
+                HashSet::from([cand.found.series.folder_name.clone()]),
+            )
+            .await;
+            match slots.get(&cand.found.series.folder_name) {
+                None => hold = Some("Library files could not be checked completely".into()),
+                Some(have) if cand.found.resolved_eps.iter().any(|ep| have.contains(ep)) => {
+                    hold = Some(
+                        "A library file arrived after the RSS check; evaluate it on the next pass"
+                            .into(),
+                    )
+                }
+                _ => {}
+            }
+            if let Some(reason) = hold {
+                skipped += 1;
+                record_availability_hold(state, &cand.item, &cand.item_key, &cand.found, &reason)
+                    .await;
+                continue;
+            }
+        }
+        if crate::models::grabbed_torrents::is_blocklisted_release(
+            &state.db,
+            cand.found.series.id,
+            &info_hash,
+            &cand.item.title,
+        )
+        .await
+        {
+            skipped += 1;
+            record_availability_hold(
+                state,
+                &cand.item,
+                &cand.item_key,
+                &cand.found,
+                "This exact source was excluded after RSS discovery",
+            )
+            .await;
+            continue;
+        }
         let mut prepared_bound = None;
         let dispatch = if let Some(mapping) = cand
             .release_mapping
@@ -2277,30 +2360,6 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
     })
 }
 
-async fn load_canonical_history(
-    db: &sqlx::SqlitePool,
-    client: Option<&dyn crate::services::download_client::DownloadClient>,
-    all_meta: &[SeriesMeta],
-) -> CanonicalHistory {
-    let mut history = CanonicalHistory::default();
-
-    if let Ok(titles) = rss::grabbed_titles(db, 5000).await {
-        for title in titles {
-            history.insert_title(&title, all_meta);
-        }
-    }
-
-    if let Some(client) = client
-        && let Ok(torrents) = client.list_scoped().await
-    {
-        for torrent in torrents {
-            history.insert_title(&torrent.name, all_meta);
-        }
-    }
-
-    history
-}
-
 /// Match a release title against every tracked series in the library
 /// and return the best match's series id + resolved episode set, or
 /// `None` if no series cleared the matcher's confidence threshold.
@@ -2508,25 +2567,31 @@ fn logical_bucket_key(cand: &PendingCandidate) -> String {
     logical_episode_key(&cand.found, cand.item.is_batch)
 }
 
+fn logical_key(entry: i64, family: &str, episodes: &HashSet<i32>, is_batch: bool) -> String {
+    let episode_key = format_episode_set(episodes);
+    if episode_key == "none" {
+        return String::new();
+    }
+    format!(
+        "{family}|entry:{entry}|{}|{episode_key}",
+        if is_batch { "batch" } else { "single" }
+    )
+}
+
 /// The logical item a release delivers: tracked entry, family, batch
 /// or single, and the episode set. Source-local absolute offsets can
 /// overlap across different entries in the same franchise family.
 /// Empty when no episode resolved.
 fn logical_episode_key(found: &MatchResult, is_batch: bool) -> String {
-    let episode_key = if !found.canonical_abs_eps.is_empty() {
-        format_episode_set(&found.canonical_abs_eps)
-    } else {
-        format_episode_set(&found.resolved_eps)
-    };
-    if episode_key == "none" {
-        return String::new();
-    }
-    format!(
-        "{}|entry:{}|{}|{}",
-        found.family_key,
+    logical_key(
         found.series.id,
-        if is_batch { "batch" } else { "single" },
-        episode_key,
+        &found.family_key,
+        if !found.canonical_abs_eps.is_empty() {
+            &found.canonical_abs_eps
+        } else {
+            &found.resolved_eps
+        },
+        is_batch,
     )
 }
 
