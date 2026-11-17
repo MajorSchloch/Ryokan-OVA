@@ -149,6 +149,114 @@ async fn fair_order_moves_checked_episode_behind_unchecked_and_ignores_old_ident
     assert_eq!(targets(&db, &cfg).await.unwrap()[0].episode, 8);
 }
 #[tokio::test]
+async fn old_monitored_gaps_never_expire_and_airing_changes_still_cancel_demand() {
+    let (db, cfg, mut t, _root) = fixture().await;
+    for age_days in [10, 400] {
+        t.airing_at = chrono::Utc::now().timestamp() - age_days * 86400;
+        sqlx::query("UPDATE episode_airings SET airing_at=? WHERE series_id=?")
+            .bind(t.airing_at)
+            .bind(t.series_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert_eq!(targets(&db, &cfg).await.unwrap()[0].airing_at, t.airing_at);
+        assert!(demand(&db, &cfg, &t).await.is_ok());
+    }
+    sqlx::query("UPDATE episode_airings SET airing_at=strftime('%s','now')+3600 WHERE series_id=?")
+        .bind(t.series_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    assert!(targets(&db, &cfg).await.unwrap().is_empty());
+    assert!(demand(&db, &cfg, &t).await.unwrap_err().contains("airing"));
+}
+
+#[tokio::test]
+async fn cached_dates_and_finished_episode_counts_supply_historical_airing_evidence() {
+    let (db, cfg, _target, _root) = fixture().await;
+    sqlx::query("DELETE FROM episode_airings")
+        .execute(&db)
+        .await
+        .unwrap();
+    assert!(
+        targets(&db, &cfg).await.unwrap().is_empty(),
+        "unknown airing stays held"
+    );
+    let sid = seed_series(&db, 201, "Historical").await;
+    sqlx::query("UPDATE series SET format='TV',status='RELEASING',monitor_mode='all' WHERE id=?")
+        .bind(sid)
+        .execute(&db)
+        .await
+        .unwrap();
+    crate::models::monitoring::set_episode_monitored(&db, sid, 1, true)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO series_episode_metadata(series_id,episode_number,aired) VALUES(?,1,'2010-01-01')")
+        .bind(sid).execute(&db).await.unwrap();
+    let t = targets(&db, &cfg).await.unwrap().remove(0);
+    assert_eq!(t.series_id, sid);
+    assert!(demand(&db, &cfg, &t).await.is_ok());
+    // A timestamp in the future wins over an older date-only cache row.
+    sqlx::query("INSERT INTO episode_airings(series_id,episode,airing_at) VALUES(?,1,strftime('%s','now')+3600)")
+        .bind(sid).execute(&db).await.unwrap();
+    assert!(targets(&db, &cfg).await.unwrap().is_empty());
+    assert!(demand(&db, &cfg, &t).await.is_err());
+    sqlx::query("DELETE FROM episode_airings")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM series_episode_metadata")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE series SET format='MOVIE',status='FINISHED',episodes=1 WHERE id=?")
+        .bind(sid)
+        .execute(&db)
+        .await
+        .unwrap();
+    crate::models::monitoring::set_episode_monitored(&db, sid, 2, true)
+        .await
+        .unwrap();
+    let rows = targets(&db, &cfg).await.unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "no inferred episode beyond the finished total"
+    );
+    assert_eq!(rows[0].airing_at, 0);
+    assert!(demand(&db, &cfg, &rows[0]).await.is_ok());
+    sqlx::query("UPDATE series SET status='FINISHED_AIRING',episodes=2 WHERE id=?")
+        .bind(sid)
+        .execute(&db)
+        .await
+        .unwrap();
+    let fallback = targets(&db, &cfg).await.unwrap();
+    assert_eq!(
+        fallback.len(),
+        1,
+        "a movie's second metadata episode is not a second file slot"
+    );
+    assert!(demand(&db, &cfg, &fallback[0]).await.is_ok());
+    sqlx::query("INSERT INTO series_episode_metadata(series_id,episode_number,aired) VALUES(?,1,'2010-01-01')")
+        .bind(sid).execute(&db).await.unwrap();
+    for status in [
+        "NOT_YET_RELEASED",
+        "NOT_YET_AIRED",
+        "UNRELEASED",
+        "UPCOMING",
+    ] {
+        sqlx::query("UPDATE series SET status=? WHERE id=?")
+            .bind(status)
+            .bind(sid)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(targets(&db, &cfg).await.unwrap().is_empty(), "{status}");
+        assert!(demand(&db, &cfg, &rows[0]).await.is_err(), "{status}");
+    }
+}
+
+#[tokio::test]
 async fn settings_round_trip_and_master_hold_work_without_nyaa_rss() {
     let (db, mut cfg, t, _root) = fixture().await;
     cfg.rss_enabled = false;

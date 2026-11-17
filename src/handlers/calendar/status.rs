@@ -173,7 +173,7 @@ pub(super) async fn load(
         if status.kind == "missing" && !recent_episodes::enabled(cfg) {
             status
                 .explanation
-                .push_str(" Automatic recent episode recovery is disabled.");
+                .push_str(" Automatic missing episode recovery is disabled.");
         }
         out.insert(key, status);
     }

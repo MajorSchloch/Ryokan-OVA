@@ -177,11 +177,23 @@ pub(crate) async fn run_recent_missing_target(
         .await
         .map_err(|e| e.to_string())?
         .ok_or("Release metadata is unavailable")?;
+    let search_target = auto_search::SearchTarget::for_episode(&cached.detail, ep);
+    if ep != 1 && matches!(search_target, auto_search::SearchTarget::Single) {
+        return Ok(auto_search::AutoSearchReport {
+            grabbed: Vec::new(),
+            skipped: vec![
+                "Standalone media has one file slot; episode metadata needs review".into(),
+            ],
+            notes: Vec::new(),
+            quality_profile: String::new(),
+            cancelled: false,
+        });
+    }
     run_auto_search_targets_with_upgrades(
         state,
         sid,
         false,
-        vec![auto_search::SearchTarget::for_episode(&cached.detail, ep)],
+        vec![search_target],
         false,
         Some(sid),
         UpgradeContext {
