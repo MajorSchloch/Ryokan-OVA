@@ -35,6 +35,7 @@
                    own E1..EN numbering, so a literal `S01` is
                    meaningless (and misleading when the title
                    already says "4th Season"). #}
+                <div class="calendar-month-entry" data-series-name="{{ ep.search_haystack }}">
                 <a class="calendar-month-pill{% if ep.monitored %} calendar-month-pill-monitored{% else %} calendar-month-pill-unmon{% endif %}{% if ep.episode == 1 %} calendar-month-pill-premiere{% endif %}"
                    href="/series/{{ ep.series_id }}"
                    data-airing-at="{{ ep.airing_at }}"
@@ -49,6 +50,8 @@
                     <span class="calendar-month-pill-title">{{ ep.series_title }}</span>
                     <span class="calendar-month-pill-ep">E{% if ep.episode < 10 %}0{% endif %}{{ ep.episode }}</span>
                 </a>
+                {% include "partials/calendar/status.html" %}
+                </div>
                 {% endfor %}
             </div>
             {% endif %}

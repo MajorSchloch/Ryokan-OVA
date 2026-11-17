@@ -161,10 +161,12 @@ async fn rss_numbering_conflicts_never_reach_the_download_client() {
         .await;
     for provider_conflict in [false, true] {
         let db = in_memory_pool().await;
+        let media = tempfile::tempdir().unwrap();
         ryokan::models::config::save_config(
             &db,
             &ryokan::models::config::Config {
                 rss_enabled: false,
+                media_root: media.path().to_string_lossy().into(),
                 ..Default::default()
             },
         )
@@ -239,10 +241,12 @@ async fn rss_sync_rejects_blocklisted_releases_by_hash_and_by_title() {
         .await;
 
     let db = in_memory_pool().await;
+    let media = tempfile::tempdir().unwrap();
     ryokan::models::config::save_config(
         &db,
         &ryokan::models::config::Config {
             rss_enabled: false,
+            media_root: media.path().to_string_lossy().into(),
             ..Default::default()
         },
     )
@@ -347,10 +351,12 @@ async fn rss_sync_grabs_the_same_items_when_nothing_is_blocklisted() {
         .await;
 
     let db = in_memory_pool().await;
+    let media = tempfile::tempdir().unwrap();
     ryokan::models::config::save_config(
         &db,
         &ryokan::models::config::Config {
             rss_enabled: false,
+            media_root: media.path().to_string_lossy().into(),
             ..Default::default()
         },
     )

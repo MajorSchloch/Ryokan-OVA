@@ -255,6 +255,7 @@ async fn fixture(
     let state = build_state().await;
     let mut cfg = default_config();
     cfg.media_root = temp.path().join("library").to_string_lossy().into();
+    std::fs::create_dir(temp.path().join("library")).unwrap();
     cfg.post_processing_enabled = true;
     cfg.post_processing_mode = "copy".into();
     // This module tests numbering/dispatch/replay; actual language acceptance

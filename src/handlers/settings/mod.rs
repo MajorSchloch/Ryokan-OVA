@@ -610,6 +610,12 @@ pub struct QualityFormPartial {
 /// SettingsTemplate render so progressive enhancement holds.
 #[derive(Deserialize)]
 pub struct GeneralForm {
+    #[serde(default)]
+    recent_episode_search_present: Option<String>,
+    #[serde(default)]
+    recent_episode_search_enabled: Option<String>,
+    #[serde(default)]
+    recent_episode_search_days: Option<i32>,
     media_root: String,
     title_language: String,
     /// The RSS master switch (every source: Nyaa, indexers, direct
@@ -1190,6 +1196,14 @@ pub async fn settings_submit(
         .unwrap_or(false);
 
     let cfg = config::Config {
+        recent_episode_search_enabled: existing_cfg
+            .as_ref()
+            .map(|c| c.recent_episode_search_enabled)
+            .unwrap_or(true),
+        recent_episode_search_days: existing_cfg
+            .as_ref()
+            .map(|c| c.recent_episode_search_days)
+            .unwrap_or(7),
         // Misgrab guardrails: only the General tab owns this checkbox;
         // any other tab's save preserves the stored value.
         misgrab_auto_remove: if form.tab.as_deref() == Some("general") {
@@ -1958,6 +1972,15 @@ pub async fn settings_general_submit(
     // other field copied from existing.
     let form_recycle_bin_path_raw = form.recycle_bin_path.clone();
     let cfg = config::Config {
+        recent_episode_search_enabled: if form.recent_episode_search_present.is_some() {
+            form.recent_episode_search_enabled.is_some()
+        } else {
+            existing_cfg.recent_episode_search_enabled
+        },
+        recent_episode_search_days: form
+            .recent_episode_search_days
+            .unwrap_or(existing_cfg.recent_episode_search_days)
+            .clamp(1, 30),
         media_root: form.media_root.trim().trim_end_matches('/').to_string(),
         title_language: match form.title_language.as_str() {
             "romaji" | "english" | "native" => form.title_language,

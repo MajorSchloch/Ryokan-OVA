@@ -11,7 +11,7 @@
     <p>You don't have any series in your library yet.</p>
     <p><a class="link-accent" href="/">Go to the library</a> to add some.</p>
     {% else %}
-    <p>No saved episodes{% if monitored_only || !search.is_empty() %} match these filters{% endif %} in this date range.</p>
+    <p>No saved episodes{% if monitored_only || !search.is_empty() || status_filter != "all" %} match these filters{% endif %} in this date range.</p>
     <p class="form-hint">Try another date or turn off filters. Older airings may no longer be saved.</p>
     {% endif %}
 </div>
@@ -56,6 +56,7 @@
                     </div>
                 </div>
             </a>
+            {% include "partials/calendar/status.html" %}
         </li>
         {% endfor %}
     </ul>
