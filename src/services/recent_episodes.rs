@@ -1,4 +1,4 @@
-//! Bounded recovery for monitored episodes that have fallen out of current RSS.
+//! Paced recovery for monitored episodes that have fallen out of current RSS.
 //! This worker supplies demand only; the existing search and import gates decide
 //! whether a source is usable. A queued source is never reported as an import.
 use std::collections::HashSet;
@@ -16,6 +16,26 @@ pub const STARTED: &str = "Automatic episode check started";
 pub const FINISHED: &str = "Automatic episode check finished";
 const PASS_LIMIT: usize = 12;
 static RUN_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(Default::default);
+
+// The same airing evidence is used during discovery and immediately before
+// dispatch. Calendar timestamps win over date-only metadata. A finished series
+// establishes that its declared episodes aired even without individual dates;
+// zero represents that evidence, not a fabricated premiere date. Unknown and
+// future episodes remain ineligible. Missing episodes never expire by age.
+const AIRED_TARGETS: &str = "WITH due AS (
+    SELECT s.id AS series_id,s.anilist_id AS provider_id,m.episode_number AS episode,
+      CASE WHEN a.airing_at IS NOT NULL THEN a.airing_at
+           WHEN unixepoch(substr(e.aired,1,10)) IS NOT NULL THEN unixepoch(substr(e.aired,1,10))
+           WHEN s.status IN('FINISHED','FINISHED_AIRING') AND m.episode_number<=s.episodes THEN 0 END AS airing_at,
+      s.folder_name,s.title
+    FROM series s JOIN episode_monitor_state m ON m.series_id=s.id
+    LEFT JOIN episode_airings a ON a.series_id=s.id AND a.episode=m.episode_number
+    LEFT JOIN series_episode_metadata e ON e.series_id=s.id AND e.episode_number=m.episode_number
+    WHERE s.monitor_mode!='none' AND m.monitored=1 AND m.episode_number>0
+      AND s.status NOT IN('NOT_YET_RELEASED','NOT_YET_AIRED','UNRELEASED','UPCOMING')
+      AND s.format IN('TV','TV_SHORT','ONA','OVA','MOVIE','SPECIAL','MUSIC')
+      AND (s.format!='MOVIE' OR m.episode_number=1)
+), aired AS (SELECT * FROM due WHERE airing_at<=unixepoch('now'))";
 
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub(crate) struct Target {
@@ -93,18 +113,14 @@ async fn demand(db: &SqlitePool, cfg: &config::Config, t: &Target) -> Result<(),
     if !enabled(cfg) {
         return Err("Automatic new episode recovery is disabled".into());
     }
-    let wanted: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM series s JOIN episode_monitor_state m ON m.series_id=s.id
-         JOIN episode_airings a ON a.series_id=s.id AND a.episode=m.episode_number
-         WHERE s.id=? AND s.anilist_id=? AND s.monitor_mode!='none' AND m.monitored=1
-         AND m.episode_number=? AND a.airing_at=? AND a.airing_at<=strftime('%s','now')
-         AND a.airing_at>=strftime('%s','now')-? AND s.format IN('TV','TV_SHORT','ONA'))",
-    )
+    let wanted: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "{AIRED_TARGETS} SELECT EXISTS(SELECT 1 FROM aired
+         WHERE series_id=? AND provider_id=? AND episode=? AND airing_at=?)"
+    )))
     .bind(t.series_id)
     .bind(t.provider_id)
     .bind(t.episode)
     .bind(t.airing_at)
-    .bind(i64::from(cfg.recent_episode_search_days.clamp(1, 30)) * 86400)
     .fetch_one(db)
     .await
     .map_err(|e| e.to_string())?;
@@ -240,29 +256,31 @@ impl Demand {
 }
 
 async fn targets(db: &SqlitePool, cfg: &config::Config) -> Result<Vec<Target>, String> {
-    sqlx::query_as(
-        "SELECT s.id AS series_id,s.anilist_id AS provider_id,a.episode,a.airing_at,s.folder_name,s.title
-         FROM episode_airings a JOIN series s ON s.id=a.series_id
-         JOIN episode_monitor_state m ON m.series_id=s.id AND m.episode_number=a.episode
-         WHERE s.monitor_mode!='none' AND m.monitored=1 AND s.format IN('TV','TV_SHORT','ONA')
-         AND a.airing_at<=strftime('%s','now') AND a.airing_at>=strftime('%s','now')-?
-         ORDER BY COALESCE((SELECT MAX(h.id) FROM library_activity h WHERE h.series_id=s.id
-          AND h.provider_id=s.anilist_id AND h.action=? AND json_valid(h.detail)
-          AND json_extract(h.detail,'$.episode')=a.episode),0),a.airing_at DESC,s.id,a.episode",
-    ).bind(i64::from(cfg.recent_episode_search_days.clamp(1,30))*86400).bind(STARTED)
-        .fetch_all(db).await.map_err(|e| e.to_string())
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "{AIRED_TARGETS} SELECT * FROM aired a
+         ORDER BY COALESCE((SELECT MAX(h.id) FROM library_activity h WHERE h.series_id=a.series_id
+          AND h.provider_id=a.provider_id AND h.action=?1 AND json_valid(h.detail)
+          AND json_extract(h.detail,'$.episode')=a.episode),0),
+          CASE WHEN a.airing_at>=unixepoch('now')-?2 THEN 0 ELSE 1 END,
+          a.airing_at DESC,a.series_id,a.episode"
+    )))
+    .bind(STARTED)
+    .bind(i64::from(cfg.recent_episode_search_days.clamp(1, 30)) * 86400)
+    .fetch_all(db)
+    .await
+    .map_err(|e| e.to_string())
 }
 
 pub async fn run_once(state: &AppState) -> Result<String, String> {
     let _run = RUN_LOCK
         .try_lock()
-        .map_err(|_| "Recent episode check is already running")?;
+        .map_err(|_| "Missing episode check is already running")?;
     let cfg = config::get_config(&state.db)
         .await
         .map_err(|e| e.to_string())?
         .ok_or("Settings unavailable")?;
     if !enabled(&cfg) {
-        return Ok("Automatic new episode recovery is disabled".into());
+        return Ok("Automatic missing episode recovery is disabled".into());
     }
     let candidates = targets(&state.db, &cfg).await?;
     let slots = media::library_slots(
@@ -354,7 +372,7 @@ pub async fn run_once(state: &AppState) -> Result<String, String> {
         }
     }
     let summary = format!(
-        "Checked {checked} recent episodes: {queued} queued, {held} held, {errors} errors. Queued releases still require verified import."
+        "Checked {checked} missing episodes: {queued} queued, {held} held, {errors} errors. Queued releases still require verified import."
     );
     if errors > 0 {
         Err(summary)

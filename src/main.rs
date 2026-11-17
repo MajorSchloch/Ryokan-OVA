@@ -1863,14 +1863,14 @@ async fn main() {
                         let Ok(Some(cfg)) = models::config::get_config(&state.db).await else { continue; };
                         let enabled = services::recent_episodes::enabled(&cfg);
                         let _ = models::scheduled_tasks::touch_definition(&state.db, services::recent_episodes::TASK,
-                            "Recent episode recovery", &format!("Every {} minutes; last {} days", cfg.rss_interval_minutes.clamp(1,60), cfg.recent_episode_search_days.clamp(1,30)), enabled).await;
+                            "Missing episode recovery", &format!("Every {} minutes; all aired monitored gaps", cfg.rss_interval_minutes.clamp(1,60)), enabled).await;
                         if !enabled { continue; }
                         // Anchor to the start, rather than adding the search
                         // duration to every interval. Persist across restarts.
                         let elapsed: Option<i64> = sqlx::query_scalar("SELECT (strftime('%s','now')-strftime('%s',last_started_at))/60 FROM scheduled_task_runs WHERE task_key=?")
                             .bind(services::recent_episodes::TASK).fetch_optional(&state.db).await.ok().flatten().flatten();
                         if elapsed.is_some_and(|minutes| minutes < i64::from(cfg.rss_interval_minutes.clamp(1,60))) { continue; }
-                        if models::scheduled_tasks::mark_started(&state.db, services::recent_episodes::TASK,"Checking monitored recent episodes missing on disk").await.is_err() { continue; }
+                        if models::scheduled_tasks::mark_started(&state.db, services::recent_episodes::TASK,"Checking aired monitored episodes missing on disk").await.is_err() { continue; }
                         let outcome = services::recent_episodes::run_once(&state).await;
                         let (status, detail) = match outcome { Ok(detail) => ("ok",detail), Err(error) => ("error",error) };
                         let _ = models::scheduled_tasks::mark_finished(&state.db, services::recent_episodes::TASK,status,&detail).await;
