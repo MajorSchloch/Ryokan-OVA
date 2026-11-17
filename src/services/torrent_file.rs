@@ -191,7 +191,7 @@ fn trackers(bytes: &[u8], pos: usize, depth: usize, out: &mut Vec<String>) -> Op
             return None;
         }
         let parsed = reqwest::Url::parse(tracker).ok()?;
-        if !matches!(parsed.scheme(), "http" | "https" | "udp") {
+        if !matches!(parsed.scheme(), "http" | "https" | "udp" | "ws" | "wss") {
             return None;
         }
         out.push(tracker.to_owned());
@@ -256,6 +256,65 @@ mod tests {
                 .any(|(k, v)| k == "xt" && v == &format!("urn:btih:{hash}"))
         );
         assert!(pairs.iter().any(|(k, v)| k == "tr" && v == tracker));
+    }
+
+    #[test]
+    fn public_http_source_preserves_mixed_websocket_tracker_urls() {
+        let trackers = [
+            "http://tracker.test:7777/announce",
+            "https://tracker.test/announce?key=a%2Fb&pass=x+y",
+            "udp://tracker.test:1337/announce",
+            "ws://tracker.test:8000/announce?key=fixture",
+            "wss://tracker.openwebtorrent.com",
+        ];
+        let mut body = format!(
+            "d8:announce{}:{}13:announce-listl",
+            trackers[0].len(),
+            trackers[0]
+        );
+        for tracker in trackers {
+            body.push_str(&format!("l{}:{tracker}e", tracker.len()));
+        }
+        body.push_str("e4:infod6:lengthi5e4:name5:a.mkv12:piece lengthi16384e6:pieces0:ee");
+
+        let (hash, magnet) = public_magnet_from_bytes(body.as_bytes()).unwrap();
+        assert_eq!(Some(hash.clone()), torrent_info_hash(body.as_bytes()));
+        let parsed = reqwest::Url::parse(&magnet).unwrap();
+        let identities: Vec<_> = parsed
+            .query_pairs()
+            .filter(|(key, _)| key == "xt")
+            .map(|(_, value)| value.into_owned())
+            .collect();
+        assert_eq!(identities, [format!("urn:btih:{hash}")]);
+        let mut retained: Vec<_> = parsed
+            .query_pairs()
+            .filter(|(key, _)| key == "tr")
+            .map(|(_, value)| value.into_owned())
+            .collect();
+        retained.sort();
+        let mut expected = trackers.map(str::to_owned);
+        expected.sort();
+        assert_eq!(retained, expected);
+    }
+
+    #[test]
+    fn public_http_source_still_holds_invalid_or_unsupported_tracker_urls() {
+        for tracker in [
+            "not a URL",
+            "file:///tmp/announce",
+            "ftp://tracker.test/announce",
+        ] {
+            let body = format!(
+                "d8:announce{}:{}4:infod6:lengthi5e4:name5:a.mkvee",
+                tracker.len(),
+                tracker
+            );
+            assert!(
+                public_magnet_from_bytes(body.as_bytes())
+                    .unwrap_err()
+                    .contains("Source tracker metadata cannot be preserved")
+            );
+        }
     }
 
     #[test]
