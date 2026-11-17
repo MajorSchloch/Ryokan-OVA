@@ -155,6 +155,45 @@ async fn bounded_recovery_dispatches_one_missing_episode_once_and_records_the_ou
     assert_eq!(finished, 1);
 }
 #[tokio::test]
+async fn an_old_gap_is_revisited_when_a_suitable_source_appears_later() {
+    let (state, client, _root) = state(0).await;
+    let sources = state.indexers.read().await.clone();
+    *state.indexers.write().await = Arc::new(Vec::new());
+    sqlx::query("UPDATE episode_airings SET airing_at=strftime('%s','now')-400*86400")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let first = run_once(&state).await.unwrap();
+    assert!(first.contains("0 queued"), "{first}");
+    assert_eq!(client.adds.load(Ordering::SeqCst), 0);
+    *state.indexers.write().await = sources;
+    let second = run_once(&state).await.unwrap();
+    assert!(second.contains("1 queued"), "{second}");
+    assert_eq!(client.adds.load(Ordering::SeqCst), 1);
+    let outcomes: Vec<String> = sqlx::query_scalar(
+        "SELECT json_extract(detail,'$.outcome') FROM library_activity WHERE action=? ORDER BY id",
+    )
+    .bind(FINISHED)
+    .fetch_all(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(outcomes, vec!["held", "queued"]);
+    assert!(run_once(&state).await.unwrap().contains("0 queued"));
+    assert_eq!(client.adds.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn standalone_metadata_cannot_redirect_missing_episode_demand_to_another_slot() {
+    let (state, client, _root) = state(0).await;
+    // The saved library row and provider cache disagree. Even with a valid
+    // episode-seven candidate, Single would own episode one, not this demand.
+    sqlx::query("UPDATE series_metadata_cache SET detail_json=json_set(detail_json,'$.format','MOVIE','$.episodes',2)")
+        .execute(&state.db).await.unwrap();
+    assert!(run_once(&state).await.unwrap().contains("0 queued"));
+    assert_eq!(client.adds.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn changes_during_provider_search_and_packs_hold_before_native_add() {
     for mode in [1, 2, 3, 5, 7] {
         let (state, client, _root) = state(mode).await;

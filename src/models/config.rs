@@ -36,6 +36,7 @@ pub struct Config {
     pub retire_unaccepted_sources: bool,
     #[serde(default = "default_recent_episode_search")]
     pub recent_episode_search_enabled: bool,
+    /// Prefer recent airings among equally due missing episodes; never an expiry.
     #[serde(default = "default_recent_episode_days")]
     pub recent_episode_search_days: i32,
     /// Legacy single-client discriminator. Pre-multi-client routing

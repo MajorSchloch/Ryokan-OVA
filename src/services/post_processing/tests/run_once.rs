@@ -2555,7 +2555,12 @@ async fn run_once_imports_the_subtitle_next_to_the_video_when_enabled() {
 #[tokio::test]
 async fn run_once_distinguishes_verified_requirements_from_unreadable_media() {
     let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
-    for dimensions_and_subs in [Some((1920, 1080, false)), Some((854, 480, true)), None] {
+    for (dimensions_and_subs, unknown_audio) in [
+        (Some((1920, 1080, false)), false),
+        (Some((854, 480, true)), false),
+        (None, false),
+        (Some((1920, 1080, true)), true),
+    ] {
         let db = in_memory_pool().await;
         let media_root = tempfile::tempdir().unwrap();
         let source_dir = tempfile::tempdir().unwrap();
@@ -2569,6 +2574,12 @@ async fn run_once_distinguishes_verified_requirements_from_unreadable_media() {
         .execute(&db)
         .await
         .unwrap();
+        if unknown_audio {
+            sqlx::query("UPDATE config SET required_audio_languages='ja'")
+                .execute(&db)
+                .await
+                .unwrap();
+        }
         let sid = seed_series(&db, 1, "Show Title").await;
         let old = media_root
             .path()
@@ -2589,6 +2600,12 @@ async fn run_once_distinguishes_verified_requirements_from_unreadable_media() {
                 "index":0,"codec_type":"video","codec_name":"h264",
                 "width":width,"height":height
             })];
+            if unknown_audio {
+                streams.push(serde_json::json!({
+                    "index":2,"codec_type":"audio","codec_name":"aac",
+                    "tags":{"language":"und"}
+                }));
+            }
             if subtitles {
                 streams.push(serde_json::json!({
                     "index":1,"codec_type":"subtitle","codec_name":"ass",
