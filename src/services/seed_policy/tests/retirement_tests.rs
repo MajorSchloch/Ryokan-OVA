@@ -518,7 +518,7 @@ async fn http_dispatch_reads_once_returns_real_hash_and_forwards_seed_limits() {
     enable(&f).await;
     cache(&f, 480, "jpn", Some("eng")).await;
     retire(&f).await;
-    let tracker = "https://tracker.test/announce";
+    let tracker = "wss://tracker.test/announce?key=a%2Fb&pass=x+y";
     let body = format!(
         "d8:announce{}:{}4:infod6:lengthi5e4:name5:a.mkvee",
         tracker.len(),
@@ -547,10 +547,7 @@ async fn http_dispatch_reads_once_returns_real_hash_and_forwards_seed_limits() {
     assert_eq!(calls[0].1, actual);
     let url = reqwest::Url::parse(&calls[0].0).unwrap();
     assert_eq!(url.scheme(), "magnet");
-    assert!(
-        url.query_pairs()
-            .any(|(k, v)| k == "tr" && v == "https://tracker.test/announce")
-    );
+    assert!(url.query_pairs().any(|(k, v)| k == "tr" && v == tracker));
     client
         .set_seed_rules(
             &actual,
