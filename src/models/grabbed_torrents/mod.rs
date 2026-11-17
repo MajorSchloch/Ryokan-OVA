@@ -2297,7 +2297,7 @@ pub async fn is_blocklisted_release(
     .fetch_one(db)
     .await
     .map(|n| n > 0)
-    .unwrap_or(false)
+    .unwrap_or(true)
 }
 
 /// One read of the blocklist for a whole search: every failed hash, plus

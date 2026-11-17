@@ -69,14 +69,20 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(db).await?;
     Ok(())
 }
-pub async fn append(db: &SqlitePool, mut event: Event) {
+pub async fn append(db: &SqlitePool, event: Event) {
+    let key = event.key.clone();
+    if let Err(error) = try_append(db, event).await {
+        tracing::error!(%error,operation=%key,"Could not record library activity");
+    }
+}
+
+pub(crate) async fn try_append(db: &SqlitePool, mut event: Event) -> Result<bool, sqlx::Error> {
     if event.franchise_id.is_none() {
         event.capture_parent(db).await;
     }
-    if let Err(error)=sqlx::query("INSERT OR IGNORE INTO library_activity(operation_key,action,series_id,provider_id,franchise_id,title,reason,detail,note,grab_id,recycle_entry_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
-        .bind(&event.key).bind(&event.action).bind(event.series_id).bind(event.provider_id).bind(&event.franchise_id).bind(&event.title).bind(&event.reason).bind(&event.detail).bind(event.note.trim()).bind(event.grab_id).bind(&event.recycle_entry_id).execute(db).await {
-        tracing::error!(%error,operation=%event.key,"Could not record library activity");
-    }
+    let result = sqlx::query("INSERT OR IGNORE INTO library_activity(operation_key,action,series_id,provider_id,franchise_id,title,reason,detail,note,grab_id,recycle_entry_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+        .bind(&event.key).bind(&event.action).bind(event.series_id).bind(event.provider_id).bind(&event.franchise_id).bind(&event.title).bind(&event.reason).bind(&event.detail).bind(event.note.trim()).bind(event.grab_id).bind(&event.recycle_entry_id).execute(db).await?;
+    Ok(result.rows_affected() == 1)
 }
 
 pub async fn recent(

@@ -714,6 +714,9 @@ mod non_htmx_path {
             State(state),
             HxRequest(false),
             axum::Form(GeneralForm {
+                recent_episode_search_present: Some("1".into()),
+                recent_episode_search_enabled: None,
+                recent_episode_search_days: Some(14),
                 media_root: "/submit/media".to_string(),
                 title_language: "romaji".to_string(),
                 rss_master_enabled: None,      // submit→false, seed=true
@@ -756,6 +759,8 @@ mod non_htmx_path {
         assert_eq!(saved.media_root, "/submit/media");
         assert_eq!(saved.title_language, "romaji");
         assert!(!saved.rss_master_enabled);
+        assert!(!saved.recent_episode_search_enabled);
+        assert_eq!(saved.recent_episode_search_days, 14);
         assert!(saved.rss_enabled, "Nyaa-card fields are preserved");
         assert_eq!(saved.rss_interval_minutes, 45);
         assert!(!saved.disable_nyaa_rss, "Nyaa-card fields are preserved");
@@ -1005,6 +1010,9 @@ mod non_htmx_path {
         seed_initial_config(&db).await;
         let state = build_test_app_state(db.clone(), None);
         let form = |checked: bool| GeneralForm {
+            recent_episode_search_present: None,
+            recent_episode_search_enabled: None,
+            recent_episode_search_days: None,
             media_root: String::new(),
             title_language: "english".to_string(),
             rss_master_enabled: None,
@@ -1055,6 +1063,9 @@ mod non_htmx_path {
         seed_initial_config(&db).await;
         let state = build_test_app_state(db.clone(), None);
         let form = |hours: i64| GeneralForm {
+            recent_episode_search_present: None,
+            recent_episode_search_enabled: None,
+            recent_episode_search_days: None,
             media_root: String::new(),
             title_language: "english".to_string(),
             rss_master_enabled: None,
@@ -1102,6 +1113,9 @@ mod non_htmx_path {
             State(state),
             HxRequest(true),
             axum::Form(GeneralForm {
+                recent_episode_search_present: None,
+                recent_episode_search_enabled: None,
+                recent_episode_search_days: None,
                 media_root: String::new(),
                 title_language: "english".to_string(),
                 rss_master_enabled: None,
@@ -1151,6 +1165,9 @@ mod non_htmx_path {
             State(state),
             HxRequest(true),
             axum::Form(GeneralForm {
+                recent_episode_search_present: None,
+                recent_episode_search_enabled: None,
+                recent_episode_search_days: None,
                 media_root: "/nonexistent-test-path-9b3a2".to_string(),
                 title_language: "english".to_string(),
                 rss_master_enabled: None,
@@ -1203,6 +1220,9 @@ mod non_htmx_path {
             State(state),
             HxRequest(true),
             axum::Form(GeneralForm {
+                recent_episode_search_present: None,
+                recent_episode_search_enabled: None,
+                recent_episode_search_days: None,
                 media_root: path.clone(),
                 title_language: "english".to_string(),
                 rss_master_enabled: None,
@@ -1265,6 +1285,9 @@ mod non_htmx_path {
             State(state),
             HxRequest(true),
             axum::Form(GeneralForm {
+                recent_episode_search_present: None,
+                recent_episode_search_enabled: None,
+                recent_episode_search_days: None,
                 media_root: String::new(),
                 title_language: "english".to_string(),
                 rss_master_enabled: None,
@@ -1309,6 +1332,9 @@ mod non_htmx_path {
             State(state),
             HxRequest(true),
             axum::Form(GeneralForm {
+                recent_episode_search_present: None,
+                recent_episode_search_enabled: None,
+                recent_episode_search_days: None,
                 media_root: String::new(),
                 title_language: "klingon".to_string(),
                 rss_master_enabled: None,
@@ -1731,6 +1757,9 @@ mod non_htmx_path {
             State(general_state),
             HxRequest(false),
             axum::Form(GeneralForm {
+                recent_episode_search_present: None,
+                recent_episode_search_enabled: None,
+                recent_episode_search_days: None,
                 media_root: String::new(),
                 title_language: "romaji".to_string(),
                 rss_master_enabled: None,
@@ -1814,6 +1843,9 @@ mod non_htmx_path {
             State(state),
             HxRequest(false),
             axum::Form(GeneralForm {
+                recent_episode_search_present: None,
+                recent_episode_search_enabled: None,
+                recent_episode_search_days: None,
                 media_root: String::new(),
                 title_language: "english".to_string(),
                 rss_master_enabled: None,
@@ -1875,6 +1907,9 @@ mod naming_templates {
 
     fn form(series: &str, season: &str, episode: &str) -> GeneralForm {
         GeneralForm {
+            recent_episode_search_present: None,
+            recent_episode_search_enabled: None,
+            recent_episode_search_days: None,
             media_root: "/media".to_string(),
             title_language: "english".to_string(),
             rss_master_enabled: None,
@@ -1900,6 +1935,42 @@ mod naming_templates {
             backup_retention_count: 7,
             backup_include_artwork: None,
         }
+    }
+
+    #[tokio::test]
+    async fn stale_general_form_preserves_recovery_and_present_checkbox_changes_it() {
+        let db = in_memory_pool().await;
+        let cfg = config::Config {
+            recent_episode_search_enabled: false,
+            recent_episode_search_days: 21,
+            ..Default::default()
+        };
+        config::save_config(&db, &cfg).await.unwrap();
+        let state = build_test_app_state(db.clone(), None);
+        settings_general_submit(
+            State(state.clone()),
+            HxRequest(true),
+            axum::Form(form("", "", "")),
+        )
+        .await;
+        let saved = config::get_config(&db).await.unwrap().unwrap();
+        assert!(!saved.recent_episode_search_enabled);
+        assert_eq!(saved.recent_episode_search_days, 21);
+        let mut submitted = form("", "", "");
+        submitted.recent_episode_search_present = Some("1".into());
+        submitted.recent_episode_search_enabled = Some("on".into());
+        submitted.recent_episode_search_days = Some(99);
+        settings_general_submit(State(state), HxRequest(true), axum::Form(submitted)).await;
+        let saved = config::get_config(&db).await.unwrap().unwrap();
+        assert!(saved.recent_episode_search_enabled);
+        assert_eq!(saved.recent_episode_search_days, 30);
+        assert!(
+            crate::models::grabbed_torrents::get_all_pending(&db)
+                .await
+                .unwrap()
+                .is_empty(),
+            "Saving settings must not acquire anything"
+        );
     }
 
     #[tokio::test]

@@ -130,7 +130,10 @@
         </div>
 
         <div class="cf-section">
-            <h3>RSS</h3>
+            <h3>Automatic new episodes</h3>
+            <input type="hidden" name="recent_episode_search_present" value="1">
+            <div class="setting-rows"><label class="setting-row"><span class="setting-row-text"><span class="setting-row-title">Recover missed recent episodes</span><span class="setting-row-desc">Search for aired, monitored episodes that are still missing, even after their releases leave RSS. Uses your requirements, source blocks and retry limits. Each check is recorded in Activity.</span></span><input type="checkbox" name="recent_episode_search_enabled" {% if config.recent_episode_search_enabled %}checked{% endif %}></label></div>
+            <div class="form-group"><label for="recent_episode_search_days">Recent episode window (days)</label><input type="number" min="1" max="30" id="recent_episode_search_days" name="recent_episode_search_days" value="{{ config.recent_episode_search_days }}"><span class="form-hint">Default: 7 days. Checks use the interval below, with one bounded pass at a time. Turn off automatic RSS sync to hold all automatic new-episode checks.</span></div>
             <div class="setting-rows">
                 <label class="setting-row">
                     <span class="setting-row-text">

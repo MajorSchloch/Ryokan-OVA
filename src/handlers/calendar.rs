@@ -28,7 +28,7 @@
 //! - `DTSTART` / `DTEND`: from `airing_at` + `duration_minutes`.
 //! - `UID`: `ryokan-<series_id>-<episode>@ryokan.local` — stable
 //!   across feed fetches so calendar clients dedupe.
-//! - `DESCRIPTION`: monitoring state + grabbed status.
+//! - `DESCRIPTION`: monitoring state and provider identity.
 //! - `URL`: deep link back to `/series/{id}` on the request's host
 //!   (best-effort; falls back to a relative URL if the host can't
 //!   be resolved).
@@ -51,6 +51,7 @@
 
 pub mod discovery;
 mod navigation;
+mod status;
 
 use askama::Template;
 use axum::{
@@ -169,12 +170,14 @@ struct CalendarPageTemplate {
     navigation: Navigation,
     search: String,
     load_failed: bool,
+    status_filter: String,
 }
 
 /// Per-episode template input. Pre-formats per-day-grouping
 /// fields so the client doesn't have to re-derive them.
 #[derive(Debug, Clone, Serialize)]
 pub struct EpisodeView {
+    status: status::EpisodeStatus,
     pub series_id: i64,
     pub series_title: String,
     pub cover_url: String,
@@ -281,15 +284,26 @@ pub async fn page(
     // month so the rendered grid is always a clean rectangle.
     let (from, to) = (navigation.from, navigation.to);
 
-    let fetched = calendar::fetch_upcoming(&state.db, &cfg, from, to, monitored_only).await;
+    // Exact monitoring can depend on a file or explicit episode override.
+    // Enrich first, then apply the monitored and availability filters.
+    let fetched = calendar::fetch_upcoming(&state.db, &cfg, from, to, false).await;
     let load_failed = fetched.is_err();
-    let episodes = fetched.unwrap_or_default();
+    let mut episodes = fetched.unwrap_or_default();
+    let statuses = status::load(&state.db, &cfg, &mut episodes, now_utc.timestamp())
+        .await
+        .unwrap_or_default();
+    let status_filter = status::filter(params.context.get("status")).to_string();
 
     let library_is_empty = library_has_no_positive_al_series(&state.db).await;
 
     let episode_views: Vec<EpisodeView> = episodes
         .into_iter()
+        .filter(|e| !monitored_only || e.monitored)
         .map(|e| EpisodeView {
+            status: statuses
+                .get(&(e.series_id, e.episode))
+                .cloned()
+                .unwrap_or_default(),
             series_id: e.series_id,
             series_title: e.series_title,
             cover_url: e.cover_url,
@@ -298,6 +312,7 @@ pub async fn page(
             monitored: e.monitored,
             search_haystack: e.search_haystack,
         })
+        .filter(|e| status_filter == "all" || e.status.kind == status_filter)
         .collect();
 
     let (day_buckets, month_grid) = if view_mode == "grid" {
@@ -331,6 +346,7 @@ pub async fn page(
             monitored_only,
             search,
             load_failed,
+            status_filter,
         };
         return Html(partial.render().unwrap_or_default());
     }
@@ -351,6 +367,7 @@ pub async fn page(
         navigation,
         search,
         load_failed,
+        status_filter,
     };
     Html(tmpl.render().unwrap_or_default())
 }
@@ -358,6 +375,7 @@ pub async fn page(
 #[derive(Template)]
 #[template(path = "partials/calendar/body.html")]
 struct CalendarBodyPartial {
+    status_filter: String,
     day_buckets: Vec<DayBucket>,
     library_is_empty: bool,
     month_grid: MonthGrid,
@@ -748,6 +766,9 @@ fn etag_for(episodes: &[UpcomingEpisode]) -> String {
         e.series_id.hash(&mut hasher);
         e.episode.hash(&mut hasher);
         e.airing_at.hash(&mut hasher);
+        e.monitored.hash(&mut hasher);
+        e.series_title.hash(&mut hasher);
+        e.duration_minutes.hash(&mut hasher);
     }
     format!("\"{:x}\"", hasher.finish())
 }
@@ -885,6 +906,23 @@ mod tests {
     }
 
     #[test]
+    fn etag_changes_when_monitoring_or_exported_metadata_changes() {
+        let original = ep(1, 1, 1, 1_700_000_000, true);
+        let mut changed = original.clone();
+        changed.monitored = false;
+        assert_ne!(
+            etag_for(std::slice::from_ref(&original)),
+            etag_for(&[changed])
+        );
+        let mut changed = original.clone();
+        changed.series_title = "Renamed".into();
+        assert_ne!(
+            etag_for(std::slice::from_ref(&original)),
+            etag_for(&[changed])
+        );
+    }
+
+    #[test]
     fn description_text_escape_handles_special_chars() {
         let escaped = escape_ical_text("a, b; c\\d\nE");
         assert_eq!(escaped, "a\\, b\\; c\\\\d\\nE");
@@ -942,6 +980,7 @@ mod tests {
 
     fn ev(series_id: i64, episode: i32, airing_at: i64, monitored: bool) -> EpisodeView {
         EpisodeView {
+            status: status::EpisodeStatus::default(),
             series_id,
             series_title: "Test".to_string(),
             cover_url: String::new(),

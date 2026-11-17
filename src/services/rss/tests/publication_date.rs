@@ -12,7 +12,7 @@ use std::sync::{
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-struct NoPayloadClient(AtomicUsize);
+pub(super) struct NoPayloadClient(pub(super) AtomicUsize);
 #[async_trait]
 impl DownloadClient for NoPayloadClient {
     async fn test(&self) -> Result<String, String> {
