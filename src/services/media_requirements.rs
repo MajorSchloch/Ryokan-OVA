@@ -218,11 +218,31 @@ impl Policy {
         Ok(())
     }
 
-    /// Only a successfully inspected file that fails an active content rule
-    /// justifies searching another release. Invalid settings and unknown
-    /// video facts must stay available for review instead of causing retries.
+    /// Whether observed content conclusively fails an active rule. Unknown
+    /// declared audio stays unverified in source/seeding reviews.
     pub fn minimum_failure_is_content_rejection(&self, info: &MediaInfo) -> bool {
-        if self.enabled && !self.valid() {
+        self.minimum_failure(info, false)
+    }
+
+    /// A readable file without the required declared audio is unsuitable for
+    /// automatic import, even if its actual language remains unknown. It can
+    /// justify trying another source without guessing or accepting its audio.
+    /// Probe, configuration and unknown video failures still require review.
+    pub fn minimum_failure_allows_retry(&self, info: &MediaInfo) -> bool {
+        self.minimum_failure(info, true)
+    }
+
+    fn minimum_failure(&self, info: &MediaInfo, allow_undeclared_audio: bool) -> bool {
+        let observed = self.observe(info);
+        if (self.enabled && !self.valid())
+            || observed.resolution == Resolution::Unknown
+            || ((!self.enabled || self.minimum_subtitle_check || self.target_subtitle_check)
+                && (!matches!(self.language_match.as_str(), "all" | "any")
+                    || self
+                        .required_languages
+                        .iter()
+                        .any(|language| media_info::normalize_language(language).is_none())))
+        {
             return false;
         }
         if !self.required_audio_languages.is_empty() {
@@ -239,23 +259,14 @@ impl Policy {
             {
                 return false;
             }
-            if !audio.satisfied && info.audio.iter().all(|stream| stream.language.is_some()) {
+            if !audio.satisfied
+                && (allow_undeclared_audio
+                    || info.audio.iter().all(|stream| stream.language.is_some()))
+            {
                 return true;
             }
         }
-        if !self.enabled
-            || !self.valid()
-            || ((self.minimum_subtitle_check || self.target_subtitle_check)
-                && (!matches!(self.language_match.as_str(), "all" | "any")
-                    || self
-                        .required_languages
-                        .iter()
-                        .any(|language| media_info::normalize_language(language).is_none())))
-        {
-            return false;
-        }
-        let observed = self.observe(info);
-        if observed.resolution == Resolution::Unknown {
+        if !self.enabled || !self.valid() {
             return false;
         }
         if observed.resolution.rank() < self.minimum_resolution.rank() {
@@ -685,6 +696,70 @@ mod tests {
             assert!(p.minimum_failure_is_content_rejection(&sidecar), "{status}");
         }
     }
+    #[test]
+    fn missing_declared_audio_can_retry_without_guessing_or_relaxing_requirements() {
+        let info = |languages: &[Option<&str>], width| {
+            let mut streams = vec![
+                serde_json::json!({
+                    "codec_type":"video","width":width,"height":1080
+                }),
+                serde_json::json!({
+                    "codec_type":"subtitle","codec_name":"ass","tags":{"language":"eng"}
+                }),
+            ];
+            streams.extend(languages.iter().map(|language| {
+                serde_json::json!({
+                    "codec_type":"audio","codec_name":"aac","channels":2,
+                    "tags":{"language":language}
+                })
+            }));
+            media_info::parse_probe_json(
+                &serde_json::json!({"streams":streams}).to_string(),
+                media_info::FileIdentity {
+                    size: 1,
+                    mtime_ns: "1".into(),
+                    device: None,
+                    inode: None,
+                },
+                false,
+            )
+            .unwrap()
+        };
+        for enabled in [true, false] {
+            let p = Policy::from_config(&Config {
+                media_requirements_enabled: enabled,
+                required_audio_languages: "ja".into(),
+                required_subtitle_languages: "en".into(),
+                ..Default::default()
+            });
+            for languages in [vec![], vec![None], vec![Some("und")], vec![Some("spa")]] {
+                let missing = info(&languages, 1920);
+                assert!(p.validate_minimum(&missing).is_err());
+                assert!(!p.minimum_met(&p.observe(&missing)));
+                assert!(!p.target_met(&p.observe(&missing)));
+                assert!(p.minimum_failure_allows_retry(&missing));
+                assert!(!p.minimum_failure_allows_retry(&info(&languages, 0)));
+                if languages.iter().any(|l| l.is_none() || *l == Some("und")) {
+                    assert!(!p.minimum_failure_is_content_rejection(&missing));
+                }
+            }
+            let valid = info(&[Some("jpn"), None], 1920);
+            assert!(p.validate_minimum(&valid).is_ok());
+            assert!(!p.minimum_failure_allows_retry(&valid));
+            let missing = info(&[None], 1920);
+            for invalid in ["audio_code", "audio_mode", "subtitle_code", "subtitle_mode"] {
+                let mut bad = p.clone();
+                match invalid {
+                    "audio_code" => bad.required_audio_languages = vec!["invalid".into()],
+                    "audio_mode" => bad.audio_language_match = "invalid".into(),
+                    "subtitle_code" => bad.required_languages = vec!["invalid".into()],
+                    _ => bad.language_match = "invalid".into(),
+                }
+                assert!(!bad.minimum_failure_allows_retry(&missing), "{invalid}");
+            }
+        }
+    }
+
     #[test]
     fn explicit_hardsub_cannot_justify_a_subtitle_only_download() {
         let p = policy();

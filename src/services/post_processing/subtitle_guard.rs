@@ -14,8 +14,9 @@ use crate::services::recycle;
 
 use super::{do_file_op, extras};
 
-/// Only a confirmed content mismatch gets this tag. Probe, configuration,
-/// staging and rollback errors must remain reviewable import failures.
+/// A readable source that cannot meet the configured content rules gets this
+/// tag, including absent required language declarations. Probe, configuration,
+/// staging and rollback errors remain reviewable import failures.
 const CONTENT_REJECTION_PREFIX: &str = "Media rejected: ";
 
 pub(crate) fn is_content_rejection(reason: &str) -> bool {
@@ -70,7 +71,7 @@ pub(crate) async fn prepare(
         .await
         .map_err(|e| format!("Subtitle requirement: {e}"))?;
     policy.validate_minimum(&info).map_err(|reason| {
-        if policy.minimum_failure_is_content_rejection(&info) {
+        if policy.minimum_failure_allows_retry(&info) {
             format!("{CONTENT_REJECTION_PREFIX}{reason}")
         } else {
             reason
@@ -513,10 +514,9 @@ mod tests {
             } else {
                 let reason = result.unwrap_err();
                 assert!(reason.contains("audio"), "{reason}");
-                assert_eq!(
+                assert!(
                     is_content_rejection(&reason),
-                    language != "und",
-                    "unknown tags need review, not a guessed rejection"
+                    "a successful probe must declare the required dialogue language"
                 );
                 assert_eq!(
                     tokio::fs::read_to_string(&old).await.unwrap(),
