@@ -84,6 +84,7 @@ mod shim_search_queue_tests {
     }
 }
 
+pub(crate) use auto_search::run_recent_missing_target;
 pub(crate) use auto_search::series_still_in_library;
 pub use auto_search::{
     __path_auto_search_episode, __path_auto_search_series, AutoSearchQuery, auto_search_episode,

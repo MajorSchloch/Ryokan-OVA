@@ -117,10 +117,12 @@ async fn sync_with_seadex(seadex_enabled: bool) -> Vec<String> {
         .await;
 
     let db = in_memory_pool().await;
+    let media = tempfile::tempdir().unwrap();
     ryokan::models::config::save_config(
         &db,
         &ryokan::models::config::Config {
             rss_enabled: false,
+            media_root: media.path().to_string_lossy().into(),
             seadex_enabled,
             preferred_resolution: "1080".to_string(),
             ..Default::default()

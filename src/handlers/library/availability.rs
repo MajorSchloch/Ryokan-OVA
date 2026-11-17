@@ -116,7 +116,7 @@ fn next_label(
     )
 }
 
-fn is_monitored(
+pub(crate) fn is_monitored(
     row: &series::Series,
     explicit: Option<bool>,
     have: bool,

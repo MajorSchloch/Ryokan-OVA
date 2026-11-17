@@ -153,11 +153,52 @@ pub async fn run_auto_search_targets(
     .await
 }
 
+/// Recent-episode recovery is demand for one missing slot, never permission
+/// to replace a file, widen a pack, or resume an existing client job.
+pub(crate) async fn run_recent_missing_target(
+    state: &AppState,
+    target: crate::services::recent_episodes::Target,
+) -> Result<auto_search::AutoSearchReport, String> {
+    let sid = target.series_id;
+    let ep = target.episode;
+    let demand = match crate::services::recent_episodes::Demand::capture(state, target).await {
+        Ok(demand) => demand,
+        Err(reason) => {
+            return Ok(auto_search::AutoSearchReport {
+                grabbed: Vec::new(),
+                skipped: vec![reason],
+                notes: Vec::new(),
+                quality_profile: String::new(),
+                cancelled: false,
+            });
+        }
+    };
+    let cached = crate::models::metadata_cache::get_by_series_id(&state.db, sid)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("Release metadata is unavailable")?;
+    run_auto_search_targets_with_upgrades(
+        state,
+        sid,
+        false,
+        vec![auto_search::SearchTarget::for_episode(&cached.detail, ep)],
+        false,
+        Some(sid),
+        UpgradeContext {
+            recent_demand: Some(demand),
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|(_, reason)| reason)
+}
+
 /// What the upgrade half of a search needs to judge a found release
 /// against the file on disk, built by the handler that scanned the
 /// series folder; empty for a search with no upgrade targets.
 #[derive(Default)]
 pub(crate) struct UpgradeContext {
+    pub recent_demand: Option<crate::services::recent_episodes::Demand>,
     /// The existing classification per upgrade-target episode.
     pub classifications:
         std::collections::HashMap<i32, crate::services::source::ClassificationResult>,
@@ -353,7 +394,7 @@ async fn run_auto_search_targets_with_upgrades(
     // qBit's `add_torrent` (which reports success on the URL fetch
     // but never produces an infohash → grab row lands with `hash=""`
     // → reconcile loop marks it removed after 30s).
-    if state.default_download_client().await.is_none() {
+    if state.download_clients.read().await.clients.is_empty() {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
             "Download client not configured".to_string(),
@@ -379,6 +420,7 @@ async fn run_auto_search_targets_with_upgrades(
     // Every automatic entry point, including the per-episode button, reads
     // the same actual files. An empty caller context must not bypass targets.
     if requirements.enabled
+        && upgrades.recent_demand.is_none()
         && let Some(tracked) = &tracked
     {
         if !upgrades.requirements_loaded {
@@ -582,6 +624,16 @@ async fn run_auto_search_targets_with_upgrades(
         let eligible =
             |result: &crate::services::nyaa::SearchResult,
              incoming: &crate::services::source::ClassificationResult| {
+                if upgrades.recent_demand.is_some()
+                    && (crate::services::upgrade::release_covers_multiple(result)
+                        || result.replay_episodes.is_some()
+                        || result.release_mapping.as_ref().is_some_and(|mapping| {
+                            mapping.bound_source().is_some()
+                                || mapping.episodes() != vec![target_episode]
+                        }))
+                {
+                    return false;
+                }
                 if !requirements.enabled {
                     return true;
                 }
@@ -722,7 +774,8 @@ async fn run_auto_search_targets_with_upgrades(
                         continue;
                     }
                 }
-                let wants_selective = !result.info_hash.is_empty()
+                let wants_selective = upgrades.recent_demand.is_none()
+                    && !result.info_hash.is_empty()
                     && auto_search::has_selective_discriminator(&detail);
                 let url = if wants_selective && !result.torrent.is_empty() {
                     result.torrent.clone()
@@ -743,11 +796,68 @@ async fn run_auto_search_targets_with_upgrades(
                 // the resolved client + the persisted dispatch id so
                 // the grab row can stamp `download_client_id` for
                 // delete-routing later.
-                let (qbit, dispatch_client_id) =
-                    match state.client_for_indexer_with_id(result.indexer_id).await {
-                        Some(pair) => pair,
-                        None => {
-                            logger::warn(
+                // Serialize automatic commits with RSS, then re-read demand.
+                // Searches remain outside this lock so a slow provider cannot
+                // prevent timely RSS polls.
+                let _dispatch = if series_id.is_some() {
+                    Some(crate::services::rss::RSS_SYNC_LOCK.lock().await)
+                } else {
+                    None
+                };
+                let _post_processing = crate::services::post_processing::POST_PROC_LOCK
+                    .lock()
+                    .await;
+                let _config = crate::handlers::settings::CONFIG_WRITE_LOCK.lock().await;
+                if let Some(demand) = &upgrades.recent_demand {
+                    if let Err(reason) = demand.recheck(state).await {
+                        skipped.push(format!("{label}: {reason}"));
+                        continue;
+                    }
+                } else if !is_upgrade && let Some(sid) = series_id {
+                    match crate::services::recent_episodes::has_pending(
+                        &state.db,
+                        sid,
+                        target_episode,
+                    )
+                    .await
+                    {
+                        Ok(false) => {}
+                        Ok(true) => {
+                            skipped
+                                .push(format!("{label}: a download or import is already pending"));
+                            continue;
+                        }
+                        Err(reason) => {
+                            skipped.push(format!(
+                                "{label}: pending ownership could not be checked: {reason}"
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                if upgrades.recent_demand.is_some()
+                    && let Some(id) = result.indexer_id
+                    && !state
+                        .indexers
+                        .read()
+                        .await
+                        .iter()
+                        .any(|indexer| indexer.id() == id)
+                {
+                    skipped.push(format!("{label}: search source was disabled or removed"));
+                    continue;
+                }
+                let routed = if upgrades.recent_demand.is_some() && result.indexer_id.is_none() {
+                    state
+                        .client_for_nyaa_with_id(cfg.nyaa_download_client_id)
+                        .await
+                } else {
+                    state.client_for_indexer_with_id(result.indexer_id).await
+                };
+                let (qbit, dispatch_client_id) = match routed {
+                    Some(pair) => pair,
+                    None => {
+                        logger::warn(
                             &state.db,
                             LogCategory::AutoSearch,
                             &format!(
@@ -757,10 +867,34 @@ async fn run_auto_search_targets_with_upgrades(
                             &result.title,
                         )
                         .await;
-                            skipped.push(format!("{}: no download client for indexer", label));
-                            continue;
-                        }
+                        skipped.push(format!("{}: no download client for indexer", label));
+                        continue;
+                    }
+                };
+                if upgrades.recent_demand.is_some() {
+                    let protocol = match result.indexer_id {
+                        None => "torrent".to_string(),
+                        Some(id) => crate::models::indexers::get_by_id(&state.db, id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|i| {
+                                if i.kind == "newznab" {
+                                    "usenet"
+                                } else {
+                                    "torrent"
+                                }
+                                .to_string()
+                            })
+                            .unwrap_or_default(),
                     };
+                    if protocol != qbit.protocol() {
+                        skipped.push(format!(
+                            "{label}: no enabled download client for this source protocol"
+                        ));
+                        continue;
+                    }
+                }
                 if url.is_empty() {
                     logger::warn(
                         &state.db,
@@ -806,7 +940,22 @@ async fn run_auto_search_targets_with_upgrades(
                     ));
                     continue;
                 }
+                if let Some(sid) = series_id
+                    && crate::models::grabbed_torrents::is_blocklisted_release(
+                        &state.db,
+                        sid,
+                        &result.info_hash,
+                        &result.title,
+                    )
+                    .await
+                {
+                    skipped.push(format!(
+                        "{label}: this exact source was excluded after discovery"
+                    ));
+                    continue;
+                }
                 let mut bound_prepared = None;
+                let mut existing_recent = false;
                 let selective_outcome: Result<(Option<Vec<usize>>, String), String> =
                     if let Some(mapping) = result
                         .release_mapping
@@ -865,8 +1014,17 @@ async fn run_auto_search_targets_with_upgrades(
                     } else {
                         qbit.add_torrent_returning_id(&url, &result.info_hash)
                             .await
-                            .map(|(_, hash)| (None, hash))
+                            .map(|(outcome, hash)| {
+                                existing_recent = upgrades.recent_demand.is_some()
+                                && outcome
+                                    == crate::services::download_client::AddOutcome::AlreadyPresent;
+                                (None, hash)
+                            })
                     };
+                if existing_recent {
+                    skipped.push(format!("{label}: source already exists in the client; its ownership and selection were preserved"));
+                    continue;
+                }
                 match selective_outcome {
                     Ok((kept, effective_hash)) => {
                         let selective_suffix = match (&kept, wants_selective) {
@@ -1408,6 +1566,7 @@ pub async fn auto_search_series(
     // classification per target, plus the tag rows and disk files the
     // policy gate reads the revision, group, and score from.
     let upgrades = UpgradeContext {
+        recent_demand: None,
         classifications: upgrade_targets
             .into_iter()
             .filter_map(|(t, classification)| match t {

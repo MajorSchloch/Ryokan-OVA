@@ -25,14 +25,18 @@ The page shows the time of the last successful refresh. If a refresh fails, Ryok
 - The series cover thumbnail and title.
 - The episode number (E01, E02, ...). Each anime "season" in Ryokan is its own series with its own E1, E2 numbering, so an episode of *Re:Zero 4th Season* shows as E01 of that series, not S04E01 of the franchise.
 - A **Premiere** badge (in the list) or a small **★** (in the grid) on E01 of any series, so you can spot where a new cour starts.
-- Whether the series is **Monitored**. This is the same flag the rest of Ryokan uses to decide whether to grab episodes for it.
+- Whether the episode is **Monitored**, including individual episode overrides.
+- **Available**, **Download / import pending**, **Missing**, **Upcoming**, **Unmonitored**, or **Unknown**. Select the label for its explanation and the last recorded automatic check.
+
+Available means a managed library file covers the episode. It does not claim that the file passed its language or quality checks. Missing requires an aired, monitored episode, a complete file scan, and no pending download. An unavailable library mount shows Unknown. Browsing does not start searches or media probes.
 
 Click an episode to jump to its series page.
 
 ## Filtering
 
 - **Search**: type into the box to filter the list down. The search matches across all the title variants Ryokan knows about (romaji, English, native), so "attack on titan" finds *Shingeki no Kyojin* even if your title language is set to romaji.
-- **Monitored only**: hide series Ryokan isn't tracking. Useful when your library has both actively-monitored shows and stuff you've added but turned monitoring off for.
+- **Monitored only**: show monitored episodes, including individual overrides.
+- **Availability**: show one file status, such as Missing or Download / import pending. It works with search, date navigation, and browser Back and Forward.
 
 ## Subscribing from your calendar app
 

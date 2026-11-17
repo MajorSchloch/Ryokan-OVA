@@ -14,7 +14,17 @@
     </div>
     <form class="calendar-date-form" action="/calendar" method="get" hx-get="/calendar" hx-target="#calendar-list" hx-swap="innerHTML" hx-push-url="true">
         <input type="hidden" name="range" value="{{ navigation.range }}">
-        {% for parameter in navigation.parameters %}<input type="hidden" name="{{ parameter.name }}" value="{{ parameter.value }}">{% endfor %}
+        {% for parameter in navigation.parameters %}{% if parameter.name != "status" %}<input type="hidden" name="{{ parameter.name }}" value="{{ parameter.value }}">{% endif %}{% endfor %}
+        <label for="calendar-status">Availability</label>
+        <select id="calendar-status" name="status">
+            <option value="all" {% if status_filter == "all" %}selected{% endif %}>All episodes</option>
+            <option value="available" {% if status_filter == "available" %}selected{% endif %}>Available</option>
+            <option value="pending" {% if status_filter == "pending" %}selected{% endif %}>Download / import pending</option>
+            <option value="missing" {% if status_filter == "missing" %}selected{% endif %}>Missing</option>
+            <option value="upcoming" {% if status_filter == "upcoming" %}selected{% endif %}>Upcoming</option>
+            <option value="unmonitored" {% if status_filter == "unmonitored" %}selected{% endif %}>Unmonitored</option>
+            <option value="unknown" {% if status_filter == "unknown" %}selected{% endif %}>Unknown</option>
+        </select>
         <label for="calendar-date">Go to date</label>
         <input id="calendar-date" type="date" name="date" value="{{ navigation.date }}" min="1970-01-01" max="2100-12-31" required>
         <button class="btn btn-secondary" type="submit">Go</button>

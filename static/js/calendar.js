@@ -57,6 +57,9 @@
     }
 
     function carryFilters(url) {
+        var status = document.getElementById('calendar-status');
+        if (status && status.value !== 'all') url.searchParams.set('status', status.value);
+        else url.searchParams.delete('status');
         if (monitoredOnly()) url.searchParams.set('monitored', 'true');
         else url.searchParams.delete('monitored');
         var input = document.getElementById('calendar-series-search');
@@ -113,6 +116,12 @@
             });
         });
     }
+
+    document.body.addEventListener('change', function (event) {
+        if (event.target.id !== 'calendar-status' || !window.htmx) return;
+        syncRangeTabHrefs();
+        window.htmx.ajax('GET', calendarUrl(), { target: '#calendar-list', swap: 'innerHTML', push: 'true' });
+    });
 
     // ── iCal subscribe modal ────────────────────────────────────
 
@@ -254,14 +263,14 @@
         // Grid view — filter pills per cell. Cells stay in place
         // (hiding them would break the 7-column rectangle); only
         // non-matching pills get hidden.
-        scope.querySelectorAll('.calendar-month-pill').forEach(function (pill) {
+        scope.querySelectorAll('.calendar-month-entry').forEach(function (pill) {
             var name = pill.dataset.seriesName || '';
             var matches = !query || name.indexOf(query) !== -1;
             pill.classList.toggle('calendar-episode-hidden', !matches);
         });
         var empty = scope.querySelector('.calendar-filter-empty');
         if (empty) {
-            var cards = scope.querySelectorAll('.calendar-episode, .calendar-month-pill');
+            var cards = scope.querySelectorAll('.calendar-episode, .calendar-month-entry');
             var visible = Array.prototype.some.call(cards, function (card) {
                 return !card.classList.contains('calendar-episode-hidden');
             });

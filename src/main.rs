@@ -1776,10 +1776,10 @@ async fn main() {
                             "rss_sync",
                             "RSS sync",
                             &format!("Every {} minutes", cfg.rss_interval_minutes.clamp(1, 60)),
-                            cfg.rss_enabled,
+                            cfg.rss_master_enabled,
                         )
                         .await;
-                        if !cfg.rss_enabled {
+                        if !cfg.rss_master_enabled {
                             continue;
                         }
 
@@ -1812,6 +1812,14 @@ async fn main() {
                                 )
                                 .await;
                             }
+                            Err(err) if err == "RSS sync is already running" => {
+                                // A short automatic search commit owns the
+                                // same lock. Retry next tick without backoff.
+                                minutes_since_last = every;
+                                let _ = models::scheduled_tasks::mark_finished(
+                                    &inner_state.db, "rss_sync", "ok", "Another acquisition commit is finishing; RSS will retry next minute",
+                                ).await;
+                            }
                             Err(err) => {
                                 consecutive_errors += 1;
                                 let _ = models::scheduled_tasks::mark_finished(
@@ -1837,6 +1845,38 @@ async fn main() {
                 }
             })
             .await;
+        });
+    }
+
+    // Recover recent aired episodes missed by finite RSS feeds. This uses
+    // the existing supervised task lifecycle and normal acquisition gates.
+    {
+        let recent_state = state.clone();
+        tokio::spawn(async move {
+            let registry = recent_state.tasks.clone();
+            supervise(&registry, services::recent_episodes::TASK, move || {
+                let state = recent_state.clone();
+                async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                    loop {
+                        interval.tick().await;
+                        let Ok(Some(cfg)) = models::config::get_config(&state.db).await else { continue; };
+                        let enabled = services::recent_episodes::enabled(&cfg);
+                        let _ = models::scheduled_tasks::touch_definition(&state.db, services::recent_episodes::TASK,
+                            "Recent episode recovery", &format!("Every {} minutes; last {} days", cfg.rss_interval_minutes.clamp(1,60), cfg.recent_episode_search_days.clamp(1,30)), enabled).await;
+                        if !enabled { continue; }
+                        // Anchor to the start, rather than adding the search
+                        // duration to every interval. Persist across restarts.
+                        let elapsed: Option<i64> = sqlx::query_scalar("SELECT (strftime('%s','now')-strftime('%s',last_started_at))/60 FROM scheduled_task_runs WHERE task_key=?")
+                            .bind(services::recent_episodes::TASK).fetch_optional(&state.db).await.ok().flatten().flatten();
+                        if elapsed.is_some_and(|minutes| minutes < i64::from(cfg.rss_interval_minutes.clamp(1,60))) { continue; }
+                        if models::scheduled_tasks::mark_started(&state.db, services::recent_episodes::TASK,"Checking monitored recent episodes missing on disk").await.is_err() { continue; }
+                        let outcome = services::recent_episodes::run_once(&state).await;
+                        let (status, detail) = match outcome { Ok(detail) => ("ok",detail), Err(error) => ("error",error) };
+                        let _ = models::scheduled_tasks::mark_finished(&state.db, services::recent_episodes::TASK,status,&detail).await;
+                    }
+                }
+            }).await;
         });
     }
 
