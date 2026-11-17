@@ -15,11 +15,23 @@ function loadQueue() {
             if (!container.isConnected || container !== document.getElementById(container.id)) return;
             queueActionError('');
             if (container.innerHTML === html) return;
-            const wrap = container.querySelector('.rss-table-wrap');
-            const top = wrap ? wrap.scrollTop : 0;
+            const openDetails = Array.from(container.querySelectorAll('details[id][open]'), d => d.id);
+            const scroll = Object.fromEntries(Array.from(container.querySelectorAll('[data-job-table]'), wrap => [wrap.dataset.jobTable, {top: wrap.scrollTop, left: wrap.scrollLeft}]));
+            const focused = document.activeElement;
+            const focusSummary = container.contains(focused) && focused?.matches('summary') ? focused.closest('details[id]')?.id : null;
+            const focusJob = container.contains(focused) ? focused?.closest('[data-job-key]')?.dataset.jobKey : null;
+            const focusAction = focusJob ? focused?.dataset.dlAction : null;
             container.innerHTML = html;
-            const next = container.querySelector('.rss-table-wrap');
-            if (next) next.scrollTop = top;
+            container.querySelectorAll('details[id]').forEach(d => { d.open = openDetails.includes(d.id); });
+            container.querySelectorAll('[data-job-table]').forEach(wrap => {
+                const previous = scroll[wrap.dataset.jobTable];
+                if (previous) { wrap.scrollTop = previous.top; wrap.scrollLeft = previous.left; }
+            });
+            if (focusSummary) document.getElementById(focusSummary)?.querySelector('summary')?.focus({preventScroll:true});
+            else if (focusJob && focusAction) {
+                const row = Array.from(container.querySelectorAll('[data-job-key]')).find(r => r.dataset.jobKey === focusJob);
+                Array.from(row?.querySelectorAll('[data-dl-action]') || []).find(b => b.dataset.dlAction === focusAction)?.focus({preventScroll:true});
+            }
         }).catch(error => queueActionError(error.message));
 }
 
