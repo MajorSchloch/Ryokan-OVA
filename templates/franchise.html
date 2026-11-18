@@ -9,54 +9,68 @@
     <div class="franchise-heading-content">
         <p class="franchise-eyebrow">Franchise</p>
         <h2 id="franchise-title">{{ title }}</h2>
-        <p>{{ tracked }} release{% if tracked != 1 %}s{% endif %} in your library &middot; {% if following %}Following future releases{% else %}Not following future releases{% endif %}</p>
-        <p class="franchise-completion">{{ progress.label }}</p>
-        {% let availability = &progress %}
-        {% include "partials/library/availability_bar.html" %}
-        {% include "partials/library/availability_legend.html" %}
-        <p class="form-hint">Availability follows episode monitoring. Future and unmonitored episodes do not count as missing.</p>
-        {% if !next_airing.is_empty() %}<p class="franchise-next-airing"><strong>Next known airing:</strong> {{ next_airing }}</p>{% endif %}
-        <div class="detail-actions">
-            {% if seed > 0 %}<a class="btn btn-primary" href="?tab=settings" data-title-tab="settings">{% if following %}Manage franchise{% else %}Manage franchise{% endif %}</a>{% endif %}
+        <p class="franchise-card-summary">{{ tracked }} release{% if tracked != 1 %}s{% endif %} in library{% if upcoming_releases > 0 %} · {{ upcoming_releases }} upcoming release{% if upcoming_releases != 1 %}s{% endif %}{% endif %}</p>
+        <div class="franchise-follow-status">
+            <span class="chip{% if !future.enabled %} chip-dim{% endif %}">{% if future.enabled %}Follows future releases{% else %}Future releases off{% endif %}</span>
+            {% if seed > 0 %}<a class="btn btn-secondary btn-sm" href="?tab=settings" data-title-tab="settings">Follow settings</a>{% endif %}
         </div>
-        {% if seed > 0 %}<p class="form-hint">Choose the seasons, movies, and side stories you want. Follow this franchise once to watch for future releases.</p>{% else %}<p class="form-hint">Ryokan needs an AniList match before it can follow future releases for this title.</p>{% endif %}
+        <div class="franchise-heading-status">
+            {% let availability = &progress %}
+            {% include "partials/library/overview_counts.html" %}
+            {% include "partials/library/availability_bar.html" %}
+            <p class="form-hint">The bar shows episode monitoring. Missing counts include aired, monitored episodes only.</p>
+            {% if !next_airing.is_empty() %}<p class="card-date"><strong>Next in library</strong> {{ next_airing }}</p>{% endif %}
+            {% let files = &progress.files %}{% include "partials/library/overview_file_details.html" %}
+        </div>
     </div>
 </section>
 
 <nav class="management-tabs" aria-label="Franchise sections"><a href="?tab=releases" data-title-tab="releases">Releases</a><a href="?tab=downloads" data-title-tab="downloads">Downloads</a><a href="?tab=activity" data-title-tab="activity">Activity</a><a href="?tab=settings" data-title-tab="settings">Settings</a></nav>
-{% let files = &progress.files %}{% include "partials/library/file_summary.html" %}
 <section data-title-panel="releases" aria-labelledby="franchise-releases-title">
     <div class="franchise-section-heading"><h3 id="franchise-releases-title">Releases</h3><span class="form-hint">Premiere order</span></div>
-    <p class="form-hint">Monitoring may start a search when enabled in app settings. Filters only change this list.</p>
     <form class="franchise-filters management-panel" data-franchise-filters method="get">
         <input type="hidden" name="tab" value="releases">
         <label class="form-group">Search this franchise<input type="search" name="f_q" placeholder="Title or synonym"></label>
         <label class="form-group">Monitoring<select name="f_monitor"><option value="">All releases</option><option value="monitored">Monitored</option><option value="unmonitored">Unmonitored</option><option value="outside">Outside library</option></select></label>
         <label class="form-group">Format<select name="f_type"><option value="">All formats</option><option value="tv">TV / online series</option><option value="movie">Movies</option><option value="ova">OVAs</option><option value="other">Other</option></select></label>
-        <label class="form-group">Status<select name="f_status"><option value="">All states</option><option value="available">Available</option><option value="downloading">Downloading</option><option value="missing">Missing</option><option value="upcoming">Upcoming</option><option value="attention">Needs attention</option></select></label>
+        <label class="form-group">Status<select name="f_status"><option value="">All states</option><option value="following">Selected in follow</option><option value="available">Has downloads</option><option value="downloading">Downloading</option><option value="missing">Missing</option><option value="upcoming">Upcoming</option><option value="attention">Needs attention</option></select></label>
         <button type="reset" class="btn btn-secondary">Reset filters</button><span data-franchise-count role="status"></span>
     </form>
     <div class="franchise-release-grid">
     {% for release in releases %}
-    <article class="franchise-release-card" data-franchise-release data-title="{{ release.title }} {{ release.aliases }}" data-format="{{ release.format }}" data-monitor="{% if !release.in_library %}outside{% else if release.progress.monitored %}monitored{% else %}unmonitored{% endif %}" data-states="{% if release.progress.files.episodes > 0 %}available {% endif %}{% if release.progress.downloading > 0 %}downloading {% endif %}{% if release.progress.missing > 0 %}missing {% endif %}{% if release.progress.future > 0 || release.upcoming %}upcoming {% endif %}{% if release.progress.files.unmet > 0 || release.progress.files.unverified > 0 || release.progress.unknown > 0 || release.in_library && !release.progress.files.complete_scan %}attention{% endif %}">
+    <article class="franchise-release-card" data-franchise-release data-title="{{ release.title }} {{ release.aliases }}" data-format="{{ release.format }}" data-monitor="{% if !release.in_library %}outside{% else if release.progress.monitored %}monitored{% else %}unmonitored{% endif %}" data-states="{% if release.in_library %}{{ release.progress.overview_states() }}{% else %}{% if release.progress.upcoming %}upcoming {% endif %}{% if release.progress.following %}following{% endif %}{% endif %}">
         <a class="franchise-release-cover" href="{{ release.path }}" aria-label="Open {{ release.title }}">{% if !release.cover_url.is_empty() %}<img src="{{ release.cover_url }}" alt="" loading="lazy">{% else %}<span class="series-cover-placeholder">No Image</span>{% endif %}</a>
         <div class="franchise-release-info">
             <h4><a href="{{ release.path }}">{{ release.title }}</a></h4>
             <div class="series-meta"><span class="tag tag-res">{{ release.format }}</span><span>{{ release.date }}</span></div>
-            <p>{{ release.status }}</p><p>{% if release.in_library %}In library{% else %}Available to add{% endif %}</p>
-            <div class="release-monitoring-badges"><span class="chip">{{ release.monitoring_label }}</span>{% if release.in_library %}<span class="chip chip-dim">Upgrades {% if release.allow_upgrades %}until target{% else %}off{% endif %}</span>{% endif %}</div>
+            <div class="release-monitoring-badges">
+                {% if release.in_library %}<span class="chip chip-dim">{{ release.monitoring_label }}</span>{% else %}<span class="chip chip-dim">Outside library</span>{% endif %}
+                {% if release.progress.following %}<span class="chip">Selected in follow</span>{% endif %}
+            </div>
             {% if release.in_library %}
-            <p>{{ release.progress.label }}</p>{% let availability = &release.progress %}{% include "partials/library/availability_bar.html" %}{% include "partials/library/availability_legend.html" %}
-            {% let files = &release.progress.files %}{% include "partials/library/file_summary.html" %}
+            {% let availability = &release.progress %}
+            {% include "partials/library/overview_counts.html" %}
+            {% include "partials/library/availability_bar.html" %}
+            {% let files = &release.progress.files %}{% include "partials/library/overview_file_details.html" %}
             {% endif %}
-            {% if !release.next_airing.is_empty() && release.next_airing.as_str() != "Finished" %}<p class="card-date">Next airing {{ release.next_airing }}</p>{% endif %}
-            {% if !release.added_date.is_empty() %}<p class="card-date">Added {{ release.added_date }}</p>{% endif %}
-            <p class="form-hint">{{ release.requirements_label }}</p>
+            {% if !release.next_airing.is_empty() && release.next_airing.as_str() != "Finished" && release.next_airing.as_str() != "TBA" %}<p class="card-date"><strong>Upcoming</strong> {{ release.next_airing }}</p>{% endif %}
+            <div class="release-actions">
+                <a class="btn btn-secondary btn-sm" href="{{ release.path }}">{% if release.in_library %}Episodes &amp; search{% else %}View &amp; add{% endif %}</a>
+            </div>
             {% if let Some(series_id) = release.series_id %}
+            <details class="release-manage">
+            <summary>Manage release</summary>
+            <p>{{ release.requirements_label }}</p>
+            {% if !release.added_date.is_empty() %}<p class="card-date">Added {{ release.added_date }}</p>{% endif %}
+            <p class="form-hint">Changing episode monitoring can start a search when enabled in app settings.</p>
             <div class="release-controls"><label>Monitor episodes<select class="folder-select" name="monitor_mode" hx-post="/api/library/monitoring" hx-trigger="change" data-saved-mode="{{ release.monitor_mode }}" hx-on::after:request="if(event.detail.ctx.response.status &lt; 400){location.reload()}else{this.value=this.dataset.savedMode;window.ryokanToast({kind:'error',title:'Could not change monitoring'})}" hx-vals='{"series_id":{{ series_id }}}' hx-swap="none"><option value="custom"{% if release.monitor_mode == "custom" %} selected{% endif %} disabled>Custom episodes</option>{% for mode in ["all","future","missing","existing","none"] %}<option value="{{ mode }}"{% if release.monitor_mode == *mode %} selected{% endif %}>{% if *mode == "all" %}All episodes{% else if *mode == "future" %}Future episodes{% else if *mode == "missing" %}Missing episodes{% else if *mode == "existing" %}Existing episodes{% else %}No episodes{% endif %}</option>{% endfor %}</select></label>
             <label class="checkbox-row"><input type="checkbox"{% if release.allow_upgrades %} checked{% endif %} hx-post="/api/library/allow-upgrades" hx-vals='js:{series_id:{{ series_id }},allow:this.checked}' hx-swap="none" hx-on::after:request="if(event.detail.ctx.response.status &lt; 400){location.reload()}else{this.checked=!this.checked;window.ryokanToast({kind:'error',title:'Could not change upgrades'})}"> Upgrade until target</label></div>
+            <div class="release-actions">
+                <a class="btn btn-ghost btn-sm" href="{{ release.path }}?tab=settings">Release settings</a>
+                <a class="btn btn-ghost btn-sm" href="{{ release.path }}?remove=1">Remove…</a>
+            </div>
+            </details>
             {% endif %}
-            <div class="release-actions"><a class="btn btn-secondary btn-sm" href="{{ release.path }}">{% if release.in_library %}Episodes &amp; search{% else %}View &amp; add{% endif %}</a><a class="btn btn-ghost btn-sm" href="{{ release.path }}?tab=settings">Settings</a>{% if release.in_library %}<a class="btn btn-ghost btn-sm" href="{{ release.path }}?remove=1">Remove…</a>{% endif %}</div>
         </div>
     </article>
     {% endfor %}
