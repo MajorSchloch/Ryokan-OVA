@@ -651,6 +651,7 @@ mod tests {
         native: &str,
     ) -> crate::services::anilist::AnimeDetail {
         crate::services::anilist::AnimeDetail {
+            country_of_origin: None,
             release_date: None,
             is_adult: false,
             id,

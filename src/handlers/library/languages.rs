@@ -64,7 +64,7 @@ pub struct LanguagePreferencesView {
     pub title_language: String,
 }
 
-fn summary(languages: &str, match_mode: &str, empty: &str) -> String {
+pub(super) fn summary(languages: &str, match_mode: &str, empty: &str) -> String {
     let names: Vec<String> = languages
         .split(',')
         .filter(|s| !s.is_empty())

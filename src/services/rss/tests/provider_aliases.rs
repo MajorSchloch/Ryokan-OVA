@@ -6,6 +6,7 @@ use crate::test_support::{in_memory_pool, seed_series};
 
 fn detail(series: &series::Series, synonyms: &[&str]) -> AnimeDetail {
     AnimeDetail {
+        country_of_origin: None,
         release_date: None,
         is_adult: false,
         id: series.anilist_id,

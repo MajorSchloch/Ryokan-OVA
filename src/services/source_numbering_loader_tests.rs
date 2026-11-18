@@ -35,6 +35,7 @@ impl Drop for NyaaOrigin {
 
 fn detail(id: i64, title: &str, count: i32) -> AnimeDetail {
     AnimeDetail {
+        country_of_origin: None,
         release_date: None,
         id,
         id_mal: None,
