@@ -2181,3 +2181,288 @@ async fn live_upgrade_finds_the_old_file_named_under_another_template() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Review carries no waiver for active media requirements, and replays only
+/// the unchanged candidate from the original native job.
+#[tokio::test]
+async fn edition_review_revalidates_tracks_quality_and_exact_files_before_replacing() {
+    use crate::models::{config, download_clients, edition_review, library_activity};
+    use crate::services::media_info::FileIdentity;
+
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let media = base.join("library");
+    let download = base.join("downloads");
+    let recycle = base.join("recycle");
+    let old = media.join("Show/Season 01/Show - S01E01 [720p].mkv");
+    let source = download.join("[Group] Show - S01E01 [1080p].mkv");
+    for dir in [old.parent().unwrap(), &download, &recycle] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(&old, b"original long edition").unwrap();
+    std::fs::write(&source, b"verified short edition").unwrap();
+    let db = in_memory_pool().await;
+    let cfg = config::Config {
+        post_processing_enabled: true,
+        post_processing_mode: "move".into(),
+        media_root: media.to_str().unwrap().into(),
+        recycle_bin_path: recycle.to_str().unwrap().into(),
+        media_requirements_enabled: true,
+        required_audio_languages: "ja".into(),
+        required_subtitle_languages: "en".into(),
+        minimum_subtitle_check: true,
+        ..Default::default()
+    };
+    config::save_config(&db, &cfg).await.unwrap();
+    let id = download_clients::insert(
+        &db,
+        download_clients::DownloadClientForm {
+            name: "Exact job",
+            kind: "qbittorrent",
+            url: "http://test",
+            username: "",
+            password: "",
+            label: "anime",
+            download_path: "",
+            enabled: true,
+            is_default: true,
+        },
+    )
+    .await
+    .unwrap();
+    let sid = seed_series(&db, 9201, "Show").await;
+    let hash = "1234567890abcdef1234567890abcdef12345678";
+    let name = source.file_name().unwrap().to_str().unwrap();
+    let gid = seed_grabbed_torrent(&db, sid, hash, name, &[1]).await;
+    sqlx::query(
+        "UPDATE grabbed_torrents SET download_client_id=?, verification='verified' WHERE id=?",
+    )
+    .bind(id)
+    .bind(gid)
+    .execute(&db)
+    .await
+    .unwrap();
+    for (path, width, height, duration, subs) in [
+        (&old, 1280, 720, "1420", false),
+        (&source, 1920, 1080, "720", true),
+    ] {
+        let mut streams = vec![
+            serde_json::json!({"index":0,"codec_type":"video","codec_name":"h264","width":width,"height":height}),
+            serde_json::json!({"index":1,"codec_type":"audio","codec_name":"aac","tags":{"language":"jpn"}}),
+        ];
+        if subs {
+            streams.push(serde_json::json!({"index":2,"codec_type":"subtitle","codec_name":"ass","tags":{"language":"eng"}}));
+        }
+        let identity = FileIdentity::from_metadata(&path.metadata().unwrap()).unwrap();
+        crate::models::media_probe_cache::upsert_identified(
+            &db,
+            path.to_str().unwrap(),
+            &identity.cache_key(),
+            identity.size as i64,
+            &serde_json::json!({"streams":streams,"format":{"duration":duration}}).to_string(),
+        )
+        .await;
+    }
+    let mut file = complete_file(name);
+    file.size = source.metadata().unwrap().len() as i64;
+    let client = Arc::new(BatchClient::new(
+        complete_torrent(hash, &download),
+        vec![file],
+    ));
+    let state = build_test_app_state(db.clone(), None);
+    *state.download_clients.write().await = Arc::new(crate::DownloadClientPool {
+        clients: std::collections::HashMap::from([(id, client.clone() as Arc<dyn DownloadClient>)]),
+        default_torrent_id: Some(id),
+        default_usenet_id: None,
+    });
+    post_processing::run_once(&state).await;
+    let rows = edition_review::for_episode(&db, sid, 1).await.unwrap();
+    let [review] = rows.as_slice() else {
+        panic!(
+            "Expected one review; grab state: {}",
+            grab_state(&db, gid).await
+        );
+    };
+    assert_eq!(std::fs::read(&old).unwrap(), b"original long edition");
+
+    // The saved choice is for these file identities. It cannot authorize
+    // a different candidate or a different incumbent.
+    let stale = edition_review::Review {
+        current_identity: "stale".into(),
+        ..review.clone()
+    };
+    assert!(stale.check_files().await.unwrap_err().contains("changed"));
+
+    for changed in [
+        config::Config {
+            required_audio_languages: "de".into(),
+            ..cfg.clone()
+        },
+        config::Config {
+            required_subtitle_languages: "fr".into(),
+            ..cfg.clone()
+        },
+        config::Config {
+            minimum_resolution: "2160p".into(),
+            target_resolution: "2160p".into(),
+            ..cfg.clone()
+        },
+    ] {
+        config::save_config(&db, &changed).await.unwrap();
+        assert!(
+            post_processing::resolve_edition(&state, review.id, true, false)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&old).unwrap(), b"original long edition");
+        assert!(
+            edition_review::get_open(&db, review.id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    config::save_config(&db, &cfg).await.unwrap();
+    post_processing::resolve_edition(&state, review.id, true, false)
+        .await
+        .unwrap();
+    assert_eq!(grab_state(&db, gid).await, "imported");
+    assert!(
+        edition_review::get_open(&db, review.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(std::fs::read(&source).unwrap(), b"verified short edition");
+    assert_eq!(collect_files(&media, "mkv").len(), 1);
+    assert_eq!(
+        collect_files(&recycle, "mkv"),
+        vec![old.file_name().unwrap().to_str().unwrap()]
+    );
+    assert_eq!(client.deleted.load(Ordering::SeqCst), 0);
+    assert!(
+        library_activity::recent_all(&db)
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| event.action == "Upgraded"
+                && event.reason.contains("explicit edition review"))
+    );
+}
+
+#[tokio::test]
+async fn edition_review_routes_protect_preview_and_allow_stale_dismissal() {
+    use crate::{
+        handlers,
+        models::{config, edition_review},
+    };
+    use axum::{
+        Router,
+        body::Body,
+        http::{Request, StatusCode},
+        middleware,
+        routing::get,
+    };
+    use tower::ServiceExt;
+
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    let db = in_memory_pool().await;
+    config::save_config(&db, &config::Config::default())
+        .await
+        .unwrap();
+    let sid = seed_series(&db, 9202, "Show").await;
+    let gid = seed_grabbed_torrent(&db, sid, "stale-identity", "candidate", &[1]).await;
+    grabbed_torrents::mark_failed(&db, gid).await.unwrap();
+    let grab = grabbed_torrents::get_by_id(&db, gid)
+        .await
+        .unwrap()
+        .unwrap();
+    edition_review::save(
+        &db,
+        &edition_review::Review {
+            id: 0,
+            grab_id: gid,
+            grabbed_at: grab.grabbed_at,
+            series_id: sid,
+            provider_id: 9202,
+            episode: 1,
+            source_root: "/unavailable".into(),
+            source_path: "/unavailable/source.mkv".into(),
+            source_identity: "old-source-identity".into(),
+            current_path: "/unavailable/current.mkv".into(),
+            current_identity: "stale-file-identity".into(),
+            reason: "Runtime conflict".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let id = edition_review::for_episode(&db, sid, 1).await.unwrap()[0].id;
+    let (state, cookie) = crate::test_support::logged_in_session(&db).await;
+    let app = Router::new()
+        .route(
+            "/system/edition-review/{id}",
+            get(handlers::edition_review::page).post(handlers::edition_review::decide),
+        )
+        .route(
+            "/system/edition-review/{id}/preview/{part}/{sample}",
+            get(handlers::edition_review::preview),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            handlers::auth::require_auth,
+        ))
+        .with_state(state);
+    let page = format!("/system/edition-review/{id}");
+    let preview = format!("{page}/preview/candidate/start");
+    let response = app
+        .clone()
+        .oneshot(Request::get(&preview).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get(&preview)
+                .header("cookie", &cookie)
+                .header("sec-fetch-site", "cross-site")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get(&page)
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let html = axum::body::to_bytes(response.into_body(), 512 * 1024)
+        .await
+        .unwrap();
+    let html = std::str::from_utf8(&html).unwrap();
+    assert!(html.contains("Keep current file and close review"));
+    assert!(!html.contains("Use this file"));
+    let response = app
+        .oneshot(
+            Request::post(&page)
+                .header("cookie", &cookie)
+                .header("host", "ryokan.local")
+                .header("origin", "http://ryokan.local")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("decision=keep"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert!(edition_review::get_open(&db, id).await.unwrap().is_none());
+    assert_eq!(grab_state(&db, gid).await, "failed");
+}

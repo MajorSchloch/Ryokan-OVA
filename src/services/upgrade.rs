@@ -412,24 +412,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
         )
         .await;
 
-        // Episode numbers already covered by a batch we grabbed earlier
-        // in this series's loop. Without this, a 12-episode BD pack
-        // covering eps 1..=12 would be re-found and re-grabbed once per
-        // remaining target — 12 redundant Nyaa sweeps, 12 episode_grab_history
-        // rows for the same release, and an inflated upgrade count in
-        // the summary log. `record_grab` deduplicates the parent
-        // grabbed_torrents row by hash, but episode_tags::record_grab
-        // is unconditional INSERT, so each iteration pollutes history.
-        let mut covered_by_batch: HashSet<i32> = HashSet::new();
-
         for target in targets {
-            // Skip targets a previously-grabbed batch already covers.
-            if let auto_search::SearchTarget::Episode(ep_num) = &target
-                && covered_by_batch.contains(ep_num)
-            {
-                continue;
-            }
-
             let label = auto_search::target_label(&target);
             // Keep the library slot for every upgrade/protection decision and
             // for persistence. A standalone release still needs
@@ -440,9 +423,11 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 }
                 auto_search::SearchTarget::Single => target.clone(),
             };
-            // batch_episode_match=true so BD season packs can match episode targets.
             let eligible = |result: &crate::services::nyaa::SearchResult,
                             incoming: &ClassificationResult| {
+                if release_covers_multiple(result) {
+                    return false;
+                }
                 if !requirements.enabled {
                     return true;
                 }
@@ -472,22 +457,40 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 )
                 .is_ok()
             };
-            let (best, _) = auto_search::find_best_for_target_with_filter(
+            let (mut best, _) = auto_search::find_best_for_target_with_filter(
                 &state.db,
                 &detail,
                 &cfg,
                 &search_target,
-                true,
-                true,
+                false,
+                false,
                 &cfs,
                 &state.indexers,
                 Some(&eligible),
             )
             .await;
+            let used_batch_fallback = best.is_none();
+            if used_batch_fallback {
+                (best, _) = auto_search::find_single_episode_batch_fallback(
+                    &state.db,
+                    &detail,
+                    &cfg,
+                    &search_target,
+                    &cfs,
+                    &state.indexers,
+                    Some(&eligible),
+                )
+                .await;
+            }
 
             let Some(result) = best else {
                 continue;
             };
+            let used_batch_fallback = used_batch_fallback
+                || result
+                    .release_mapping
+                    .as_ref()
+                    .is_some_and(|mapping| mapping.is_single_episode_pack());
             let availability =
                 crate::services::release_availability::Policy::load(&cfg, &state.indexers).await;
             if let Err(reason) = availability.check_result(&result) {
@@ -611,25 +614,69 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 continue;
             }
 
+            // Serialize single-file pack dispatch with RSS, recovery, and
+            // interactive acquisition, after the indexer search is complete.
+            let batch_dispatch_guard = if used_batch_fallback {
+                let rss = crate::services::rss::RSS_SYNC_LOCK.lock().await;
+                let processing = crate::services::post_processing::POST_PROC_LOCK
+                    .lock()
+                    .await;
+                let settings = crate::handlers::settings::CONFIG_WRITE_LOCK.lock().await;
+                let auto_search::SearchTarget::Episode(ep) = target else {
+                    continue;
+                };
+                let current = series::get_by_id(&state.db, row.id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if current.is_none_or(|current| {
+                    current.anilist_id != row.anilist_id || !current.allow_upgrades
+                }) || crate::services::recent_episodes::has_pending(&state.db, row.id, ep)
+                    .await?
+                {
+                    continue;
+                }
+                if let Err(reason) =
+                    crate::models::grabbed_torrents::ensure_automatic_compatibility(
+                        &state.db,
+                        &result.info_hash,
+                        detail.id,
+                        result.release_mapping.as_ref(),
+                    )
+                    .await
+                {
+                    logger::info(&state.db, LogCategory::Grab, "Upgrade batch held", &reason).await;
+                    continue;
+                }
+                Some((rss, processing, settings))
+            } else {
+                None
+            };
+
             // Resolve the right client per-result so a PT indexer
             // pinned to the seedbox (and a public indexer landing on
             // local qBit) both work in the same sweep. Skip the
             // result if pin resolution finds no client at all
             // (pool empty or all-disabled mid-sweep).
-            let (client, dispatch_client_id) =
-                match state.client_for_indexer_with_id(result.indexer_id).await {
-                    Some(t) => t,
-                    None => {
-                        logger::warn(
-                            &state.db,
-                            LogCategory::DownloadClient,
-                            &format!("Upgrade skip: no download client for {}", result.title),
-                            "indexer pin resolution returned None",
-                        )
-                        .await;
-                        continue;
-                    }
-                };
+            let routed = if used_batch_fallback && result.indexer_id.is_none() {
+                state
+                    .client_for_nyaa_with_id(cfg.nyaa_download_client_id)
+                    .await
+            } else {
+                state.client_for_indexer_with_id(result.indexer_id).await
+            };
+            let (client, dispatch_client_id) = match routed {
+                Some(t) => t,
+                None => {
+                    logger::warn(
+                        &state.db,
+                        LogCategory::DownloadClient,
+                        &format!("Upgrade skip: no download client for {}", result.title),
+                        "indexer pin resolution returned None",
+                    )
+                    .await;
+                    continue;
+                }
+            };
 
             if result
                 .release_mapping
@@ -658,10 +705,13 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                     mapping,
                 )
                 .await
-                .map(|prepared| {
+                .and_then(|prepared| {
+                    if used_batch_fallback && !prepared.newly_added {
+                        return Err("Batch is already in the client; its file selection and ownership were preserved".into());
+                    }
                     let id = prepared.info_hash.clone();
                     prepared_bound = Some(prepared);
-                    id
+                    Ok(id)
                 })
             } else {
                 client
@@ -671,6 +721,23 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             };
             match dispatch {
                 Ok(canonical_id) => {
+                    if used_batch_fallback
+                        && let Some(mapping) = &result.release_mapping
+                        && let Err(reason) =
+                            crate::services::source_numbering_grab::persist_entry_pack(
+                                &state.db, mapping,
+                            )
+                            .await
+                    {
+                        logger::error(
+                            &state.db,
+                            LogCategory::Grab,
+                            "Upgrade batch stayed paused because its file decision could not be saved",
+                            &reason,
+                        )
+                        .await;
+                        continue;
+                    }
                     // Record for post-processing and quality tags.
                     let mut ep_nums: Vec<i32> = match &target {
                         auto_search::SearchTarget::Episode(n) => vec![*n],
@@ -686,12 +753,6 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                             ep_nums = parsed.into_iter().collect();
                             ep_nums.sort_unstable();
                         }
-                    }
-                    if result.is_batch {
-                        // Mark every episode this batch will cover as
-                        // satisfied so the rest of this series's loop
-                        // doesn't re-find / re-grab the same pack.
-                        covered_by_batch.extend(&ep_nums);
                     }
                     let recorded = crate::models::grabbed_torrents::source_replay::record(
                         &state.db,
@@ -819,6 +880,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                     .await;
                 }
             }
+            drop(batch_dispatch_guard);
 
             // Rate-limit between searches to avoid hammering Nyaa.
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;

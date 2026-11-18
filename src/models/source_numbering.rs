@@ -34,6 +34,13 @@ pub async fn save_automatic(
     save_decision(db, proof, ProofOrigin::AutomaticUnique).await
 }
 
+pub(crate) async fn save_entry_pack(
+    db: &SqlitePool,
+    proof: &BoundSourceProof,
+) -> Result<SavedDecision, String> {
+    save_decision(db, proof, ProofOrigin::AutomaticEntryPack).await
+}
+
 fn decode_saved(row: &sqlx::sqlite::SqliteRow, hash: &str) -> Result<SavedDecision, String> {
     let proof: BoundSourceProof = serde_json::from_str(row.get("proof_json"))
         .map_err(|error| format!("Episode mapping: invalid saved source proof: {error}"))?;
@@ -59,8 +66,7 @@ fn source_basis_matches(left: &BoundSourceProof, right: &BoundSourceProof) -> Re
     Ok(left.info_hash == right.info_hash
         && left.domain == right.domain
         && left.published_files == right.published_files
-        && (!(left.origin()? == ProofOrigin::AutomaticUnique
-            && right.origin()? == ProofOrigin::AutomaticUnique)
+        && (!(left.origin()?.is_automatic() && right.origin()?.is_automatic())
             || left.provenance == right.provenance))
 }
 
@@ -99,7 +105,7 @@ async fn save_decision(
             );
         }
         if old.proof.target_anilist_id == proof.target_anilist_id {
-            let human_wins = required_origin == ProofOrigin::AutomaticUnique
+            let human_wins = required_origin.is_automatic()
                 && old.proof.origin()? == ProofOrigin::HumanReviewed
                 && old.proof.same_geometry(proof);
             if old.proof != *proof && !human_wins {

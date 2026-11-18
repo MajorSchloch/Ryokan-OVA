@@ -316,6 +316,14 @@ async fn evaluate_inner(
         return Err("Torrent has unresolved or conflicting ownership".into());
     }
     let owner = &owned[0];
+    if crate::models::edition_review::holds_source(&state.db, owner.id, &owner.grabbed_at)
+        .await
+        .map_err(|error| format!("Edition review status unavailable: {error}"))?
+    {
+        return Ok(Evaluation::hold(
+            "Episode edition needs a decision; native job and files retained",
+        ));
+    }
     if owner.import_mode.as_deref() == Some("move") {
         return Err("Moved sources require review".into());
     }

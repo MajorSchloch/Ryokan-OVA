@@ -186,7 +186,7 @@ async fn page(
                         match source_numbering::loader::refresh(&state.db,&saved.proof).await {
                             Ok(()) => {
                                 result.saved = true;
-                                result.message = if saved.proof.origin() == Ok(source_numbering::ProofOrigin::AutomaticUnique) {
+                                result.message = if saved.proof.origin().is_ok_and(|origin| origin.is_automatic()) {
                                     "Numbering verified automatically for this exact source. Choose files to download for this release."
                                 } else { "Numbering saved for this exact source. Choose files to download for this release." }.into();
                             }

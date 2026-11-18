@@ -132,6 +132,7 @@ struct StrictAutomaticClient {
     expected_series: i64,
     expected_episodes: Vec<i32>,
     expected_names: Vec<String>,
+    entry_pack: AtomicBool,
     view: u64,
     item: Mutex<DownloadItem>,
     files: Mutex<Vec<DownloadFile>>,
@@ -200,7 +201,15 @@ impl DownloadClient for StrictAutomaticClient {
             .await
             .unwrap()
             .expect("durable mapping before payload");
-        assert_automatic_provenance(mapping.bound_source().unwrap(), self.view);
+        let proof = mapping.bound_source().unwrap();
+        if self.entry_pack.load(Ordering::SeqCst) {
+            assert_eq!(
+                proof.origin().unwrap(),
+                ryokan::services::source_numbering::ProofOrigin::AutomaticEntryPack
+            );
+        } else {
+            assert_automatic_provenance(proof, self.view);
+        }
         let files = self.files.lock().unwrap().clone();
         let wanted: Vec<_> = files
             .iter()
@@ -296,6 +305,7 @@ async fn fixture(
             .iter()
             .map(|n| source.files[n - 1].clone())
             .collect(),
+        entry_pack: AtomicBool::new(false),
         view: source.view,
         item: Mutex::new(DownloadItem {
             hash: source.hash.clone(),
@@ -406,7 +416,16 @@ async fn saved(state: &AppState, source: &Source, episodes: &[i32]) -> ReleaseMa
 }
 
 async fn finish_after_restart(state: &AppState, client: &StrictAutomaticClient) {
-    {
+    finish_with_probe(state, client, None).await;
+}
+
+async fn finish_with_probe(
+    state: &AppState,
+    client: &StrictAutomaticClient,
+    probe: Option<&serde_json::Value>,
+) {
+    let payloads = {
+        let mut payloads = Vec::new();
         let mut item = client.item.lock().unwrap();
         item.state_kind = DownloadItemState::Seeding;
         item.state = "seeding".into();
@@ -415,13 +434,151 @@ async fn finish_after_restart(state: &AppState, client: &StrictAutomaticClient) 
         for file in files.iter_mut().filter(|file| file.wanted) {
             let path = std::path::Path::new(&item.save_path).join(&file.name);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, format!("exact automatic source {}", file.name)).unwrap();
+            std::fs::write(&path, format!("exact automatic source {}", file.name)).unwrap();
             file.progress = 1.0;
+            payloads.push(path);
+        }
+        payloads
+    };
+    if let Some(probe) = probe {
+        for path in payloads {
+            seed_probe(state, &path, probe).await;
         }
     }
     let restarted = build_test_app_state(state.db.clone(), None);
     *restarted.download_clients.write().await = state.download_clients.read().await.clone();
     ryokan::services::post_processing::run_once(&restarted).await;
+}
+
+async fn seed_probe(state: &AppState, path: &std::path::Path, probe: &serde_json::Value) {
+    let path = path.canonicalize().unwrap();
+    let identity = ryokan::services::media_info::FileIdentity::from_metadata(
+        &std::fs::metadata(&path).unwrap(),
+    )
+    .unwrap();
+    ryokan::models::media_probe_cache::upsert_identified(
+        &state.db,
+        path.to_str().unwrap(),
+        &identity.cache_key(),
+        identity.size as i64,
+        &probe.to_string(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn ordinary_episode_batch_fallback_checks_tracks_and_resolution_before_import() {
+    let _gate = ENV_LOCK.lock().await;
+    let id = 20613;
+    let title = "Akame ga Kill!";
+    let source = Source {
+        hash: "7070707070707070707070707070707070707070".into(),
+        view: 44001,
+        title: "[Test Group] Akame ga Kill! (Season 1) [BD 1080p][Dual-Audio][Multi-Subs]".into(),
+        files: (1..=24)
+            .map(|n| format!("Akame ga Kill!/[Test Group] Akame ga Kill! - {n:02}.mkv"))
+            .collect(),
+        entries: vec![(id, title.into(), 24, 0)],
+        root: id,
+        description: "Blu-ray with Japanese audio and English subtitles",
+    };
+    let server = MockServer::start().await;
+    serve(
+        &server,
+        &source,
+        Some(published_page(&source, &source.hash, &source.files)),
+    )
+    .await;
+    for (audio, subtitles, width, height, accepted, edition_conflict) in [
+        ("jpn", "eng", 1920, 1080, true, false),
+        ("eng", "eng", 1920, 1080, false, false),
+        ("jpn", "deu", 1920, 1080, false, false),
+        ("jpn", "eng", 854, 480, false, false),
+        ("jpn", "eng", 1920, 1080, false, true),
+    ] {
+        let (temp, state, sid, client) = fixture(&source, id, &[21], &[21]).await;
+        client.entry_pack.store(true, Ordering::SeqCst);
+        let mut cfg = ryokan::models::config::get_config(&state.db)
+            .await
+            .unwrap()
+            .unwrap();
+        cfg.media_requirements_enabled = true;
+        cfg.minimum_resolution = "720".into();
+        cfg.target_resolution = "1080".into();
+        cfg.required_audio_languages = "ja".into();
+        cfg.required_subtitle_languages = "en".into();
+        cfg.minimum_subtitle_check = true;
+        ryokan::models::config::save_config(&state.db, &cfg)
+            .await
+            .unwrap();
+        let mut incumbent = None;
+        if edition_conflict {
+            sqlx::query("UPDATE series SET allow_upgrades=1 WHERE id=?")
+                .bind(sid)
+                .execute(&state.db)
+                .await
+                .unwrap();
+            let folder: String = sqlx::query_scalar("SELECT folder_name FROM series WHERE id=?")
+                .bind(sid)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+            let path = temp
+                .path()
+                .join("library")
+                .join(folder)
+                .join("Season 01/Akame ga Kill! - S01E21 [BD 1080p].mkv");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"longer edition").unwrap();
+            seed_probe(
+                &state,
+                &path,
+                &serde_json::json!({"format":{"duration":"2800"},"streams":[
+                    {"index":0,"codec_type":"video","codec_name":"h264","width":1920,"height":1080},
+                    {"index":1,"codec_type":"audio","codec_name":"aac","tags":{"language":"jpn"}}
+                ]}),
+            )
+            .await;
+            incumbent = Some(path);
+        }
+        assert_eq!(
+            search(&state, sid, 21).await,
+            1,
+            "{}",
+            dump_logs(&state.db).await
+        );
+        assert_eq!(client.adds.load(Ordering::SeqCst), 1);
+        assert_eq!(client.resumes.load(Ordering::SeqCst), 1);
+        let probe = serde_json::json!({"format":{"duration":"1400"},"streams":[
+            {"index":0,"codec_type":"video","codec_name":"h264","width":width,"height":height},
+            {"index":1,"codec_type":"audio","codec_name":"aac","tags":{"language":audio}},
+            {"index":2,"codec_type":"subtitle","codec_name":"ass","tags":{"language":subtitles,"title":"Full subtitles"},"disposition":{"forced":0}}
+        ]});
+        finish_with_probe(&state, &client, Some(&probe)).await;
+        let videos = structural_season_numbering::library_videos(&temp.path().join("library"));
+        assert_eq!(
+            videos.len(),
+            usize::from(accepted || edition_conflict),
+            "{}",
+            dump_logs(&state.db).await
+        );
+        if accepted {
+            assert!(videos[0].to_string_lossy().contains("S01E21"));
+        }
+        if let Some(path) = incumbent {
+            assert_eq!(std::fs::read(path).unwrap(), b"longer edition");
+        }
+        let holds = ryokan::models::edition_review::for_episode(&state.db, sid, 21)
+            .await
+            .unwrap();
+        assert_eq!(
+            holds.len(),
+            usize::from(edition_conflict),
+            "{}",
+            dump_logs(&state.db).await
+        );
+    }
+    unset_nyaa_base();
 }
 
 #[tokio::test]

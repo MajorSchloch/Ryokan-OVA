@@ -5,7 +5,7 @@ mod tests;
 
 use crate::services::download_client::{AddOutcome, DownloadClient, wait_for_files};
 use crate::services::release_numbering::ReleaseMapping;
-use crate::services::source_numbering::BoundSourceProof;
+use crate::services::source_numbering::{BoundSourceProof, ProofOrigin};
 
 pub(crate) const HOLD_PREFIX: &str = "Reviewed source held: ";
 
@@ -28,13 +28,40 @@ pub(crate) async fn mapping_for_selection(
         return Ok(None);
     };
     crate::services::source_numbering::loader::refresh(db, &saved.proof).await?;
+    let entry_pack = saved.proof.origin()? == ProofOrigin::AutomaticEntryPack;
     let selected: Vec<_> = filenames
         .iter()
-        .filter(|name| crate::services::auto_search::is_media_filename(name))
+        .filter(|name| {
+            if entry_pack {
+                !name.is_empty()
+            } else {
+                crate::services::auto_search::is_media_filename(name)
+            }
+        })
         .cloned()
         .collect();
     let proof = saved.proof.narrow_to(&selected)?;
     ReleaseMapping::from_bound_source(&proof).map(Some)
+}
+
+/// Save a newly verified entry pack only after native metadata preparation.
+/// Refreshing an existing automatic or reviewed source needs no new write.
+pub(crate) async fn persist_entry_pack(
+    db: &sqlx::SqlitePool,
+    mapping: &ReleaseMapping,
+) -> Result<(), String> {
+    let Some(proof) = mapping.bound_source() else {
+        return Ok(());
+    };
+    if proof.origin()? == ProofOrigin::AutomaticEntryPack {
+        let saved = crate::models::source_numbering::save_entry_pack(db, proof).await?;
+        if saved.proof != *proof {
+            return Err(
+                "Episode mapping: the saved entry-pack decision has a different origin".into(),
+            );
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn selected_indices(
