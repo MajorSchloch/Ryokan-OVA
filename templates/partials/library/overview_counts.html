@@ -1,0 +1,13 @@
+<ul class="overview-counts" aria-label="Episode status">
+    {% if availability.files.complete_scan || availability.files.episodes > 0 %}
+    <li data-summary-part="episodes">
+        <span class="availability-dot availability-available" aria-hidden="true"></span>
+        <span>{% if !availability.files.complete_scan %}At least {% endif %}{{ availability.files.episodes }} downloaded</span>
+    </li>
+    {% endif %}
+    {% if !availability.files.complete_scan %}<li><span class="availability-dot availability-unknown" aria-hidden="true"></span>Incomplete file scan</li>{% endif %}
+    {% if availability.downloading > 0 %}<li><span class="availability-dot availability-downloading" aria-hidden="true"></span>{{ availability.downloading }} downloading</li>{% endif %}
+    {% if availability.missing > 0 %}<li><span class="availability-dot availability-missing" aria-hidden="true"></span>{{ availability.missing }} missing</li>{% endif %}
+    {% if availability.future > 0 %}<li><span class="availability-dot availability-future" aria-hidden="true"></span>{{ availability.future }} upcoming</li>{% endif %}
+    {% if availability.unknown > 0 %}<li><span class="availability-dot availability-unknown" aria-hidden="true"></span>{{ availability.unknown }} unconfirmed</li>{% endif %}
+</ul>

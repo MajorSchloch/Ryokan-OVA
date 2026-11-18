@@ -1,0 +1,12 @@
+{% if files.complete_scan && files.files > 0 %}
+<div class="file-summary overview-file-details">
+    <p data-summary-part="size" title="Logical media size">{{ files.files }} file{% if files.files != 1 %}s{% endif %} · {{ files.size() }}</p>
+    <ul class="overview-quality" data-summary-part="quality" aria-label="File checks">
+        {% if files.target > 0 %}<li>{{ files.target }} target met</li>{% endif %}
+        {% if files.minimum > 0 %}<li>{{ files.minimum }} minimum only</li>{% endif %}
+        {% if files.unmet > 0 %}<li>{{ files.unmet }} requirements unmet</li>{% endif %}
+        {% if files.unverified > 0 %}<li>{{ files.unverified }} unverified</li>{% endif %}
+        {% if files.disabled > 0 %}<li>{{ files.disabled }} checks disabled</li>{% endif %}
+    </ul>
+</div>
+{% endif %}

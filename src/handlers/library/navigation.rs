@@ -23,7 +23,7 @@ pub(super) struct FranchiseCard {
     pub tracked: usize,
     pub available: usize,
     pub progress: CardProgress,
-    pub following: bool,
+    pub upcoming_releases: usize,
     pub formats: String,
     pub next_airing: String,
     pub added_date: String,
@@ -133,6 +133,31 @@ fn next_airing<'a>(rows: impl Iterator<Item = &'a CardProgress>) -> String {
         .unwrap_or_default()
 }
 
+fn upcoming_release(entry: &groups::Entry, tracked: Option<&series::Series>) -> bool {
+    tracked
+        .map(|row| row.status.as_str())
+        .or_else(|| {
+            entry
+                .related
+                .as_ref()
+                .map(|related| related.status.as_str())
+        })
+        .is_some_and(availability::upcoming_status)
+}
+
+fn upcoming_releases(group: &groups::Group, library: &HashMap<i64, &series::Series>) -> usize {
+    group
+        .entries
+        .iter()
+        .filter(|entry| {
+            upcoming_release(
+                entry,
+                entry.series_id.and_then(|id| library.get(&id).copied()),
+            )
+        })
+        .count()
+}
+
 pub(super) async fn cards(
     db: &SqlitePool,
     releases: &[(series::Series, CardProgress)],
@@ -180,12 +205,18 @@ pub(super) async fn cards(
             .collect();
         formats.sort();
         formats.dedup();
-        let p = availability::aggregate(
+        let mut p = availability::aggregate(
             group
                 .entries
                 .iter()
                 .filter_map(|e| e.series_id.and_then(|id| progress.get(&id).copied())),
         );
+        p.following = follows.iter().any(|f| {
+            (f.tv || f.movies || f.ovas)
+                && group.entries.iter().any(|e| e.provider_id == f.anilist_id)
+        });
+        let upcoming_releases = upcoming_releases(&group, &library);
+        p.upcoming |= upcoming_releases > 0;
         let upcoming = next_airing(
             group
                 .entries
@@ -211,10 +242,7 @@ pub(super) async fn cards(
             tracked: group.tracked,
             available: group.outside,
             progress: p,
-            following: follows.iter().any(|f| {
-                (f.tv || f.movies || f.ovas)
-                    && group.entries.iter().any(|e| e.provider_id == f.anilist_id)
-            }),
+            upcoming_releases,
             formats: formats.join(" · "),
             next_airing: upcoming,
             added_date: availability::added_label(&added_at),
@@ -252,12 +280,10 @@ struct Release {
     path: String,
     format: String,
     date: String,
-    status: String,
     in_library: bool,
     series_id: Option<i64>,
     monitor_mode: String,
     requirements_label: String,
-    upcoming: bool,
     aliases: String,
     allow_upgrades: bool,
     progress: CardProgress,
@@ -274,7 +300,7 @@ struct FranchisePage {
     cover_url: String,
     releases: Vec<Release>,
     tracked: usize,
-    following: bool,
+    upcoming_releases: usize,
     seed: i64,
     progress: CardProgress,
     next_airing: String,
@@ -320,10 +346,6 @@ pub async fn page(
     let progress_by_id = availability::load(&state.db, &cfg.media_root, &library)
         .await
         .map_err(read_error)?;
-    let follows = release_follows::list(&state.db).await.map_err(read_error)?;
-    let following = follows.iter().any(|f| {
-        (f.tv || f.movies || f.ovas) && group.entries.iter().any(|e| e.provider_id == f.anilist_id)
-    });
     let representative = representative(&group, &by_id);
     let cover_url = representative
         .map(|s| s.cover_url.clone())
@@ -338,8 +360,10 @@ pub async fn page(
                 .map(|e| e.provider_id)
         })
         .unwrap_or_default();
-    let combined =
+    let mut combined =
         availability::aggregate(library.iter().filter_map(|s| progress_by_id.get(&s.id)));
+    let upcoming_releases = upcoming_releases(&group, &by_id);
+    combined.upcoming |= upcoming_releases > 0;
     let next_airing = next_airing(library.iter().filter_map(|s| progress_by_id.get(&s.id)));
     let future = if seed > 0 {
         super::groups::future_controls(&state.db, &id, seed)
@@ -390,7 +414,7 @@ pub async fn page(
         .iter()
         .map(|e| {
             let tracked = e.series_id.and_then(|id| by_id.get(&id));
-            let summary = e
+            let mut summary = e
                 .series_id
                 .and_then(|id| progress_by_id.get(&id))
                 .cloned()
@@ -399,16 +423,15 @@ pub async fn page(
                     monitoring_label: "Not monitored".into(),
                     ..Default::default()
                 });
-            let next =
-                if tracked.is_some() {
-                    summary.next_airing.clone()
-                } else if e.related.as_ref().is_some_and(|r| {
-                    matches!(r.status.as_str(), "NOT_YET_RELEASED" | "NOT_YET_AIRED")
-                }) {
-                    format!("Premiere · {}", availability::premiere_label(&e.date))
-                } else {
-                    String::new()
-                };
+            let upcoming = upcoming_release(e, tracked.copied());
+            summary.upcoming |= upcoming;
+            let next = if tracked.is_some() {
+                summary.next_airing.clone()
+            } else if upcoming {
+                format!("Premiere · {}", availability::premiere_label(&e.date))
+            } else {
+                String::new()
+            };
             Release {
                 series_id: e.series_id,
                 monitor_mode: if summary.monitoring_label.contains(" of ") {
@@ -432,10 +455,6 @@ pub async fn page(
                     Some(cfg) => super::requirements::brief(cfg),
                     None => "Requirements unavailable".into(),
                 },
-                upcoming: tracked
-                    .map(|s| s.status.as_str())
-                    .or_else(|| e.related.as_ref().map(|r| r.status.as_str()))
-                    .is_some_and(|s| matches!(s, "NOT_YET_RELEASED" | "NOT_YET_AIRED")),
                 aliases: tracked
                     .and_then(|s| aliases.get(&s.id))
                     .cloned()
@@ -465,10 +484,6 @@ pub async fn page(
                 path: super::detail::path(e.library_provider_id.unwrap_or(e.provider_id)),
                 format: e.format.replace('_', " "),
                 date: availability::premiere_label(&e.date),
-                status: tracked
-                    .map(|s| s.status.replace('_', " "))
-                    .or_else(|| e.related.as_ref().map(|r| r.status_display.clone()))
-                    .unwrap_or_default(),
                 monitoring_label: summary.monitoring_label.clone(),
                 next_airing: next,
                 added_date: summary.added_date.clone(),
@@ -488,7 +503,7 @@ pub async fn page(
         cover_url,
         releases,
         tracked: group.tracked,
-        following,
+        upcoming_releases,
         seed,
         progress: combined,
         next_airing,

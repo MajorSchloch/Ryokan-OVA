@@ -31,6 +31,7 @@
         <form method="get" action="/" class="library-search-form">
             <input type="hidden" name="individual" value="{% if individual %}1{% else %}0{% endif %}">
             {% if !custom_list_filter.is_empty() %}<input type="hidden" name="list" value="{{ custom_list_filter }}">{% endif %}
+            <input type="hidden" name="status" value="{{ status_filter }}">
             {% if sort_value.as_str() != "recent" %}<input type="hidden" name="sort" value="{{ sort_value }}">{% endif %}
             <label for="library-search" class="visually-hidden">Search library</label>
             <input type="search"
@@ -73,6 +74,7 @@
             <form method="get" action="/" class="library-presentation-form" onsubmit="libraryPresentationSubmit(this)">
                 {% if !custom_list_filter.is_empty() %}<input type="hidden" name="list" value="{{ custom_list_filter }}">{% endif %}
                 {% if !search_query.is_empty() %}<input type="hidden" name="search" value="{{ search_query }}">{% endif %}
+                <input type="hidden" name="status" value="{{ status_filter }}">
                 {% if sort_value.as_str() != "recent" %}<input type="hidden" name="sort" value="{{ sort_value }}">{% endif %}
                 <input type="hidden" name="individual" value="{% if individual %}0{% else %}1{% endif %}">
                 <label class="checkbox-row"><input id="library-individual" type="checkbox"{% if individual %} checked{% endif %} onchange="this.form.requestSubmit()"> Show individual releases</label>
@@ -169,13 +171,33 @@
     {% endif %}
 </div>
 {% else %}
-<details class="library-display-options"><summary class="btn btn-secondary btn-sm">Display options</summary><fieldset><legend>Card details</legend><label><input type="checkbox" data-summary-toggle="episodes" checked> Episode counts</label><label><input type="checkbox" data-summary-toggle="size" checked> Media size</label><label><input type="checkbox" data-summary-toggle="quality" checked> File checks</label></fieldset></details>
+<div class="library-overview-tools">
+    <form method="get" action="/" class="library-status-form" onchange="filterLibraryStatus()">
+        <input type="hidden" name="individual" value="{% if individual %}1{% else %}0{% endif %}">
+        {% if !custom_list_filter.is_empty() %}<input type="hidden" name="list" value="{{ custom_list_filter }}">{% endif %}
+        {% if !search_query.is_empty() %}<input type="hidden" name="search" value="{{ search_query }}">{% endif %}
+        {% if sort_value.as_str() != "recent" %}<input type="hidden" name="sort" value="{{ sort_value }}">{% endif %}
+        <label for="library-status">Show</label>
+        <select id="library-status" name="status" class="folder-select">
+            <option value="">All {% if individual %}releases{% else %}franchises{% endif %}</option>
+            <option value="following"{% if status_filter == "following" %} selected{% endif %}>{% if individual %}Selected in follow{% else %}Following future releases{% endif %}</option>
+            <option value="available"{% if status_filter == "available" %} selected{% endif %}>Has downloads</option>
+            <option value="downloading"{% if status_filter == "downloading" %} selected{% endif %}>Downloading</option>
+            <option value="missing"{% if status_filter == "missing" %} selected{% endif %}>Has missing episodes</option>
+            <option value="upcoming"{% if status_filter == "upcoming" %} selected{% endif %}>Upcoming</option>
+            <option value="attention"{% if status_filter == "attention" %} selected{% endif %}>Needs attention</option>
+        </select>
+        <noscript><button type="submit" class="btn btn-secondary btn-sm">Apply</button></noscript>
+    </form>
+    <span class="form-hint" id="library-visible-count" role="status">{% if individual %}{{ visible_release_count }} of {{ cards.len() }} releases{% else %}{{ visible_franchise_count }} of {{ franchise_cards.len() }} franchises{% endif %}</span>
+    <details class="library-display-options"><summary class="btn btn-secondary btn-sm">Display options</summary><fieldset><legend>Card details</legend><label><input type="checkbox" data-summary-toggle="episodes" checked> Episode counts</label><label><input type="checkbox" data-summary-toggle="size" checked> Media size</label><label><input type="checkbox" data-summary-toggle="quality" checked> File checks</label></fieldset></details>
+</div>
 <div class="library-grid" id="library-grid"{% if !individual && visible_franchise_count == 0 || individual && visible_release_count == 0 %} style="display: none"{% endif %}>
     {% for franchise in franchise_cards %}
-    <a href="{{ franchise.path }}" class="franchise-card" data-library-card data-search-titles="{{ franchise.search_titles }}"{% if !franchise.matches_search %} style="display: none"{% endif %}>
+    <a href="{{ franchise.path }}" class="franchise-card" data-library-card data-search-titles="{{ franchise.search_titles }}" data-states="{{ franchise.progress.overview_states() }}"{% if !franchise.matches_search || !franchise.progress.matches_overview_status(status_filter.as_str()) %} style="display: none"{% endif %}>
         <div class="series-cover">
             {% if !franchise.cover_url.is_empty() %}<img src="{{ franchise.cover_url }}" alt="" loading="lazy">{% else %}<div class="series-cover-placeholder">No Image</div>{% endif %}
-            {% if franchise.following %}<span class="franchise-follow-badge">Following</span>{% endif %}
+            {% if franchise.progress.following %}<span class="franchise-follow-badge">Follows future releases</span>{% endif %}
         </div>
         {% let availability = &franchise.progress %}
         {% include "partials/library/availability_bar.html" %}
@@ -183,16 +205,16 @@
             <p class="series-title" title="{{ franchise.title }}">{{ franchise.title }}</p>
             <p class="franchise-card-summary">{{ franchise.tracked }} release{% if franchise.tracked != 1 %}s{% endif %} in library{% if franchise.available > 0 %} &middot; {{ franchise.available }} more{% endif %}</p>
             {% if !franchise.formats.is_empty() %}<p class="franchise-card-formats">{{ franchise.formats }}</p>{% endif %}
-            <p class="franchise-card-progress">{{ franchise.progress.label }}</p>
-            {% let files = &franchise.progress.files %}{% include "partials/library/file_summary.html" %}
-            {% include "partials/library/availability_legend.html" %}
+            {% include "partials/library/overview_counts.html" %}
+            {% let files = &franchise.progress.files %}{% include "partials/library/overview_file_details.html" %}
+            {% if franchise.upcoming_releases > 0 %}<p class="card-date">{{ franchise.upcoming_releases }} upcoming release{% if franchise.upcoming_releases != 1 %}s{% endif %}</p>{% endif %}
             {% if !franchise.next_airing.is_empty() %}<p class="card-date"><span>Next airing</span> {{ franchise.next_airing }}</p>{% endif %}
             {% if !franchise.added_date.is_empty() %}<p class="card-date"><span>Added</span> {{ franchise.added_date }}</p>{% endif %}
         </div>
     </a>
     {% endfor %}
     {% for (s, prog) in cards %}
-    <a href="{{ crate::handlers::library::detail::path(s.anilist_id) }}" class="series-card" data-library-card data-search-titles="{{ search_titles.get(&s.id).cloned().unwrap_or_default() }}" id="series-{{ s.id }}"{% if hidden_release_ids.contains(&s.id) %} style="display: none"{% endif %}>
+    <a href="{{ crate::handlers::library::detail::path(s.anilist_id) }}" class="series-card" data-library-card data-search-titles="{{ search_titles.get(&s.id).cloned().unwrap_or_default() }}" data-states="{{ prog.overview_states() }}" id="series-{{ s.id }}"{% if hidden_release_ids.contains(&s.id) || !prog.matches_overview_status(status_filter.as_str()) %} style="display: none"{% endif %}>
         {# Bulk-select checkbox overlay (issue #125). Hidden until the
            library grid enters .selecting mode (see static/js/index.js
            toggleBulkSelectMode). All click handling happens in a
@@ -226,7 +248,7 @@
                 <span class="title-option" data-title-lang="romaji">{% if !s.title_romaji.is_empty() %}{{ s.title_romaji }}{% else if !s.title_english.is_empty() %}{{ s.title_english }}{% else if !s.title_native.is_empty() %}{{ s.title_native }}{% else %}{{ s.title }}{% endif %}</span>
                 <span class="title-option" data-title-lang="native">{% if !s.title_native.is_empty() %}{{ s.title_native }}{% else if !s.title_romaji.is_empty() %}{{ s.title_romaji }}{% else if !s.title_english.is_empty() %}{{ s.title_english }}{% else %}{{ s.title }}{% endif %}</span>
             </p>
-            <div class="release-monitoring-badges"><span class="chip">{{ prog.monitoring_label }}</span>{% if prog.following %}<span class="chip">Franchise follow</span>{% else %}<span class="chip chip-dim">Not selected for follow</span>{% endif %}</div>
+            <div class="release-monitoring-badges"><span class="chip">{{ prog.monitoring_label }}</span>{% if prog.following %}<span class="chip">Selected in follow</span>{% endif %}</div>
             <div class="series-meta">
                 <span class="tag tag-res">{% if !s.format.is_empty() %}{{ s.format.replace("_", " ") }}{% else %}TBA{% endif %}</span>
                 {% if let Some(eps) = s.episodes %}<span class="tag tag-res series-eps">{{ eps }} eps</span>{% endif %}
@@ -238,16 +260,15 @@
                 <span class="tag tag-user-score" title="Your score on AL/MAL">You: {{ you_score.render_html()|safe }}</span>
                 {% endif %}
             </div>
-            <p class="franchise-card-progress">{{ prog.label }}</p>
-            {% let files = &prog.files %}{% include "partials/library/file_summary.html" %}
-            {% include "partials/library/availability_legend.html" %}
+            {% include "partials/library/overview_counts.html" %}
+            {% let files = &prog.files %}{% include "partials/library/overview_file_details.html" %}
             {% if prog.next_airing.as_str() != "Finished" %}<p class="card-date"><span>Next airing</span> {{ prog.next_airing }}</p>{% endif %}
             {% if !prog.added_date.is_empty() %}<p class="card-date"><span>Added</span> {{ prog.added_date }}</p>{% endif %}
         </div>
     </a>
     {% endfor %}
 </div>
-<div id="library-search-empty" class="empty-state"{% if individual && visible_release_count > 0 || !individual && visible_franchise_count > 0 %} style="display: none"{% endif %}><p>No library entries match your search.</p></div>
+<div id="library-search-empty" class="empty-state"{% if individual && visible_release_count > 0 || !individual && visible_franchise_count > 0 %} style="display: none"{% endif %}><p>No library entries match these filters.</p></div>
 {% endif %}
 </div>{# /#library-page #}
 
