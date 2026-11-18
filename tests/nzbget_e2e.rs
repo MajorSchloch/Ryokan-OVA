@@ -412,6 +412,18 @@ async fn copy_duplicate_clears_only_its_pending_attempt_without_a_replacement() 
     }
 }
 
+#[tokio::test]
+async fn marked_good_deletion_closes_only_its_pending_attempt() {
+    for import_enabled in [true, false] {
+        check_deleted_history(
+            import_enabled,
+            "DELETED/GOOD",
+            Some(("completed", "Earlier release", false)),
+        )
+        .await;
+    }
+}
+
 async fn check_deleted_history(
     import_enabled: bool,
     status: &str,
@@ -463,6 +475,9 @@ async fn check_deleted_history(
         let mut d = f.daemon.lock().unwrap();
         d.history.push(older_job.clone());
         d.finish(&f.hash, "NZB", status);
+        if status == "DELETED/GOOD" {
+            d.history.last_mut().unwrap()["DeleteStatus"] = json!("GOOD");
+        }
     }
     tick(&f.app).await;
     tick(&f.app).await;
