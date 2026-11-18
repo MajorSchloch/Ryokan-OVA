@@ -5,6 +5,13 @@
 .dl-section, .dl-sources > details { margin: 20px 0; }
 .dl-sources summary { cursor: pointer; }
 .dl-sources td { overflow-wrap: anywhere; }
+.dl-work-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; }
+.dl-work-heading h3 { margin: 0; }
+.dl-work-heading span { color: var(--text-dim); font-size: 13px; }
+.dl-client-history { border-top: 1px solid var(--border); padding-top: 16px; }
+.dl-client-history > summary { cursor: pointer; font-weight: 600; }
+.dl-job-table .dl-torrent-name { min-width: 220px; white-space: normal; overflow-wrap: anywhere; }
+.dl-job-table td:nth-child(2) { white-space: nowrap; }
 @media (max-width: 640px) {
     .dl-summary { flex-direction: column; gap: 8px; }
     .dl-sources .dl-torrent-name { max-width: 240px; }

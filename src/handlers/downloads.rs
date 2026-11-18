@@ -15,7 +15,7 @@ use crate::AppState;
 use crate::models::grabbed_torrents;
 use crate::services::download_client::{DownloadClient, DownloadItemState};
 mod cleanup;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Route a queue-action (pause/resume/delete) to the right client by
 /// looking up the grab row for `hash` and resolving its
@@ -29,6 +29,7 @@ async fn resolve_client_for_hash(state: &AppState, hash: &str) -> Option<Arc<dyn
 }
 
 struct QueueTorrentView {
+    key: String,
     hash: String,
     name: String,
     size_display: String,
@@ -39,6 +40,7 @@ struct QueueTorrentView {
     state_badge_class: String,
     is_paused: bool,
     can_resume: bool,
+    can_pause: bool,
     protocol_label: String,
     detail: String,
 }
@@ -117,6 +119,7 @@ fn state_badge_class(kind: DownloadItemState) -> &'static str {
 
 fn torrent_to_view(t: &crate::services::download_client::DownloadItem) -> QueueTorrentView {
     QueueTorrentView {
+        key: format!("download-job-{}", hex::encode(t.hash.as_bytes())),
         hash: t.hash.clone(),
         name: t.name.clone(),
         size_display: format_size(t.size),
@@ -130,6 +133,10 @@ fn torrent_to_view(t: &crate::services::download_client::DownloadItem) -> QueueT
             DownloadItemState::Paused | DownloadItemState::PausedComplete
         ),
         can_resume: true,
+        can_pause: !matches!(
+            t.state_kind,
+            DownloadItemState::Paused | DownloadItemState::PausedComplete
+        ),
         protocol_label: "Torrent".into(),
         detail: String::new(),
     }
@@ -141,6 +148,7 @@ struct DownloadsTemplate {
     page: String,
     tab: String,
     queue: Vec<QueueTorrentView>,
+    usenet_history: Vec<QueueTorrentView>,
     queue_error: String,
     history: Vec<grabbed_torrents::GrabbedTorrentWithSeries>,
     blocklist: Vec<grabbed_torrents::GrabbedTorrentWithSeries>,
@@ -167,18 +175,30 @@ pub struct DownloadsQuery {
 #[template(path = "partials/downloads/queue.html")]
 struct QueueTemplate<'a> {
     queue: &'a [QueueTorrentView],
+    usenet_history: &'a [QueueTorrentView],
     queue_error: &'a str,
+    source_controls: bool,
 }
 
-fn work_view(
+struct ImportStatus {
+    state: String,
+    failure_reason: String,
+    completed: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum JobLocation {
+    Work,
+    Sources,
+    UsenetHistory,
+}
+
+fn job_view(
     item: &crate::services::download_client::DownloadItem,
     protocol: &str,
-    pending: bool,
-    known: bool,
-) -> Option<QueueTorrentView> {
-    if protocol == "torrent" && item.state_kind.is_complete() && known && !pending {
-        return None;
-    }
+    import: Option<&ImportStatus>,
+) -> (JobLocation, QueueTorrentView) {
+    let pending = import.is_some_and(|s| s.state == "pending");
     let mut view = torrent_to_view(item);
     view.protocol_label = if protocol == "usenet" {
         "Usenet"
@@ -186,18 +206,65 @@ fn work_view(
         "Torrent"
     }
     .into();
-    if !known && item.state_kind.is_complete() {
+    if protocol == "torrent" && item.state_kind.is_complete() {
+        // Completed sources can resume only through their Accepted review.
+        view.can_resume = false;
+    }
+    if import.is_none() && item.state_kind.is_complete() {
         view.state_label = "Import status unavailable".into();
+        view.state_badge_class = "log-badge-warn".into();
     } else if pending && item.state_kind.is_complete() {
         view.state_label = "Awaiting import".into();
-    } else if protocol == "usenet" && item.state_kind.is_complete() {
-        view.state_label = "Downloaded".into();
+        view.state_badge_class = "log-badge-debug".into();
+    }
+    // A Usenet history row is not a paused transfer. Resume can requeue it.
+    if protocol == "usenet"
+        && (item.state_kind.is_complete()
+            || matches!(
+                item.state_kind,
+                DownloadItemState::Errored | DownloadItemState::Removed
+            ))
+    {
+        view.can_resume = false;
+        view.can_pause = false;
+        if let Some(status) = import {
+            let label = match status.state.as_str() {
+                "imported" if status.completed => Some("Imported"),
+                "replaced" if status.completed => Some("Replaced"),
+                "failed" if status.failure_reason == "requirements_rejected" => {
+                    Some("Requirements rejected")
+                }
+                "failed" => Some("Failed"),
+                "removed" => Some("Removed"),
+                "cancelled" => Some("Cancelled"),
+                _ => None,
+            };
+            if let Some(label) = label {
+                view.state_label = label.into();
+                view.state_badge_class = if status.state == "failed" {
+                    "log-badge-error"
+                } else {
+                    "log-badge-info"
+                }
+                .into();
+                return (JobLocation::UsenetHistory, view);
+            }
+            if matches!(status.state.as_str(), "imported" | "replaced") {
+                view.state_label = "Import record needs review".into();
+                view.state_badge_class = "log-badge-warn".into();
+                view.detail = "No import completion time was recorded.".into();
+            }
+        }
     }
     if item.state_kind == DownloadItemState::Warning {
         view.state_label = "Needs review".into();
         view.detail = item.state.clone();
     }
-    Some(view)
+    if protocol == "torrent" && item.state_kind.is_complete() && import.is_some() && !pending {
+        (JobLocation::Sources, view)
+    } else {
+        (JobLocation::Work, view)
+    }
 }
 
 /// User-facing label for a `download_clients.kind` value. Matches the
@@ -250,14 +317,28 @@ pub async fn downloads_page(
         Vec::new()
     };
     let mut source_jobs = Vec::new();
+    let mut usenet_history = Vec::new();
     let mut current_sources = HashSet::new();
-    let pending_result = sqlx::query_scalar::<_, String>(
-        "SELECT lower(hash) FROM grabbed_torrents WHERE state='pending'",
+    let import_result = sqlx::query_as::<_, (Option<i64>, String, String, String, bool)>(
+        "SELECT download_client_id,lower(hash),state,COALESCE(failure_reason,''),datetime(imported_at) IS NOT NULL FROM grabbed_torrents",
     )
     .fetch_all(&state.db)
     .await;
-    let import_known = pending_result.is_ok();
-    let pending: HashSet<_> = pending_result.unwrap_or_default().into_iter().collect();
+    let import_known = import_result.is_ok();
+    let mut imports = HashMap::new();
+    for (client, hash, state, failure_reason, completed) in import_result.unwrap_or_default() {
+        if let Some(client) = client {
+            // Missing, legacy unscoped, or conflicting ownership stays visible.
+            imports
+                .entry((client, hash))
+                .and_modify(|s| *s = None)
+                .or_insert(Some(ImportStatus {
+                    state,
+                    failure_reason,
+                    completed,
+                }));
+        }
+    }
     let mut any_client_ok = false;
     let (queue, queue_error) = if tab == "queue" || tab == "seeding" {
         // Fan out across every enabled client so SAB / Usenet jobs
@@ -312,22 +393,30 @@ pub async fn downloads_page(
             let views = torrents
                 .iter()
                 .filter_map(|(id, protocol, item)| {
-                    let view = work_view(
+                    let (location, mut view) = job_view(
                         item,
                         protocol,
-                        pending.contains(&item.hash.to_ascii_lowercase()),
-                        import_known,
+                        imports
+                            .get(&(*id, item.hash.to_ascii_lowercase()))
+                            .and_then(Option::as_ref),
                     );
-                    if view.is_none() {
-                        let mut source = torrent_to_view(item);
-                        source.can_resume = all_reviews.iter().any(|r| {
-                            r.client_id == *id
-                                && r.hash.eq_ignore_ascii_case(&item.hash)
-                                && r.verdict == "Accepted"
-                        });
-                        source_jobs.push(source);
+                    view.key = format!("download-job-{id}-{}", hex::encode(item.hash.as_bytes()));
+                    match location {
+                        JobLocation::Work => Some(view),
+                        JobLocation::UsenetHistory => {
+                            usenet_history.push(view);
+                            None
+                        }
+                        JobLocation::Sources => {
+                            view.can_resume = all_reviews.iter().any(|r| {
+                                r.client_id == *id
+                                    && r.hash.eq_ignore_ascii_case(&item.hash)
+                                    && r.verdict == "Accepted"
+                            });
+                            source_jobs.push(view);
+                            None
+                        }
                     }
-                    view
                 })
                 .collect();
             let error_msg = if errors.is_empty() {
@@ -407,6 +496,12 @@ pub async fn downloads_page(
                     &queue
                 },
                 queue_error: &queue_error,
+                usenet_history: if source_fragment {
+                    &[]
+                } else {
+                    &usenet_history
+                },
+                source_controls: source_fragment,
             }
             .render()
             .unwrap_or_default(),
@@ -486,6 +581,7 @@ pub async fn downloads_page(
         page: "downloads".to_string(),
         tab,
         queue,
+        usenet_history,
         queue_error,
         history,
         blocklist,
@@ -627,6 +723,9 @@ pub async fn api_blocklist_remove(
 }
 
 #[cfg(test)]
+mod queue_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -695,44 +794,126 @@ mod tests {
         }
     }
 
+    fn imported(state: &str) -> ImportStatus {
+        ImportStatus {
+            state: state.into(),
+            failure_reason: String::new(),
+            completed: state == "imported" || state == "replaced",
+        }
+    }
+
     #[test]
-    fn completed_sources_leave_work_queue_only_when_import_state_is_known() {
+    fn completed_sources_leave_work_only_with_known_ownership() {
         let complete = item(DownloadItemState::PausedComplete);
-        assert!(work_view(&complete, "torrent", false, true).is_none());
         assert_eq!(
-            work_view(&complete, "torrent", true, true)
-                .unwrap()
-                .state_label,
-            "Awaiting import"
+            job_view(&complete, "torrent", Some(&imported("imported"))).0,
+            JobLocation::Sources
         );
+        let (location, view) = job_view(&complete, "torrent", Some(&imported("pending")));
+        assert_eq!(location, JobLocation::Work);
+        assert_eq!(view.state_label, "Awaiting import");
+        let (location, view) = job_view(&complete, "torrent", None);
+        assert_eq!(location, JobLocation::Work);
+        assert_eq!(view.state_label, "Import status unavailable");
+        assert!(!view.can_resume);
+        let html = QueueTemplate {
+            queue: &[view],
+            usenet_history: &[],
+            queue_error: "",
+            source_controls: false,
+        }
+        .render()
+        .unwrap();
+        assert!(!html.contains("data-dl-action=\"resume\""));
+    }
+
+    #[test]
+    fn usenet_history_records_outcomes_without_transfer_controls() {
+        let complete = item(DownloadItemState::PausedComplete);
+        for (state, label) in [
+            ("imported", "Imported"),
+            ("replaced", "Replaced"),
+            ("failed", "Failed"),
+            ("removed", "Removed"),
+            ("cancelled", "Cancelled"),
+        ] {
+            let (location, view) = job_view(&complete, "usenet", Some(&imported(state)));
+            assert_eq!(location, JobLocation::UsenetHistory);
+            assert_eq!(view.state_label, label);
+            assert!(!view.can_resume && !view.can_pause);
+        }
+        let mut rejected = imported("failed");
+        rejected.failure_reason = "requirements_rejected".into();
         assert_eq!(
-            work_view(&complete, "torrent", false, false)
-                .unwrap()
-                .state_label,
-            "Import status unavailable"
-        );
-        assert!(
-            work_view(
-                &item(DownloadItemState::Downloading),
-                "torrent",
-                false,
-                true
-            )
-            .is_some()
+            job_view(&complete, "usenet", Some(&rejected)).1.state_label,
+            "Requirements rejected"
         );
     }
 
     #[test]
-    fn usenet_completion_and_native_warnings_have_truthful_labels() {
-        assert_eq!(
-            work_view(&item(DownloadItemState::Seeding), "usenet", false, true)
-                .unwrap()
-                .state_label,
-            "Downloaded"
+    fn uncertain_pending_and_warning_jobs_stay_in_current_work() {
+        let complete = item(DownloadItemState::PausedComplete);
+        for import in [None, Some(imported("pending")), Some(imported("unknown"))] {
+            assert_eq!(
+                job_view(&complete, "usenet", import.as_ref()).0,
+                JobLocation::Work
+            );
+        }
+        let mut incomplete_record = imported("imported");
+        incomplete_record.completed = false;
+        let (location, view) = job_view(&complete, "usenet", Some(&incomplete_record));
+        assert_eq!(location, JobLocation::Work);
+        assert_eq!(view.state_label, "Import record needs review");
+        let (location, view) = job_view(
+            &item(DownloadItemState::Warning),
+            "usenet",
+            Some(&imported("imported")),
         );
-        let warning = work_view(&item(DownloadItemState::Warning), "usenet", false, true).unwrap();
-        assert_eq!(warning.state_label, "Needs review");
-        assert_eq!(warning.detail, "native warning");
+        assert_eq!(location, JobLocation::Work);
+        assert_eq!(view.state_label, "Needs review");
+        assert_eq!(view.detail, "native warning");
+        assert_eq!(
+            job_view(
+                &item(DownloadItemState::Downloading),
+                "usenet",
+                Some(&imported("imported"))
+            )
+            .0,
+            JobLocation::Work
+        );
+    }
+
+    #[test]
+    fn past_usenet_results_render_separately_from_current_transfers() {
+        let work = job_view(
+            &item(DownloadItemState::PausedComplete),
+            "usenet",
+            Some(&imported("pending")),
+        )
+        .1;
+        let past = job_view(
+            &item(DownloadItemState::PausedComplete),
+            "usenet",
+            Some(&imported("imported")),
+        )
+        .1;
+        let html = QueueTemplate {
+            queue: &[work],
+            usenet_history: &[past],
+            queue_error: "",
+            source_controls: false,
+        }
+        .render()
+        .unwrap();
+        let (work, past) = html.split_once("id=\"usenet-history\"").unwrap();
+        assert!(work.contains("Awaiting import") && !work.contains("Imported"));
+        assert!(past.contains("Imported"));
+        assert!(
+            !past.contains("data-dl-action=\"resume\"")
+                && !past.contains("data-dl-action=\"pause\"")
+        );
+        assert!(past.contains("data-dl-action=\"delete\""));
+        assert!(!past.contains("<th>Progress</th>"));
     }
 
     #[test]
@@ -741,6 +922,8 @@ mod tests {
         source.can_resume = false;
         let html = QueueTemplate {
             queue: &[source],
+            usenet_history: &[],
+            source_controls: true,
             queue_error: "Other client unavailable",
         }
         .render()
