@@ -14,6 +14,7 @@ use crate::services::{custom_formats::CompiledCustomFormat, media, redownload};
 pub const TASK: &str = "recent_episode_search";
 pub const STARTED: &str = "Automatic episode check started";
 pub const FINISHED: &str = "Automatic episode check finished";
+const COOLDOWN_HELD: &str = "Automatic recovery held";
 const PASS_LIMIT: usize = 12;
 static RUN_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(Default::default);
 
@@ -96,16 +97,22 @@ pub(crate) async fn retry_allowed(
             return Err("Automatic retry of failed downloads is disabled".into());
         }
     }
-    let failed = grabbed_torrents::count_recent_failed(db, sid, redownload::WINDOW_HOURS)
+    match retry_limit_reason(db, sid).await? {
+        Some(reason) => Err(reason),
+        None => Ok(()),
+    }
+}
+
+async fn retry_limit_reason(db: &SqlitePool, series_id: i64) -> Result<Option<String>, String> {
+    let failed = grabbed_torrents::count_recent_failed(db, series_id, redownload::WINDOW_HOURS)
         .await
         .map_err(|e| e.to_string())?;
-    if failed >= redownload::LOOP_BREAKER {
-        return Err(format!(
+    Ok((failed >= redownload::LOOP_BREAKER).then(|| {
+        format!(
             "Retry limit reached: {failed} failures in {} hours",
             redownload::WINDOW_HOURS
-        ));
-    }
-    Ok(())
+        )
+    }))
 }
 
 /// A fresh, explicit monitor row is required. Unknown monitoring is a hold.
@@ -292,18 +299,39 @@ pub async fn run_once(state: &AppState) -> Result<String, String> {
     let mut queued = 0;
     let mut held = 0;
     let mut errors = 0;
+    let mut cooldown_series = HashSet::new();
     for t in candidates {
-        if slots
-            .get(&t.folder_name)
-            .is_some_and(|have| have.contains(&t.episode))
+        if checked == PASS_LIMIT {
+            break;
+        }
+        if cooldown_series.contains(&t.series_id)
+            || slots
+                .get(&t.folder_name)
+                .is_some_and(|have| have.contains(&t.episode))
         {
             continue;
         }
         if has_pending(&state.db, t.series_id, t.episode).await? {
             continue;
         }
-        if checked == PASS_LIMIT {
-            break;
+        if let Some(reason) = retry_limit_reason(&state.db, t.series_id).await? {
+            let mut event = library_activity::Event::new(
+                format!("recent:cooldown:{}:{}", t.series_id, rand::random::<u64>()),
+                COOLDOWN_HELD,
+                Some(t.series_id),
+                &t.title,
+                &reason,
+            );
+            event.provider_id = Some(t.provider_id);
+            event.detail = serde_json::json!({"scope":"release","outcome":"held"}).to_string();
+            if !library_activity::try_append(&state.db, event)
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                return Err("Could not record release retry cooldown".into());
+            }
+            cooldown_series.insert(t.series_id);
+            continue;
         }
         let key = format!(
             "recent:{}:{}:{}",
@@ -371,9 +399,14 @@ pub async fn run_once(state: &AppState) -> Result<String, String> {
             return Err("Could not record automatic episode outcome".into());
         }
     }
-    let summary = format!(
+    let mut summary = format!(
         "Checked {checked} missing episodes: {queued} queued, {held} held, {errors} errors. Queued releases still require verified import."
     );
+    if !cooldown_series.is_empty() {
+        let count = cooldown_series.len();
+        let noun = if count == 1 { "release" } else { "releases" };
+        summary.push_str(&format!(" Retry cooldown held {count} {noun}."));
+    }
     if errors > 0 {
         Err(summary)
     } else {
