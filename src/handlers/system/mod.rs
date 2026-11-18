@@ -117,6 +117,7 @@ struct SystemTemplate {
     /// populated when `tab == "review"`; empty on every other tab so
     /// the serial fan-out stays cheap.
     review_entries: Vec<episode_tags::NeedsReviewEntry>,
+    edition_reviews: Vec<crate::models::edition_review::Summary>,
     /// Misgrab guardrails: detected misgrabs awaiting Restore or Dismiss;
     /// populated only when `tab == "misgrabs"`.
     misgrab_entries: Vec<crate::models::grabbed_torrents::MisgrabEntry>,
@@ -479,6 +480,13 @@ pub async fn system_page(
     } else {
         None
     };
+    let edition_reviews = if tab == "review" {
+        crate::models::edition_review::summaries(&state.db)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let template = SystemTemplate {
         page: "system".to_string(),
         tab,
@@ -508,6 +516,7 @@ pub async fn system_page(
         rss_recent,
         scheduled_tasks,
         review_entries,
+        edition_reviews,
         misgrab_entries,
         title_language,
         notification_providers,
@@ -641,6 +650,7 @@ pub async fn debug_settings_submit(
         rss_recent: Vec::new(),
         scheduled_tasks: scheduled_tasks::list(&state.db).await.unwrap_or_default(),
         review_entries: Vec::new(),
+        edition_reviews: Vec::new(),
         misgrab_entries: Vec::new(),
         title_language: cfg.title_language.clone(),
         notification_providers: Vec::new(),

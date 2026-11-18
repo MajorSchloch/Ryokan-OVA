@@ -114,6 +114,13 @@ pub struct ReviewPreview {
 pub enum ProofOrigin {
     HumanReviewed,
     AutomaticUnique,
+    AutomaticEntryPack,
+}
+
+impl ProofOrigin {
+    pub(crate) fn is_automatic(self) -> bool {
+        self != Self::HumanReviewed
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -127,7 +134,13 @@ pub struct AutomaticEvidence {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "origin", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProofProvenance {
-    AutomaticUnique { evidence: AutomaticEvidence },
+    AutomaticUnique {
+        evidence: AutomaticEvidence,
+    },
+    AutomaticEntryPack {
+        verifier_version: u32,
+        publication_url: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -563,6 +576,38 @@ impl ReviewPreview {
 }
 
 impl BoundSourceProof {
+    pub(crate) fn for_entry_pack(
+        domain: SourceDomain,
+        info_hash: &str,
+        published_files: &[String],
+        publication_url: &str,
+        episode: i32,
+    ) -> Result<Self, String> {
+        let owner = domain.root_anilist_id;
+        let preview = prepare_review(domain, info_hash, published_files, owner)?;
+        let selected: Vec<_> = preview
+            .files
+            .iter()
+            .filter(|file| {
+                file.eligible
+                    && file.target_first == Some(episode)
+                    && file.target_last == Some(episode)
+            })
+            .map(|file| file.name.clone())
+            .collect();
+        if selected.len() != 1 {
+            return Err(fail("entry pack does not identify one exact wanted file"));
+        }
+        let mut proof = preview.confirm(&selected)?;
+        proof.version = 2;
+        proof.provenance = Some(ProofProvenance::AutomaticEntryPack {
+            verifier_version: 1,
+            publication_url: publication_url.to_string(),
+        });
+        proof.validate()?;
+        Ok(proof)
+    }
+
     pub fn origin(&self) -> Result<ProofOrigin, String> {
         match (self.version, &self.provenance) {
             (1, None) => Ok(ProofOrigin::HumanReviewed),
@@ -578,6 +623,17 @@ impl BoundSourceProof {
                         == Some(evidence.publication_url.as_str()) =>
             {
                 Ok(ProofOrigin::AutomaticUnique)
+            }
+            (
+                2,
+                Some(ProofProvenance::AutomaticEntryPack {
+                    verifier_version: 1,
+                    publication_url,
+                }),
+            ) if crate::services::nyaa::view_page_url(publication_url).as_deref()
+                == Some(publication_url.as_str()) =>
+            {
+                Ok(ProofOrigin::AutomaticEntryPack)
             }
             _ => Err(fail("unsupported source-proof version or origin")),
         }
@@ -627,7 +683,7 @@ impl BoundSourceProof {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        self.origin()?;
+        let origin = self.origin()?;
         let preview = prepare_review(
             self.domain.clone(),
             &self.info_hash,
@@ -641,6 +697,44 @@ impl BoundSourceProof {
             .collect();
         if !preview.confirm(&names)?.same_geometry(self) {
             return Err(fail("saved source proof differs from its publication"));
+        }
+        if origin == ProofOrigin::AutomaticEntryPack {
+            let owner = &self.domain.entries[0];
+            let count = owner.episodes.unwrap_or_default();
+            if self.target_anilist_id != self.domain.root_anilist_id
+                || self.domain.entries.len() != 1
+                || self.domain.rules
+                    != [MappingRule {
+                        source_first: 1,
+                        source_last: count,
+                        target_entry: self.target_anilist_id,
+                        target_first: 1,
+                    }]
+                || self.selected_files.len() != 1
+                || self.episodes().len() != 1
+            {
+                return Err(fail(
+                    "entry-pack proof must bind one file in a single entry",
+                ));
+            }
+            let mut episodes = BTreeSet::new();
+            for file in preview.files.iter().filter(|file| {
+                auto_search::main_video_file(
+                    Path::new(&file.name),
+                    media::is_tv_format(&owner.format),
+                )
+            }) {
+                let Some(episode) = file.target_first else {
+                    return Err(fail("entry-pack proof has an unresolved episode file"));
+                };
+                if !file.eligible || file.target_last != Some(episode) || !episodes.insert(episode)
+                {
+                    return Err(fail("entry-pack proof has conflicting episode files"));
+                }
+            }
+            if count < 2 || episodes.into_iter().ne(1..=count) {
+                return Err(fail("entry-pack proof has incomplete episode coverage"));
+            }
         }
         Ok(())
     }
@@ -685,11 +779,12 @@ impl BoundSourceProof {
             .collect();
         let mut seen = HashSet::new();
         let mut actual = HashSet::new();
+        let strict_selection = self.origin()? == ProofOrigin::AutomaticEntryPack;
         for &(name, wanted) in files {
             if !seen.insert(name) {
                 return Err(fail("duplicate downloaded source filename"));
             }
-            if wanted && post_processing::is_video_file(name) {
+            if wanted && (post_processing::is_video_file(name) || strict_selection) {
                 if !expected.contains(name) {
                     return Err(fail("wanted file has no saved source assignment"));
                 }
@@ -699,13 +794,13 @@ impl BoundSourceProof {
         }
         if actual != expected {
             return Err(fail(
-                "downloaded files do not contain the exact reviewed selection",
+                "downloaded files do not contain the exact saved selection",
             ));
         }
         let published: HashSet<_> = self.published_files.iter().map(String::as_str).collect();
         if seen != published {
             return Err(fail(
-                "downloaded file manifest differs from the reviewed publication",
+                "downloaded file manifest differs from the saved publication",
             ));
         }
         Ok(())

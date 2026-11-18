@@ -36,9 +36,11 @@ FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d
 # curl:            used by the compose healthcheck.
 # gosu:            drops privileges from root to the ryokan user in the entrypoint.
 # passwd:          provides useradd/groupadd/usermod/groupmod for the entrypoint.
+# ffmpeg:          creates short browser previews on the edition comparison page.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    ffmpeg \
     gosu \
     passwd \
     && rm -rf /var/lib/apt/lists/*

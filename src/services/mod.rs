@@ -4,6 +4,7 @@ pub mod anime_relations;
 pub mod calendar;
 pub mod crypto;
 pub mod download_client;
+pub(crate) mod edition_review;
 pub mod episode_mapping;
 pub mod external_sync;
 pub mod folder_cleanup;

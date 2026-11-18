@@ -464,10 +464,16 @@ async fn automatic_scope_url_selection_and_origin_conflicts_never_replace_saved_
     let before = decisions_snapshot(&db).await;
     let mut different_scope = proof.clone();
     let ProofProvenance::AutomaticUnique { evidence } =
-        different_scope.provenance.as_mut().unwrap();
+        different_scope.provenance.as_mut().unwrap()
+    else {
+        panic!("expected a finite-source proof")
+    };
     evidence.scope_fingerprint = "d".repeat(64);
     let mut different_url = proof.clone();
-    let ProofProvenance::AutomaticUnique { evidence } = different_url.provenance.as_mut().unwrap();
+    let ProofProvenance::AutomaticUnique { evidence } = different_url.provenance.as_mut().unwrap()
+    else {
+        panic!("expected a finite-source proof")
+    };
     evidence.publication_url = "https://nyaa.si/view/1428088".into();
     for conflicting in [
         different_scope,
@@ -496,13 +502,22 @@ async fn save_entry_points_reject_wrong_or_future_proof_origins_before_any_write
     missing_provenance.provenance = None;
     let mut future_verifier = automatic.clone();
     let ProofProvenance::AutomaticUnique { evidence } =
-        future_verifier.provenance.as_mut().unwrap();
+        future_verifier.provenance.as_mut().unwrap()
+    else {
+        panic!("expected a finite-source proof")
+    };
     evidence.verifier_version = 2;
     let mut invalid_scope = automatic.clone();
-    let ProofProvenance::AutomaticUnique { evidence } = invalid_scope.provenance.as_mut().unwrap();
+    let ProofProvenance::AutomaticUnique { evidence } = invalid_scope.provenance.as_mut().unwrap()
+    else {
+        panic!("expected a finite-source proof")
+    };
     evidence.scope_fingerprint = "E".repeat(64);
     let mut invalid_url = automatic;
-    let ProofProvenance::AutomaticUnique { evidence } = invalid_url.provenance.as_mut().unwrap();
+    let ProofProvenance::AutomaticUnique { evidence } = invalid_url.provenance.as_mut().unwrap()
+    else {
+        panic!("expected a finite-source proof")
+    };
     evidence.publication_url = "file:///untrusted".into();
     for invalid in [
         future_version,

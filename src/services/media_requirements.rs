@@ -332,6 +332,15 @@ impl Policy {
 
     /// Preserve known capabilities while improving at least one unmet target.
     pub fn validate_replacement(&self, old: &Observed, new: &Observed) -> Result<(), String> {
+        self.validate_replacement_with_edition(old, new, false)
+    }
+
+    pub(crate) fn validate_replacement_with_edition(
+        &self,
+        old: &Observed,
+        new: &Observed,
+        edition_reviewed: bool,
+    ) -> Result<(), String> {
         if !self.enabled {
             return Ok(());
         }
@@ -346,17 +355,8 @@ impl Policy {
         // changes from credits or disclaimers; hold substantial losses for
         // review. An explicit interactive replacement can still choose a
         // different edition deliberately.
-        if let (Some(before), Some(after)) = (old.duration_seconds, new.duration_seconds)
-            && before.is_finite()
-            && after.is_finite()
-            && before > 0.0
-            && after > 0.0
-            && before - after > 300.0
-            && after < before * 0.8
-        {
-            return Err(format!(
-                "Replacement is substantially shorter ({after:.0}s versus {before:.0}s); review the edition before replacing it automatically"
-            ));
+        if !edition_reviewed && let Some(conflict) = edition_conflict(old, new) {
+            return Err(conflict.reason());
         }
         if new.resolution == Resolution::Unknown
             || new.resolution.rank() < old.resolution.rank()
@@ -382,6 +382,31 @@ impl Policy {
         }
         Ok(())
     }
+}
+
+pub(crate) struct EditionConflict {
+    before: f64,
+    after: f64,
+}
+
+impl EditionConflict {
+    pub(crate) fn reason(&self) -> String {
+        format!(
+            "Replacement is substantially shorter ({:.0}s versus {:.0}s); review the edition before replacing it automatically",
+            self.after, self.before
+        )
+    }
+}
+
+pub(crate) fn edition_conflict(old: &Observed, new: &Observed) -> Option<EditionConflict> {
+    let (before, after) = (old.duration_seconds?, new.duration_seconds?);
+    (before.is_finite()
+        && after.is_finite()
+        && before > 0.0
+        && after > 0.0
+        && before - after > 300.0
+        && after < before * 0.8)
+        .then_some(EditionConflict { before, after })
 }
 
 /// Read actual library files once per series. An unavailable, escaped or

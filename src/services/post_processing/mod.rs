@@ -1315,6 +1315,7 @@ pub(crate) enum ImportOutcome {
 /// instead of the parent's. Grabs without routes fall through to the
 /// legacy single-series behavior where every file targets
 /// `grab.series_id`.
+#[allow(clippy::too_many_arguments)]
 async fn import_torrent(
     state: &AppState,
     cfg: &config::Config,
@@ -1327,6 +1328,7 @@ async fn import_torrent(
     // routed `get_files` to the wrong client for any pinned grab.
     client: &std::sync::Arc<dyn DownloadClient>,
     completed_attempt: Option<&str>,
+    edition_review: Option<&crate::models::edition_review::Review>,
 ) -> Result<ImportOutcome, String> {
     let migration_replay = grabbed_torrents::get_migration_replay(&state.db, grab.id).await?;
     let prior_coverage: std::collections::BTreeMap<i64, Vec<i32>> = if migration_replay.is_some() {
@@ -1615,6 +1617,20 @@ async fn import_torrent(
             .iter()
             .map(|file_idx| (*file_idx, &files[*file_idx]))
             .collect();
+    let reviewable_mapping = match (grab.is_batch, release_mapping.as_ref()) {
+        (_, Some(mapping)) if mapping.is_single_episode_pack() => true,
+        (true, _) => false,
+        (false, mapping) => mapping.is_none_or(|mapping| mapping.bound_source().is_none()),
+    };
+    let exact_single = reviewable_mapping
+        && grab.episode_numbers.len() == 1
+        && grab.download_client_id.is_some()
+        && video_files.len() == 1
+        && migration_replay.is_none()
+        && routes.is_empty();
+    if edition_review.is_some() && !exact_single {
+        return Err("The download no longer contains one verified episode.".into());
+    }
 
     let replay_files = migration_replay
         .as_ref()
@@ -2090,6 +2106,9 @@ async fn import_torrent(
                 && (media::path_names_specials(Path::new(&file.name))
                     || name_span.is_some_and(|s| s.special)
                     || (name_span.is_none() && media::has_special_marker(&lower_name))));
+        if is_special && edition_review.is_some() {
+            return Err("The candidate is no longer mapped to this episode.".into());
+        }
         if is_special {
             // The ownership rule the episode path applies below
             // (`grab_claims_episode`): a batch, a routed file, or a
@@ -2363,11 +2382,34 @@ async fn import_torrent(
                 .filter(|file| file.episode_number <= ep_last && file.episode_last >= ep_num)
                 .map(|file| (series_root.join(&file.filename), file.span()))
                 .collect();
+        let edition_scope = exact_single
+            && target_series_id == grab.series_id
+            && grab.episode_numbers.as_slice() == [ep_num]
+            && ep_num == ep_last
+            && existing_for_ep.len() == 1
+            && existing_for_ep[0].1.first == ep_num
+            && existing_for_ep[0].1.last == ep_num;
+        if let Some(review) = edition_review
+            && (!edition_scope
+                || ctx.series.anilist_id != review.provider_id
+                || ep_num != review.episode
+                || !tokio::fs::canonicalize(&src)
+                    .await
+                    .is_ok_and(|path| path == Path::new(&review.source_path))
+                || !tokio::fs::canonicalize(&existing_for_ep[0].0)
+                    .await
+                    .is_ok_and(|path| path == Path::new(&review.current_path)))
+        {
+            return Err(
+                "The episode, candidate, or current file changed. Reload the review.".into(),
+            );
+        }
 
         // A pack chosen to fill missing slots must not replace a present
         // episode. Permission is tied to the explicit episode request and
         // the parent entry; it never spreads to another episode or sibling.
-        let protects_existing = !ctx.series.allow_upgrades
+        let protects_existing = edition_review.is_none()
+            && !ctx.series.allow_upgrades
             && existing_for_ep.iter().any(|(_, span)| {
                 (span.first..=span.last).any(|ep| {
                     !(target_series_id == grab.series_id && replacement_episode == Some(ep))
@@ -2526,6 +2568,12 @@ async fn import_torrent(
         )
         .await?;
         let required_transaction = subtitle_guard::required(&import_cfg);
+        if edition_review.is_some()
+            && (!required_transaction || !import_cfg.media_requirements_enabled)
+        {
+            return Err("Media requirements changed. The existing file was kept.".into());
+        }
+        let mut edition_hold = None;
         let placed = if required_transaction {
             let extensions = [cfg.extra_file_extensions.as_str(), "srt,ass,ssa"].join(",");
             let extensions = extras::parse_extensions(&extensions);
@@ -2558,10 +2606,19 @@ async fn import_torrent(
                 .iter()
                 .map(|(path, _)| path.clone())
                 .collect();
-            match subtitle_guard::import_required(
+            let edition = match edition_review {
+                Some(review) => subtitle_guard::EditionReview::Confirm(review),
+                None if edition_scope => subtitle_guard::EditionReview::Capture(&mut edition_hold),
+                None => subtitle_guard::EditionReview::None,
+            };
+            match subtitle_guard::import_required_with_edition(
                 &state.db,
                 &import_cfg,
-                &cfg.post_processing_mode,
+                if edition_review.is_some() {
+                    "copy"
+                } else {
+                    &cfg.post_processing_mode
+                },
                 &src,
                 &dest_video,
                 &old_paths,
@@ -2570,17 +2627,37 @@ async fn import_torrent(
                 &candidates,
                 name_span,
                 videos_in_source,
-                !(target_series_id == grab.series_id
-                    && replacement_episode == Some(ep_num)
-                    && ep_num == ep_last
-                    && existing_for_ep
-                        .iter()
-                        .all(|(_, span)| span.first == ep_num && span.last == ep_num)),
+                edition_review.is_some()
+                    || !(target_series_id == grab.series_id
+                        && replacement_episode == Some(ep_num)
+                        && ep_num == ep_last
+                        && existing_for_ep
+                            .iter()
+                            .all(|(_, span)| span.first == ep_num && span.last == ep_num)),
+                edition,
             )
             .await
             {
                 Ok(()) => Ok(None),
                 Err(reason) => {
+                    if let Some(hold) = edition_hold.take() {
+                        crate::services::edition_review::record_hold(
+                            &state.db,
+                            grab,
+                            ctx.series.anilist_id,
+                            ep_num,
+                            Path::new(&source_base),
+                            &src,
+                            &existing_for_ep[0].0,
+                            hold.source_identity,
+                            hold.current_identity,
+                            hold.reason,
+                        )
+                        .await;
+                    }
+                    if edition_review.is_some() {
+                        return Err(reason);
+                    }
                     let content_rejection = subtitle_guard::is_content_rejection(&reason);
                     if content_rejection
                         && match completed_attempt {
@@ -2855,7 +2932,7 @@ async fn import_torrent(
             // batch grab that covers 12 episodes doesn't UPDATE the
             // same old grab 12 times.
             for old_grab in &old_grabs {
-                if !old_grab.hash.is_empty() {
+                if edition_review.is_none() && !old_grab.hash.is_empty() {
                     // Issue #28 — preserve PT seed rules
                     // across upgrade-replace. The old torrent has
                     // imported and is seeding to its per-tracker
@@ -2892,7 +2969,11 @@ async fn import_torrent(
                         }
                     }
                 }
-                grabs_to_mark_replaced.insert(old_grab.id);
+                if edition_review.is_none()
+                    || (!old_grab.is_batch && old_grab.episode_numbers.as_slice() == [ep_num])
+                {
+                    grabs_to_mark_replaced.insert(old_grab.id);
+                }
             }
 
             // Per-episode history counterpart: flip the old grab's
@@ -2924,7 +3005,7 @@ async fn import_torrent(
                 // Subtitles that travel with the video (Sonarr's "Import
                 // Extra Files"): named after the episode file so the
                 // recycle bin retires them with it.
-                if cfg.import_extra_files {
+                if edition_review.is_none() && cfg.import_extra_files {
                     let extensions = extras::parse_extensions(&cfg.extra_file_extensions);
                     // The download's own files with a wanted extension:
                     // from the client's list, or a walk of the video's
@@ -3245,7 +3326,9 @@ async fn import_torrent(
                     if is_upgrade { "Upgraded" } else { "Imported" },
                     Some(target_series_id),
                     &ctx.series.title,
-                    if is_upgrade {
+                    if edition_review.is_some() {
+                        "Replaced the current file after an explicit edition review and verification of media requirements."
+                    } else if is_upgrade {
                         "Replaced existing media after the incoming file passed the import and replacement checks."
                     } else {
                         "Imported accepted media after the configured file checks passed."
@@ -3558,6 +3641,114 @@ async fn import_torrent(
     } else {
         Ok(ImportOutcome::PartiallyImported { failed_episodes })
     }
+}
+
+/// Replay a single retained edition through the same verified importer.
+pub(crate) async fn resolve_edition(
+    state: &AppState,
+    review_id: i64,
+    use_candidate: bool,
+    dismiss_others: bool,
+) -> Result<(), String> {
+    let (Ok(_post_processing), Ok(_manual_import)) = (
+        POST_PROC_LOCK.try_lock(),
+        crate::services::manual_import::import::IMPORT_LOCK.try_lock(),
+    ) else {
+        return Err("An import is running. Try again in a moment.".into());
+    };
+    let db_error = |e: sqlx::Error| e.to_string();
+    let review = crate::models::edition_review::get_open(&state.db, review_id)
+        .await
+        .map_err(db_error)?
+        .ok_or("This review is closed or the download changed.")?;
+    if !use_candidate {
+        return super::edition_review::keep(state, &review, dismiss_others).await;
+    }
+    let cfg = config::get_config(&state.db)
+        .await
+        .map_err(db_error)?
+        .ok_or("Ryokan settings are unavailable.")?;
+    let tracked = series::get_by_id(&state.db, review.series_id)
+        .await
+        .map_err(db_error)?
+        .ok_or("This release is no longer in the library.")?;
+    super::edition_review::checked_paths(&review, &cfg, &tracked).await?;
+    if cfg.recycle_bin_path.trim().is_empty()
+        || recycle::check_unwritable(&cfg.recycle_bin_path).await
+    {
+        return Err("Configure a writable recycle bin to preserve the current file.".into());
+    }
+    if !grabbed_torrents::find_pending_for_episode(&state.db, review.series_id, review.episode)
+        .await
+        .map_err(db_error)?
+        .is_empty()
+    {
+        return Err(
+            "Another download is active for this episode. Try again after it finishes.".into(),
+        );
+    }
+    let grab = grabbed_torrents::get_by_id(&state.db, review.grab_id)
+        .await
+        .map_err(db_error)?
+        .filter(|grab| grab.grabbed_at == review.grabbed_at)
+        .ok_or("The download record changed.")?;
+    let id = grab
+        .download_client_id
+        .ok_or("The original download client is unavailable.")?;
+    let (_, client) = state
+        .resolve_grab_client_with_id(Some(id), &grab.hash)
+        .await
+        .filter(|(resolved, _)| *resolved == id)
+        .ok_or("The original download client is unavailable.")?;
+    let settings = crate::models::download_clients::get_by_id(&state.db, id)
+        .await
+        .map_err(db_error)?
+        .ok_or("The original download client is unavailable.")?;
+    let native = client
+        .list_scoped()
+        .await?
+        .into_iter()
+        .find(|job| job.hash == grab.hash && job.state_kind.is_complete())
+        .ok_or("The original job is no longer complete or available.")?;
+    let raw_root = if client.protocol() == "usenet" && !native.content_path.is_empty() {
+        &native.content_path
+    } else {
+        &native.save_path
+    };
+    let root = crate::services::download_client::translate_client_path(
+        raw_root,
+        &native.save_path,
+        &settings.download_path,
+    );
+    if !tokio::fs::canonicalize(&root)
+        .await
+        .is_ok_and(|path| path == Path::new(&review.source_root))
+    {
+        return Err("The download location changed. Reload the review.".into());
+    }
+    let outcome = import_torrent(
+        state,
+        &cfg,
+        &grab,
+        &native.hash,
+        &root,
+        &client,
+        None,
+        Some(&review),
+    )
+    .await?;
+    if !matches!(outcome, ImportOutcome::Imported) {
+        return Err("The candidate could not be imported. The review remains open.".into());
+    }
+    crate::models::edition_review::finish(&state.db, &review, dismiss_others).await?;
+    if let Err(error) = super::jellyfin_view::sync(&state.db, &cfg.media_root).await {
+        tracing::warn!(%error, "Could not update media views after edition replacement");
+    } else if let Some(jellyfin) = state.jellyfin.read().await.as_ref()
+        && let Err(error) = jellyfin.refresh_library().await
+    {
+        tracing::warn!(%error, "Jellyfin refresh failed after edition replacement");
+    }
+    Ok(())
 }
 
 /// Series-level sidecars for one series: poster / banner / backdrop
@@ -4130,6 +4321,7 @@ pub async fn run_once(state: &AppState) {
             import_root,
             &client,
             completed_attempt.as_deref(),
+            None,
         )
         .await
         {

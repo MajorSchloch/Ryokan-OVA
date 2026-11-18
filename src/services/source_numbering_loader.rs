@@ -297,21 +297,43 @@ pub(crate) fn narrow_for_target(
 }
 
 pub(crate) async fn refresh(db: &SqlitePool, proof: &BoundSourceProof) -> Result<(), String> {
-    if let Some(ProofProvenance::AutomaticUnique { evidence }) = &proof.provenance {
-        let interpretation = resolve(
-            db,
-            &catalogue(db).await?,
-            &evidence.publication_url,
-            &proof.info_hash,
-        )
-        .await?;
-        project(
-            interpretation,
-            Vec::new(),
-            vec![proof.clone()],
-            evidence.publication_url.clone(),
-        )
-        .await?;
+    match &proof.provenance {
+        Some(ProofProvenance::AutomaticUnique { evidence }) => {
+            let interpretation = resolve(
+                db,
+                &catalogue(db).await?,
+                &evidence.publication_url,
+                &proof.info_hash,
+            )
+            .await?;
+            project(
+                interpretation,
+                Vec::new(),
+                vec![proof.clone()],
+                evidence.publication_url.clone(),
+            )
+            .await?;
+        }
+        Some(ProofProvenance::AutomaticEntryPack {
+            publication_url, ..
+        }) => {
+            proof.validate()?;
+            let detail = cached_detail(db, proof.target_anilist_id).await?;
+            let rebuilt = auto_search::entry_pack_proof(
+                db,
+                &detail,
+                &proof.info_hash,
+                publication_url,
+                proof.selected_files[0].target_first,
+            )
+            .await?;
+            if rebuilt != *proof {
+                return Err(fail(
+                    "automatic entry-pack evidence changed; source remains on hold",
+                ));
+            }
+        }
+        None => {}
     }
     Ok(())
 }

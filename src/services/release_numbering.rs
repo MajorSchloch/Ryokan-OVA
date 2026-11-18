@@ -515,6 +515,12 @@ impl ReleaseMapping {
         self.bound_source.as_ref()
     }
 
+    pub(crate) fn is_single_episode_pack(&self) -> bool {
+        self.bound_source().is_some_and(|proof| {
+            proof.origin() == Ok(crate::services::source_numbering::ProofOrigin::AutomaticEntryPack)
+        })
+    }
+
     pub fn from_bound_source(
         proof: &crate::services::source_numbering::BoundSourceProof,
     ) -> Result<Self, String> {
@@ -831,9 +837,9 @@ pub(crate) async fn apply_reviewed_source(
             }
             return Ok(false);
         };
-        let automatic = mapping.bound_source().is_some_and(|proof| {
-            proof.origin() == Ok(crate::services::source_numbering::ProofOrigin::AutomaticUnique)
-        });
+        let automatic = mapping
+            .bound_source()
+            .is_some_and(|proof| proof.origin().is_ok_and(|origin| origin.is_automatic()));
         let mapping = if let Some(proof) = mapping.bound_source().filter(|_| automatic) {
             let narrowed =
                 crate::services::source_numbering::loader::narrow_for_target(proof, target)?;
@@ -993,10 +999,7 @@ pub(crate) async fn filter_automatic_candidates_with_pack_mappings(
                     .release_mapping
                     .as_ref()
                     .and_then(|m| m.bound_source())
-                    .is_some_and(|p| {
-                        p.origin()
-                            == Ok(crate::services::source_numbering::ProofOrigin::AutomaticUnique)
-                    })
+                    .is_some_and(|p| p.origin().is_ok_and(|origin| origin.is_automatic()))
                 {
                     let phase = candidate
                         .match_provenance
