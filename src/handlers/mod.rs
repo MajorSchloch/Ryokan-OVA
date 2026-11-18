@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod calendar;
 pub mod downloads;
+pub mod edition_review;
 pub mod grab;
 pub mod host_check;
 pub mod library;

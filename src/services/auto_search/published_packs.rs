@@ -12,7 +12,8 @@ use super::{
 use crate::services::anilist::{AnimeDetail, MAX_PLAUSIBLE_EPISODES};
 use crate::services::nyaa::SearchResult;
 use crate::services::release_numbering::{NumberingContext, ReleaseMapping};
-use crate::services::{media, nyaa};
+use crate::services::source_numbering::{self, BoundSourceProof};
+use crate::services::{anime_relations, media, nyaa};
 
 const VIEW_FETCH_CAP: usize = 3;
 
@@ -84,6 +85,15 @@ fn full_own_title(
         && !season_mismatch(title, season)
 }
 
+pub(crate) fn main_video_file(path: &Path, tv_series: bool) -> bool {
+    let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    (is_media_filename(filename) || crate::services::post_processing::is_video_file(filename))
+        && !media::is_non_episodic_file(&filename.to_ascii_lowercase())
+        && !(tv_series && (media::path_names_specials(path) || media::is_special_release(filename)))
+}
+
 /// Every non-extra video must identify this entry and a distinct relative
 /// episode. Unknown/foreign files, ranges, duplicates and season disagreement
 /// do not establish a source numbering decision.
@@ -113,10 +123,7 @@ fn complete_coverage(
         let path = Path::new(name);
         let filename = path.file_name()?.to_str()?;
         let lower = filename.to_ascii_lowercase();
-        if (media::is_tv_format(&detail.format) && media::path_names_specials(path))
-            || media::is_non_episodic_file(&lower)
-            || (media::is_tv_format(&detail.format) && media::is_special_release(filename))
-        {
+        if !main_video_file(path, media::is_tv_format(&detail.format)) {
             continue;
         }
         let span = media::parse_episode_span(&lower)?;
@@ -178,6 +185,74 @@ fn complete_coverage(
     ))
 }
 
+/// Establish a single episode from a complete, ordinary entry-relative
+/// Nyaa pack. Any competing numbering domain continues through the
+/// existing finite-source resolver.
+pub(crate) async fn entry_pack_proof(
+    db: &SqlitePool,
+    detail: &AnimeDetail,
+    info_hash: &str,
+    publication_url: &str,
+    episode: i32,
+) -> Result<BoundSourceProof, String> {
+    let tracked = crate::models::series::get_by_anilist_id(db, detail.id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or("Episode mapping: the entry pack has no tracked release")?;
+    if !supports(detail)
+        || detail.id <= 0
+        || tracked.cumulative_prior_episodes != 0
+        || anime_relations::has_source_namespace(detail.id)
+        || anime_relations::offset_for(detail.id, detail.id_mal).is_some()
+    {
+        return Err(
+            "Episode mapping: entry pack needs unambiguous entry-relative numbering".into(),
+        );
+    }
+    let count = detail.episodes.unwrap_or_default();
+    if !(1..=count).contains(&episode) {
+        return Err("Episode mapping: the wanted episode is outside the entry pack".into());
+    }
+    let aliases = super::collect_aliases(detail);
+    let siblings = SiblingRejectPrecompute::build(
+        &aliases,
+        &super::collect_related_identity_aliases(detail, &aliases),
+    );
+    let season = infer_season_from_detail(detail).max(1);
+    let published = nyaa::fetch_published_files(publication_url, info_hash).await?;
+    if !full_own_title(&published.title, &aliases, &siblings, season)
+        || !super::canonical_owner_supports_release(
+            &published.title,
+            &aliases,
+            &SearchTarget::Episode(1),
+        )
+    {
+        return Err("Episode mapping: published pack does not name this exact release".into());
+    }
+    let (episodes, source_season, _) =
+        complete_coverage(&published.files, detail, &aliases, &siblings, 0).ok_or(
+            "Episode mapping: published pack has missing, duplicate, or conflicting episode files",
+        )?;
+    NumberingContext::load(
+        detail.id,
+        detail.id_mal,
+        &detail.format,
+        detail.episodes,
+        0,
+        season,
+    )
+    .await?
+    .choose_published_entry_pack(&episodes, source_season)?;
+    let domain = source_numbering::load_domain(db, detail.id).await?;
+    BoundSourceProof::for_entry_pack(
+        domain,
+        info_hash,
+        &published.files,
+        publication_url,
+        episode,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn promote(
     db: &SqlitePool,
@@ -200,6 +275,9 @@ pub(super) async fn promote(
         .enumerate()
         .filter(|(_, c)| {
             !c.is_batch
+                && c.release_mapping
+                    .as_ref()
+                    .is_none_or(|mapping| !mapping.is_single_episode_pack())
                 && c.indexer_id.is_none()
                 && c.info_hash.len() == 40
                 && c.info_hash.bytes().all(|b| b.is_ascii_hexdigit())

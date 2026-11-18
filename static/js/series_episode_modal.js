@@ -583,6 +583,10 @@ function renderEpisodeMediaInfo(section, data) {
         track.commentary ? 'Commentary' : '', track.audio_description ? 'Audio description' : '',
         track.valid === false ? 'Invalid or unreadable' : ''].filter(Boolean).join(' · ');
     let html = '<h4>File information</h4>';
+    if (Number.isSafeInteger(data.edition_review_id) && data.edition_review_id > 0) {
+        html += '<p><a href="/system/edition-review/' + data.edition_review_id
+            + '">Compare episode files</a></p>';
+    }
     html += renderMediaRequirements(data.media_requirements, policy, data.upgrades_allowed, audioPolicy);
     if (audioPolicy && audioPolicy.enabled) {
         html += '<p class="ep-media-verdict ep-media-verdict-' + (audioPolicy.satisfied ? 'present' : 'missing')

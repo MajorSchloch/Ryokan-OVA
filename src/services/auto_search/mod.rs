@@ -19,6 +19,7 @@ use crate::services::{
 // ── Pre-compiled regexes for parse_release_numbers ─────────────────────────
 
 mod aliases;
+mod episode_pack_fallback;
 mod numeric_title;
 mod pack_detection;
 mod provenance;
@@ -36,12 +37,14 @@ pub use aliases::{
     matches_target, names_more_than_the_series, normalize_title, sequel_variant_aliases,
     token_overlap_ratio, token_set, with_alternate_titles,
 };
+pub(crate) use episode_pack_fallback::find_single_episode_batch_fallback;
 pub(crate) use numeric_title::TitleNumberEvidence;
 pub use pack_detection::{
     TRANSITIVE_WALK_MAX_FETCHES, detect_sibling_entries_in_pack,
     expand_parent_with_transitive_relations, is_transitive_walk_source,
 };
 pub use provenance::{AliasMatch, MatchKind, MatchPhase, MatchProvenance, history_summary};
+pub(crate) use published_packs::{entry_pack_proof, main_video_file};
 pub use release_parse::{
     has_selective_discriminator, infer_season_from_detail, parse_release_numbers,
     parse_release_season, pick_wanted_file_indices,
@@ -522,7 +525,7 @@ pub async fn find_best_for_target_with_filter(
             &SearchTarget::Single,
             cfs,
             indexers_cache,
-            true,
+            BatchSearchMode::Automatic,
             eligible,
         )
         .await;
@@ -772,10 +775,28 @@ pub async fn collect_scored_batches_for_target_with_diag(
         target,
         cfs,
         indexers_cache,
-        require_verbatim,
+        if require_verbatim {
+            BatchSearchMode::Automatic
+        } else {
+            BatchSearchMode::Interactive
+        },
         None,
     )
     .await
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BatchSearchMode {
+    Automatic,
+    Interactive,
+    EpisodeFallback,
+}
+
+fn is_single_episode_pack(candidate: &SearchResult) -> bool {
+    candidate
+        .release_mapping
+        .as_ref()
+        .is_some_and(crate::services::release_numbering::ReleaseMapping::is_single_episode_pack)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -786,9 +807,11 @@ async fn collect_scored_batches_for_target_filtered(
     target: &SearchTarget,
     cfs: &[CompiledCustomFormat],
     indexers_cache: &crate::IndexerCache,
-    require_verbatim: bool,
+    mode: BatchSearchMode,
     eligible: Option<CandidateFilter<'_>>,
 ) -> (Vec<SearchResult>, Vec<String>) {
+    let require_verbatim = mode != BatchSearchMode::Interactive;
+    let allow_single_episode_pack = mode != BatchSearchMode::Automatic;
     let availability =
         crate::services::release_availability::Policy::load(config, indexers_cache).await;
     let effective =
@@ -895,6 +918,7 @@ async fn collect_scored_batches_for_target_filtered(
     let automatic_sources = crate::services::source_numbering::loader::Resolver::default();
     let ctx = AutoQueryCtx {
         provider_numbering: None,
+        allow_single_episode_pack,
         automatic_sources: &automatic_sources,
         premiere_bound: require_verbatim
             .then(|| crate::services::release_numbering::PremiereBound::from_detail(detail))
@@ -1050,7 +1074,11 @@ async fn collect_scored_batches_for_target_filtered(
     // III") which are common in SeaDex picks. Without this exemption,
     // a curated full-season BD pack gets dropped here before it can be
     // scored.
-    candidates.retain(|c| c.is_batch || is_seadex_match(&c.info_hash, &seadex_hashes));
+    candidates.retain(|c| {
+        c.is_batch
+            || (allow_single_episode_pack && is_single_episode_pack(c))
+            || is_seadex_match(&c.info_hash, &seadex_hashes)
+    });
 
     let mut scored: Vec<SearchResult> = Vec::with_capacity(candidates.len());
     for mut c in candidates.drain(..) {
@@ -1163,6 +1191,9 @@ async fn collect_scored_batches_for_target_filtered(
                 &pack_mappings,
             )
             .await;
+    }
+    if !allow_single_episode_pack {
+        scored.retain(|candidate| !is_single_episode_pack(candidate));
     }
     (scored, fuzzy_rejected.into_inner().unwrap_or_default())
 }
@@ -1318,6 +1349,9 @@ async fn collect_scored_for_target_filtered(
                 continue;
             }
         };
+        if is_single_episode_pack(&result) {
+            continue;
+        }
         if let Err(reason) = crate::models::grabbed_torrents::ensure_automatic_compatibility(
             db,
             &result.info_hash,
@@ -1358,10 +1392,7 @@ async fn collect_scored_for_target_filtered(
                     .release_mapping
                     .as_ref()
                     .and_then(|m| m.bound_source())
-                    .is_some_and(|p| {
-                        p.origin()
-                            == Ok(crate::services::source_numbering::ProofOrigin::AutomaticUnique)
-                    })
+                    .is_some_and(|p| p.origin().is_ok_and(|origin| origin.is_automatic()))
                 {
                     MatchProvenance::automatic_source(MatchPhase::SeadexSeed)
                 } else {
@@ -1385,6 +1416,7 @@ async fn collect_scored_for_target_filtered(
         crate::services::release_numbering::ProviderNumbering::load(db, detail, target).await;
     let ctx = AutoQueryCtx {
         provider_numbering: provider_numbering.as_ref(),
+        allow_single_episode_pack: false,
         automatic_sources: &automatic_sources,
         premiere_bound: crate::services::release_numbering::PremiereBound::from_detail(detail),
         numbering_target: target,
@@ -1702,6 +1734,7 @@ async fn collect_scored_for_target_filtered(
         scored,
     )
     .await;
+    scored.retain(|candidate| !is_single_episode_pack(candidate));
     // Numbering decisions may reveal a reviewed replay or a wider range.
     // Recheck that effective coverage before choosing the winner.
     if let Some(eligible) = eligible {
@@ -1750,6 +1783,9 @@ impl AutoQueryCtx<'_> {
         )
         .await?
         {
+            if is_single_episode_pack(result) && !self.allow_single_episode_pack {
+                return Err("Episode mapping: this partial pack is available only to a single-episode fallback or an explicit file selection".into());
+            }
             return Ok(true);
         }
         if let Some(provider) = self.provider_numbering
@@ -1786,9 +1822,7 @@ impl AutoQueryCtx<'_> {
             .release_mapping
             .as_ref()
             .and_then(|m| m.bound_source())
-            .is_some_and(|p| {
-                p.origin() == Ok(crate::services::source_numbering::ProofOrigin::AutomaticUnique)
-            })
+            .is_some_and(|p| p.origin().is_ok_and(|origin| origin.is_automatic()))
         {
             MatchProvenance::automatic_source(self.phase)
         } else {
@@ -1810,6 +1844,7 @@ impl AutoQueryCtx<'_> {
 #[derive(Clone, Copy)]
 struct AutoQueryCtx<'a> {
     provider_numbering: Option<&'a crate::services::release_numbering::ProviderNumbering>,
+    allow_single_episode_pack: bool,
     automatic_sources: &'a crate::services::source_numbering::loader::Resolver,
     premiere_bound: Option<crate::services::release_numbering::PremiereBound>,
     numbering_target: &'a SearchTarget,

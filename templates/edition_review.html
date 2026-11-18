@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block title %} - Compare episode files{% endblock %}
+
+{% block content %}
+<nav class="detail-breadcrumb" aria-label="Breadcrumb"><a href="/system?tab=review">Needs Review</a> · <a href="/series/{{ series_id }}">Back to release</a></nav>
+<div class="page-header"><h2>{{ title }} · Episode {{ episode }}</h2></div>
+<p>Compare the current file with the shorter editions Ryokan held. Each 12-second sample uses the first audio track.</p>
+{% if !message.is_empty() %}<p class="alert alert-warn" role="alert">{{ message }}</p>{% endif %}
+{% if candidates.is_empty() %}<p class="alert alert-warn">The saved candidates are unavailable or changed. You can close this review and keep the current file.</p>{% endif %}
+<div class="edition-comparison">
+    {% let file = current %}
+    {% let label = "Current file" %}
+    {% let part = "current" %}
+    <section class="rss-panel edition-file">
+        {% include "partials/system/edition_file.html" %}
+        <form method="post" action="/system/edition-review/{{ file.id }}" hx-boost="false">
+            <input type="hidden" name="decision" value="keep">
+            <button class="btn btn-secondary" type="submit">Keep current file and close review</button>
+        </form>
+    </section>
+    {% for file in candidates %}
+    {% let label = "Candidate" %}
+    {% let part = "candidate" %}
+    <section class="rss-panel edition-file">
+        {% include "partials/system/edition_file.html" %}
+        {% if file.meets_minimum %}
+        <form method="post" action="/system/edition-review/{{ file.id }}" hx-boost="false"
+            data-ryokan-confirm-title="Replace this episode?"
+            data-ryokan-confirm-body="Ryokan will verify the tracks and quality again and keep the current file in the recycle bin. Download files stay in place."
+            data-ryokan-confirm-yes="Use this file">
+            <input type="hidden" name="decision" value="use">
+            <label class="checkbox-row"><input type="checkbox" name="dismiss_others" value="yes"> Close the other candidate reviews</label>
+            <button class="btn btn-primary" type="submit">Use this file</button>
+        </form>
+        {% endif %}
+        <form method="post" action="/system/edition-review/{{ file.id }}" hx-boost="false">
+            <input type="hidden" name="decision" value="dismiss">
+            <button class="btn btn-secondary" type="submit">Dismiss candidate</button>
+        </form>
+    </section>
+    {% endfor %}
+</div>
+{% endblock %}
+
+{% block page_js %}
+<script src="/static/js/edition_review.js?v={{ crate::asset_version() }}" defer></script>
+{% endblock %}

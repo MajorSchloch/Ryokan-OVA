@@ -378,6 +378,14 @@ async fn exact_source_match(
         return Ok(None);
     }
     let mut saved_sources = crate::models::source_numbering::lookup_hash(db, &hash).await?;
+    if saved_sources.iter().any(|saved| {
+        saved.proof.origin()
+            == Ok(crate::services::source_numbering::ProofOrigin::AutomaticEntryPack)
+    }) {
+        return Err(
+            "Episode mapping: this partial pack requires the single-episode batch fallback".into(),
+        );
+    }
     let known_source = !saved_sources.is_empty();
     let automatic_scope = saved_sources.iter().all(|saved| {
         saved.proof.origin() == Ok(crate::services::source_numbering::ProofOrigin::AutomaticUnique)

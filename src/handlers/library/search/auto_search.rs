@@ -153,8 +153,8 @@ pub async fn run_auto_search_targets(
     .await
 }
 
-/// Recent-episode recovery is demand for one missing slot, never permission
-/// to replace a file, widen a pack, or resume an existing client job.
+/// Recent-episode recovery requests one missing slot. A proven file from a
+/// pack can fill it without changing an existing client job.
 pub(crate) async fn run_recent_missing_target(
     state: &AppState,
     target: crate::services::recent_episodes::Target,
@@ -621,6 +621,7 @@ async fn run_auto_search_targets_with_upgrades(
         }
         let label = auto_search::target_label(&target);
         let is_upgrade = upgrades.classifications.contains_key(&target_episode);
+        let allow_whole_batch = allow_batch && !is_upgrade && total_targets > 1;
         progress::emit(
             "search",
             "info",
@@ -639,10 +640,10 @@ async fn run_auto_search_targets_with_upgrades(
                 if upgrades.recent_demand.is_some()
                     && (crate::services::upgrade::release_covers_multiple(result)
                         || result.replay_episodes.is_some()
-                        || result.release_mapping.as_ref().is_some_and(|mapping| {
-                            mapping.bound_source().is_some()
-                                || mapping.episodes() != vec![target_episode]
-                        }))
+                        || result
+                            .release_mapping
+                            .as_ref()
+                            .is_some_and(|mapping| mapping.episodes() != [target_episode]))
                 {
                     return false;
                 }
@@ -685,20 +686,53 @@ async fn run_auto_search_targets_with_upgrades(
                 )
                 .is_ok()
             };
-        let (best_pick, fuzzy_only) = auto_search::find_best_for_target_with_filter(
+        let primary_eligible =
+            |result: &crate::services::nyaa::SearchResult,
+             incoming: &crate::services::source::ClassificationResult| {
+                if upgrades.recent_demand.is_some()
+                    && result
+                        .release_mapping
+                        .as_ref()
+                        .is_some_and(|mapping| mapping.bound_source().is_some())
+                {
+                    return false;
+                }
+                eligible(result, incoming)
+            };
+        let (mut best_pick, fuzzy_only) = auto_search::find_best_for_target_with_filter(
             &state.db,
             &detail,
             &cfg,
             &target,
-            allow_batch,
+            allow_whole_batch,
             is_upgrade,
             &cfs,
             &state.indexers,
-            Some(&eligible),
+            Some(&primary_eligible),
         )
         .await;
+        let mut used_batch_fallback = false;
+        let mut batch_diagnostics = Vec::new();
+        if best_pick.is_none() && series_id.is_some() {
+            (best_pick, batch_diagnostics) = auto_search::find_single_episode_batch_fallback(
+                &state.db,
+                &detail,
+                &cfg,
+                &target,
+                &cfs,
+                &state.indexers,
+                Some(&eligible),
+            )
+            .await;
+            used_batch_fallback = best_pick.is_some();
+        }
         match best_pick {
             Some(result) => {
+                let used_batch_fallback = used_batch_fallback
+                    || result
+                        .release_mapping
+                        .as_ref()
+                        .is_some_and(|mapping| mapping.is_single_episode_pack());
                 let availability =
                     crate::services::release_availability::Policy::load(&cfg, &state.indexers)
                         .await;
@@ -825,8 +859,8 @@ async fn run_auto_search_targets_with_upgrades(
                     .lock()
                     .await;
                 let _config = crate::handlers::settings::CONFIG_WRITE_LOCK.lock().await;
-                if provider_numbered {
-                    if series_id.is_none() {
+                if provider_numbered || used_batch_fallback {
+                    if provider_numbered && series_id.is_none() {
                         skipped.push(format!(
                             "{label}: add this release before using provider numbering"
                         ));
@@ -850,7 +884,9 @@ async fn run_auto_search_targets_with_upgrades(
                         skipped.push(format!("{label}: {reason}"));
                         continue;
                     }
-                } else if !is_upgrade && let Some(sid) = series_id {
+                } else if (!is_upgrade || used_batch_fallback)
+                    && let Some(sid) = series_id
+                {
                     match crate::services::recent_episodes::has_pending(
                         &state.db,
                         sid,
@@ -884,7 +920,9 @@ async fn run_auto_search_targets_with_upgrades(
                     skipped.push(format!("{label}: search source was disabled or removed"));
                     continue;
                 }
-                let routed = if upgrades.recent_demand.is_some() && result.indexer_id.is_none() {
+                let routed = if (upgrades.recent_demand.is_some() || used_batch_fallback)
+                    && result.indexer_id.is_none()
+                {
                     state
                         .client_for_nyaa_with_id(cfg.nyaa_download_client_id)
                         .await
@@ -993,78 +1031,95 @@ async fn run_auto_search_targets_with_upgrades(
                 }
                 let mut bound_prepared = None;
                 let mut existing_recent = false;
-                let selective_outcome: Result<(Option<Vec<usize>>, String), String> =
-                    if let Some(mapping) = result
-                        .release_mapping
-                        .as_ref()
-                        .filter(|mapping| mapping.bound_source().is_some())
-                    {
-                        crate::services::source_numbering_grab::add_bound(
+                let selective_outcome: Result<(Option<Vec<usize>>, String), String> = if let Some(
+                    mapping,
+                ) = result
+                    .release_mapping
+                    .as_ref()
+                    .filter(|mapping| mapping.bound_source().is_some())
+                {
+                    crate::services::source_numbering_grab::add_bound(
                             &*qbit,
                             &url,
                             &result.info_hash,
                             mapping,
                         )
                         .await
-                        .map(|prepared| {
+                        .and_then(|prepared| {
+                            if used_batch_fallback && !prepared.newly_added {
+                                return Err("Batch is already in the client; its file selection and ownership were preserved".into());
+                            }
                             let outcome = (prepared.kept.clone(), prepared.info_hash.clone());
                             bound_prepared = Some(prepared);
-                            outcome
+                            Ok(outcome)
                         })
-                    } else if wants_selective && qbit.protocol() == "torrent" {
-                        let detail_clone = detail.clone();
-                        let info_hash_clone = result.info_hash.clone();
-                        let mut pick = move |files: &[String]| {
-                            auto_search::pick_wanted_file_indices(files, &detail_clone)
-                        };
-                        match qbit
-                            .add_torrent_with_file_filter(&url, &info_hash_clone, &mut pick)
-                            .await
-                        {
-                            // Selective branch echoes the precomputed
-                            // info_hash since `add_torrent_with_file_filter`
-                            // doesn't return an id. SAB grabs don't fire
-                            // this branch in practice (require info_hash
-                            // non-empty, which NZBs lack).
-                            Ok(crate::services::download_client::SelectiveOutcome::Filtered(
-                                kept,
-                            )) => Ok((Some(kept), result.info_hash.clone())),
-                            Ok(
-                                crate::services::download_client::SelectiveOutcome::FullDownload,
-                            ) => Ok((None, result.info_hash.clone())),
-                            Err(e) => {
-                                logger::warn(
-                                    &state.db,
-                                    LogCategory::Grab,
-                                    &format!(
-                                        "{}: selective download failed, falling back to full grab",
-                                        label
-                                    ),
-                                    &e,
-                                )
-                                .await;
-                                qbit.add_torrent_returning_id(&url, &result.info_hash)
-                                    .await
-                                    .map(|(_, hash)| (None, hash))
-                            }
+                } else if wants_selective && qbit.protocol() == "torrent" {
+                    let detail_clone = detail.clone();
+                    let info_hash_clone = result.info_hash.clone();
+                    let mut pick = move |files: &[String]| {
+                        auto_search::pick_wanted_file_indices(files, &detail_clone)
+                    };
+                    match qbit
+                        .add_torrent_with_file_filter(&url, &info_hash_clone, &mut pick)
+                        .await
+                    {
+                        // Selective branch echoes the precomputed
+                        // info_hash since `add_torrent_with_file_filter`
+                        // doesn't return an id. SAB grabs don't fire
+                        // this branch in practice (require info_hash
+                        // non-empty, which NZBs lack).
+                        Ok(crate::services::download_client::SelectiveOutcome::Filtered(kept)) => {
+                            Ok((Some(kept), result.info_hash.clone()))
                         }
-                    } else {
-                        qbit.add_torrent_returning_id(&url, &result.info_hash)
-                            .await
-                            .map(|(outcome, hash)| {
-                                existing_recent = (provider_numbered
+                        Ok(crate::services::download_client::SelectiveOutcome::FullDownload) => {
+                            Ok((None, result.info_hash.clone()))
+                        }
+                        Err(e) => {
+                            logger::warn(
+                                &state.db,
+                                LogCategory::Grab,
+                                &format!(
+                                    "{}: selective download failed, falling back to full grab",
+                                    label
+                                ),
+                                &e,
+                            )
+                            .await;
+                            qbit.add_torrent_returning_id(&url, &result.info_hash)
+                                .await
+                                .map(|(_, hash)| (None, hash))
+                        }
+                    }
+                } else {
+                    qbit.add_torrent_returning_id(&url, &result.info_hash)
+                        .await
+                        .map(|(outcome, hash)| {
+                            existing_recent = (provider_numbered
                                 || upgrades.recent_demand.is_some())
                                 && outcome
                                     == crate::services::download_client::AddOutcome::AlreadyPresent;
-                                (None, hash)
-                            })
-                    };
+                            (None, hash)
+                        })
+                };
                 if existing_recent {
                     skipped.push(format!("{label}: source already exists in the client; its ownership and selection were preserved"));
                     continue;
                 }
                 match selective_outcome {
                     Ok((kept, effective_hash)) => {
+                        if used_batch_fallback
+                            && let Some(mapping) = &result.release_mapping
+                            && let Err(reason) =
+                                crate::services::source_numbering_grab::persist_entry_pack(
+                                    &state.db, mapping,
+                                )
+                                .await
+                        {
+                            skipped.push(format!(
+                                "{label}: batch stayed paused because its file decision could not be saved: {reason}"
+                            ));
+                            continue;
+                        }
                         let selective_suffix = match (&kept, wants_selective) {
                             (Some(ids), _) => format!(", selective={}", ids.len()),
                             (None, true) => ", selective=full(timeout)".to_string(),
@@ -1312,6 +1367,12 @@ async fn run_auto_search_targets_with_upgrades(
                         }
                     }
                     Err(e) => {
+                        if used_batch_fallback {
+                            logger::info(&state.db, LogCategory::Grab, "Batch fallback held", &e)
+                                .await;
+                            skipped.push(format!("{label}: batch fallback held: {e}"));
+                            continue;
+                        }
                         logger::error(
                             &state.db,
                             LogCategory::DownloadClient,
@@ -1331,7 +1392,7 @@ async fn run_auto_search_targets_with_upgrades(
                     url,
                     score: result.score,
                 });
-                if queued_batch && allow_batch {
+                if queued_batch && allow_whole_batch {
                     logger::info(
                         &state.db,
                         LogCategory::AutoSearch,
@@ -1353,6 +1414,15 @@ async fn run_auto_search_targets_with_upgrades(
                     "",
                 )
                 .await;
+                if !batch_diagnostics.is_empty() {
+                    logger::info(
+                        &state.db,
+                        LogCategory::AutoSearch,
+                        &format!("{label}: batch fallback held"),
+                        &batch_diagnostics.join(" | "),
+                    )
+                    .await;
+                }
                 if fuzzy_only.is_empty() {
                     skipped.push(format!("{}: no matching release found", label));
                 } else {

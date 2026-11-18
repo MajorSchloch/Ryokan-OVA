@@ -298,6 +298,16 @@
     </div>
 </div>
 {% else if tab == "review" %}
+{% if !edition_reviews.is_empty() %}
+<section class="rss-panel">
+    <h3>Edition conflicts</h3>
+    <ul>
+    {% for review in edition_reviews %}
+        <li><a href="/system/edition-review/{{ review.id }}">{{ review.title }} · Episode {{ review.episode }}</a> · {{ review.candidates }} held</li>
+    {% endfor %}
+    </ul>
+</section>
+{% endif %}
 <div class="rss-panel">
     <div class="cf-section">
         {# Empty state always rendered, hidden when there are entries.
@@ -306,7 +316,7 @@
            would clobber the success toast mid-display. Server stays
            the source of truth for the copy. #}
         <div class="logs-empty" id="review-empty-state" {% if !review_entries.is_empty() %}hidden{% endif %}>
-            <p>No episodes currently flagged for review.</p>
+            <p>No episodes need a source or resolution label.</p>
             <p class="form-hint">Episodes land here when Ryokan is unsure of a file's source or resolution. Pick the right tag and apply it.</p>
         </div>
         {% if !review_entries.is_empty() %}

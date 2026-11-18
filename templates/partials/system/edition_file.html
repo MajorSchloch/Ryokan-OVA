@@ -1,0 +1,20 @@
+<h3>{{ label }}</h3>
+<p class="edition-filename">{{ file.name }}</p>
+{% if file.playable %}
+<div class="edition-player">
+    <video controls preload="none" playsinline aria-label="{{ label }} preview" hidden></video>
+    <div class="edition-preview-buttons">
+        <button class="btn btn-secondary" type="button" data-edition-sample="/system/edition-review/{{ file.id }}/preview/{{ part }}/start">Preview start</button>
+        <button class="btn btn-secondary" type="button" data-edition-sample="/system/edition-review/{{ file.id }}/preview/{{ part }}/end">Preview end</button>
+    </div>
+    <p role="status" class="form-hint" hidden></p>
+</div>
+{% endif %}
+<dl class="edition-facts">
+    <dt>Duration</dt><dd>{{ file.duration }}</dd>
+    <dt>Quality</dt><dd>{{ file.quality }}</dd>
+    <dt>Dialogue audio</dt><dd>{{ file.audio }}</dd>
+    <dt>Selectable subtitles</dt><dd>{{ file.subtitles }}</dd>
+    <dt>Requirements</dt><dd>{{ file.status }}</dd>
+</dl>
+{% if !file.reason.is_empty() %}<p class="form-hint">{{ file.reason }}</p>{% endif %}

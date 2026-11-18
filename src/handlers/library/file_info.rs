@@ -137,6 +137,17 @@ pub async fn episode_file_info(
                     .collect::<Vec<_>>(),
                 &cfg.audio_language_match,
             );
+            let identity = info.identity.cache_key();
+            let review_id =
+                crate::models::edition_review::for_episode(&state.db, tracked.id, episode_number)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|review| {
+                        std::path::Path::new(&review.current_path) == full_path
+                            && review.current_identity == identity
+                    })
+                    .map(|review| review.id);
             Json(serde_json::json!({
                 "ok": true,
                 "filename": file.filename,
@@ -146,6 +157,7 @@ pub async fn episode_file_info(
                 "media_requirements": requirements,
                 "upgrades_allowed": tracked.allow_upgrades,
                 "requirement_origins": policy.origins,
+                "edition_review_id": review_id,
             }))
             .into_response()
         }
