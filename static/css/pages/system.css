@@ -905,3 +905,50 @@
 .misgrab-actions .inline-form {
     display: contents;
 }
+
+.edition-comparison {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+}
+.edition-file {
+    min-width: 0;
+}
+.edition-file video {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    background: #000;
+    border-radius: var(--radius);
+}
+.edition-filename {
+    overflow-wrap: anywhere;
+}
+.edition-facts {
+    display: grid;
+    grid-template-columns: minmax(7rem, 1fr) 2fr;
+    gap: 0.35rem 0.75rem;
+}
+.edition-facts dt {
+    color: var(--text-dim);
+}
+.edition-facts dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+.edition-file form,
+.edition-preview-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+.edition-file form label {
+    flex-basis: 100%;
+}
+.edition-file form + form {
+    margin-top: 0.5rem;
+}
+@media (max-width: 760px) {
+    .edition-comparison {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}

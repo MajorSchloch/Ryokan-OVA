@@ -1,5 +1,46 @@
 use super::*;
 
+#[test]
+fn entry_pack_proof_requires_complete_unique_episode_files_and_one_wanted_priority() {
+    let owner = 9000001;
+    let title = "Quiet Horizon";
+    let domain = domain(owner, title, 3, vec![entry(owner, title, 3)]);
+    let hash = "bbc19f4ddcce0fdd8f33c9da7953bca301a83f8c";
+    let url = "https://nyaa.si/view/1428088";
+    let files = vec![
+        "Quiet Horizon/Quiet Horizon - 01.mkv".to_string(),
+        "Quiet Horizon/Quiet Horizon - 02.mkv".to_string(),
+        "Quiet Horizon/Quiet Horizon - 03.mkv".to_string(),
+        "Quiet Horizon/cover.png".to_string(),
+    ];
+    let proof = BoundSourceProof::for_entry_pack(domain.clone(), hash, &files, url, 2).unwrap();
+    assert_eq!(proof.origin().unwrap(), ProofOrigin::AutomaticEntryPack);
+    assert_eq!(proof.episodes(), [2]);
+    assert_eq!(proof.selected_indices(&files).unwrap(), [1]);
+    let mut wanted = vec![
+        (files[0].as_str(), false),
+        (files[1].as_str(), true),
+        (files[2].as_str(), false),
+        (files[3].as_str(), false),
+    ];
+    proof.validate_files(hash, &wanted).unwrap();
+    wanted[3].1 = true;
+    assert!(proof.validate_files(hash, &wanted).is_err());
+    wanted[3].1 = false;
+    wanted[2].0 = "Quiet Horizon/Quiet Horizon - 03v2.mkv";
+    assert!(proof.validate_files(hash, &wanted).is_err());
+
+    let mut ambiguous = files.clone();
+    ambiguous.push("Quiet Horizon/Quiet Horizon - 02v2.mkv".to_string());
+    let mut wrong_season = files.clone();
+    wrong_season[2] = "Quiet Horizon/Quiet Horizon S02E03.mkv".to_string();
+    let mut missing = files;
+    missing.remove(2);
+    for invalid in [ambiguous, wrong_season, missing] {
+        assert!(BoundSourceProof::for_entry_pack(domain.clone(), hash, &invalid, url, 2).is_err());
+    }
+}
+
 fn entry(id: i64, title: &str, count: i32) -> DomainEntry {
     DomainEntry {
         anilist_id: id,

@@ -35,6 +35,18 @@ pub(crate) struct RequiredSubtitleImport {
     installed: Vec<PathBuf>,
 }
 
+pub(super) enum EditionReview<'a> {
+    None,
+    Capture(&'a mut Option<EditionEvidence>),
+    Confirm(&'a crate::models::edition_review::Review),
+}
+
+pub(super) struct EditionEvidence {
+    pub(super) reason: String,
+    pub(super) source_identity: String,
+    pub(super) current_identity: String,
+}
+
 pub(crate) fn required_languages(cfg: &Config) -> Vec<String> {
     cfg.required_subtitle_languages
         .split(',')
@@ -347,6 +359,40 @@ pub(crate) async fn import_required(
     videos_in_download: usize,
     automatic: bool,
 ) -> Result<(), String> {
+    import_required_with_edition(
+        db,
+        cfg,
+        mode,
+        source,
+        dest,
+        old_videos,
+        series_id,
+        series_title,
+        candidates,
+        span,
+        videos_in_download,
+        automatic,
+        EditionReview::None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn import_required_with_edition(
+    db: &SqlitePool,
+    cfg: &Config,
+    mode: &str,
+    source: &Path,
+    dest: &Path,
+    old_videos: &[PathBuf],
+    series_id: i64,
+    series_title: &str,
+    candidates: &[PathBuf],
+    span: Option<EpisodeSpan>,
+    videos_in_download: usize,
+    automatic: bool,
+    mut edition: EditionReview<'_>,
+) -> Result<(), String> {
     let mut transaction = prepare(db, cfg, source, dest, candidates, span, videos_in_download)
         .await?
         .ok_or_else(|| "Subtitle requirement: policy is disabled".to_string())?;
@@ -356,8 +402,34 @@ pub(crate) async fn import_required(
             let info = media_info::inspect(db, old)
                 .await
                 .map_err(|e| format!("Media requirement: cannot verify existing file: {e}"))?;
+            let before = policy.observe(&info);
+            let after = &transaction.observed_source;
+            let reviewed = matches!(&edition, EditionReview::Confirm(_));
+            if let EditionReview::Confirm(review) = &edition
+                && (info.identity.cache_key() != review.current_identity
+                    || transaction.source_identity.cache_key() != review.source_identity)
+            {
+                return Err("The files changed. Return to the episode before replacing it.".into());
+            }
+            if let EditionReview::Capture(hold) = &mut edition
+                && let Some(conflict) =
+                    crate::services::media_requirements::edition_conflict(&before, after)
+                && policy
+                    .validate_replacement_with_edition(&before, after, true)
+                    .is_ok()
+            {
+                let reason = conflict.reason();
+                **hold = Some(EditionEvidence {
+                    reason: reason.clone(),
+                    source_identity: transaction.source_identity.cache_key(),
+                    current_identity: info.identity.cache_key(),
+                });
+                return Err(format!(
+                    "Media requirement: {reason}; existing media was kept"
+                ));
+            }
             policy
-                .validate_replacement(&policy.observe(&info), &transaction.observed_source)
+                .validate_replacement_with_edition(&before, after, reviewed)
                 .map_err(|reason| {
                     format!("Media requirement: {reason}; existing media was kept")
                 })?;
@@ -368,11 +440,29 @@ pub(crate) async fn import_required(
     // Copy mode for a move request keeps the source recoverable until
     // the complete video/subtitle bundle has committed.
     let placement_mode = if mode == "move" { "copy" } else { mode };
-    let outcome = async {
+    let staged = async {
         do_file_op(placement_mode, source, &landing)
             .await
             .map_err(|e| format!("Subtitle requirement: could not stage video: {e}"))?;
         transaction.check_placement(&landing).await?;
+        if let EditionReview::Confirm(review) = &edition {
+            review.check_files().await?;
+            if tokio::fs::symlink_metadata(dest).await.is_ok()
+                && !tokio::fs::canonicalize(dest)
+                    .await
+                    .is_ok_and(|path| path == Path::new(&review.current_path))
+            {
+                return Err("The replacement destination is occupied. Reload the review.".into());
+            }
+        }
+        Ok::<_, String>(())
+    }
+    .await;
+    if let Err(reason) = staged {
+        let _ = tokio::fs::remove_file(&landing).await;
+        return Err(reason);
+    }
+    let outcome = async {
         for old in old_videos {
             recycle::recycle(
                 db,

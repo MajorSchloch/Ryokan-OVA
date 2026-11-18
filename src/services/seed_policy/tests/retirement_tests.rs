@@ -562,3 +562,46 @@ async fn http_dispatch_reads_once_returns_real_hash_and_forwards_seed_limits() {
     assert_eq!(limits[0].ratio, Some(2.0));
     assert_eq!(limits[0].time_minutes, Some(60));
 }
+
+#[tokio::test]
+async fn open_edition_review_pauses_source_without_retirement() {
+    let f = fixture().await;
+    enable(&f).await;
+    let db = &f.state.db;
+    let grabbed_at: String =
+        sqlx::query_scalar("SELECT grabbed_at FROM grabbed_torrents WHERE id=?")
+            .bind(f.gid)
+            .fetch_one(db)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE grabbed_torrents SET state='failed' WHERE id=?")
+        .bind(f.gid)
+        .execute(db)
+        .await
+        .unwrap();
+    crate::models::edition_review::save(
+        db,
+        &crate::models::edition_review::Review {
+            id: 0,
+            grab_id: f.gid,
+            grabbed_at,
+            series_id: f.sid,
+            provider_id: 101,
+            episode: 1,
+            source_root: String::new(),
+            source_path: f.path.to_string_lossy().into(),
+            source_identity: "receipt".into(),
+            current_path: "current".into(),
+            current_identity: "library file".into(),
+            reason: "Runtime conflict".into(),
+        },
+    )
+    .await
+    .unwrap();
+    retire(&f).await;
+    assert_eq!(f.client.stops.load(Ordering::SeqCst), 1);
+    assert_eq!(f.client.deletes.load(Ordering::SeqCst), 0);
+    assert!(!blocked(&f).await);
+    let review = seed_policy::list(db).await.unwrap().pop().unwrap();
+    assert!(review.reason.contains("edition needs a decision"));
+}
