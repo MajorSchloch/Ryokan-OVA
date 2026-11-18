@@ -37,6 +37,7 @@ impl Drop for NyaaOrigin {
 
 fn detail(id: i64, title: &str) -> AnimeDetail {
     AnimeDetail {
+        country_of_origin: None,
         release_date: None,
         id,
         // A missing MAL identity deliberately prevents the provider-plan

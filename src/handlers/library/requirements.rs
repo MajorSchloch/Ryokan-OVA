@@ -31,6 +31,7 @@ pub struct RequirementField {
 }
 #[derive(Clone, Default)]
 pub struct RequirementsView {
+    pub enabled: bool,
     pub scope: String,
     pub id: String,
     pub return_to: String,
@@ -149,28 +150,18 @@ pub async fn franchise_view(
 pub fn brief(cfg: &config::Config) -> String {
     format!(
         "{} audio · {} subtitles · {}p minimum → {}p target",
-        languages(&cfg.required_audio_languages),
-        languages(&cfg.required_subtitle_languages),
+        languages(&cfg.required_audio_languages, &cfg.audio_language_match),
+        languages(
+            &cfg.required_subtitle_languages,
+            &cfg.subtitle_language_match
+        ),
         cfg.minimum_resolution,
         cfg.target_resolution
     )
 }
 
-fn languages(raw: &str) -> String {
-    if raw.is_empty() {
-        return "No language requirement".into();
-    }
-    raw.split(',')
-        .map(|s| match s {
-            "ja" => "Japanese",
-            "en" => "English",
-            "de" => "German",
-            "es" => "Spanish",
-            "fr" => "French",
-            other => other,
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+fn languages(raw: &str, match_mode: &str) -> String {
+    super::languages::summary(raw, match_mode, "No language requirement")
 }
 fn view(
     scope: &str,
@@ -186,15 +177,24 @@ fn view(
             "audio_mode",
             "Audio language requirement",
             l.audio_languages.as_deref(),
-            languages(&effective.required_audio_languages),
-            languages(&base.required_audio_languages),
+            languages(
+                &effective.required_audio_languages,
+                &effective.audio_language_match,
+            ),
+            languages(&base.required_audio_languages, &base.audio_language_match),
         ),
         (
             "subtitle_mode",
             "Subtitle language requirement",
             l.subtitle_languages.as_deref(),
-            languages(&effective.required_subtitle_languages),
-            languages(&base.required_subtitle_languages),
+            languages(
+                &effective.required_subtitle_languages,
+                &effective.subtitle_language_match,
+            ),
+            languages(
+                &base.required_subtitle_languages,
+                &base.subtitle_language_match,
+            ),
         ),
     ] {
         fields.push(RequirementField {
@@ -297,7 +297,9 @@ fn view(
                 ("1".into(), "Require selectable full subtitles".into()),
                 ("0".into(), "No additional subtitle check".into()),
             ],
-            effective: if current {
+            effective: if effective.required_subtitle_languages.is_empty() {
+                "No required subtitle languages"
+            } else if current {
                 "Selectable full subtitles"
             } else {
                 "No additional check"
@@ -316,6 +318,7 @@ fn view(
         });
     }
     RequirementsView {
+        enabled: effective.media_requirements_enabled,
         scope: scope.into(),
         id: id.into(),
         fields,
@@ -467,5 +470,19 @@ async fn save(
             "Could not render requirements.",
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn language_summaries_distinguish_any_all_and_explicit_none() {
+        assert_eq!(
+            super::languages("ja,de", "any"),
+            "Japanese, German (any one)"
+        );
+        assert_eq!(super::languages("ja,de", "all"), "Japanese, German (all)");
+        assert_eq!(super::languages("zh", "all"), "Chinese");
+        assert_eq!(super::languages("", "all"), "No language requirement");
     }
 }

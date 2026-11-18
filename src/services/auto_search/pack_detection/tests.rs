@@ -3,6 +3,7 @@ use crate::services::anilist::AnimeDetail;
 
 fn detail_with_titles(english: &str, romaji: &str) -> AnimeDetail {
     AnimeDetail {
+        country_of_origin: None,
         release_date: None,
         is_adult: false,
         id: 1,

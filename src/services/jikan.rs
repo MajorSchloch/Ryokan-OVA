@@ -664,6 +664,7 @@ pub async fn get_anime_detail(mal_id: i64) -> Result<AnimeDetail, String> {
     let relations = enrich_relations(anime.relations.take().unwrap_or_default()).await;
 
     Ok(AnimeDetail {
+        country_of_origin: None,
         release_date: None,
         is_adult: is_adult_rating(anime.rating.as_deref()),
         id: -anime.mal_id,

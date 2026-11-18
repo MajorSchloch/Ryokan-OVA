@@ -319,6 +319,7 @@ fn to_anime_detail(item: Candidate) -> AnimeDetail {
     .to_string();
 
     AnimeDetail {
+        country_of_origin: None,
         release_date: None,
         is_adult: item.nsfw,
         id: item.id,
