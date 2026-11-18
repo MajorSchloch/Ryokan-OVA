@@ -1685,6 +1685,11 @@ async fn import_torrent(
             .collect();
     }
     if let Some(mapping) = &release_mapping {
+        if mapping.provider_heading().is_some() && video_files.len() != 1 {
+            return Err(
+                "Episode mapping: a provider episode requires exactly one selected video".into(),
+            );
+        }
         if numbering_snapshot.is_some() || !routes.is_empty() {
             return Err("Episode mapping: conflicting release and file decisions".into());
         }

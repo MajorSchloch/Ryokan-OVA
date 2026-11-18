@@ -10,9 +10,14 @@ pub(crate) async fn ensure_automatic_compatibility(
     anilist_id: i64,
     mapping: Option<&ReleaseMapping>,
 ) -> Result<(), String> {
-    let Some(mapping) = mapping.filter(|mapping| mapping.bound_source().is_some()) else {
+    let Some(mapping) = mapping
+        .filter(|mapping| mapping.bound_source().is_some() || mapping.provider_heading().is_some())
+    else {
         return Ok(());
     };
+    if hash.is_empty() {
+        return Ok(());
+    }
     let rows: Vec<(Option<i64>, Option<String>)> = sqlx::query_as(
         "SELECT s.anilist_id, g.release_mapping FROM grabbed_torrents g
          LEFT JOIN series s ON s.id=g.series_id
@@ -31,8 +36,9 @@ pub(crate) async fn ensure_automatic_compatibility(
     // and serialization off the async worker, as in source-proof projection.
     tokio::task::spawn_blocking(move || {
         mapping.validate()?;
-        let proof = mapping.bound_source().expect("filtered to a bound mapping");
-        if proof.target_anilist_id != anilist_id || !proof.info_hash.eq_ignore_ascii_case(&hash) {
+        if mapping.anilist_id != anilist_id
+            || mapping.bound_source().is_some_and(|proof| !proof.info_hash.eq_ignore_ascii_case(&hash))
+        {
             return Err("Episode mapping: candidate source assignment has another identity".into());
         }
         let incoming = serde_json::to_string(&mapping)
