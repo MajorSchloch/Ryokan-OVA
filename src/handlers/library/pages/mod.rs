@@ -46,6 +46,7 @@ pub struct LibraryIndexQuery {
     /// satisfy both predicates).
     #[serde(default)]
     pub search: Option<String>,
+    pub status: Option<String>,
     /// #62 — `?sort=<key>` ordering. Currently supports
     /// `recent` (default; SQL `ORDER BY added_at DESC`) and `score`
     /// (user-score descending — only meaningful when an account is
@@ -67,6 +68,7 @@ pub async fn index(
         && q.list.is_none()
         && q.sort.is_none()
         && q.search.is_none()
+        && q.status.is_none()
     {
         let path = match crate::handlers::auth::cookie_value(&headers, "library_view") {
             Some("table") => Some("/library/table"),
@@ -324,8 +326,21 @@ pub async fn index(
             }
         }
     };
-    let visible_franchise_count = franchise_cards.iter().filter(|c| c.matches_search).count();
-    let visible_release_count = cards.len().saturating_sub(hidden_release_ids.len());
+    let status_filter = q
+        .status
+        .filter(|status| super::availability::OVERVIEW_STATUSES.contains(&status.as_str()))
+        .unwrap_or_default();
+    let visible_franchise_count = franchise_cards
+        .iter()
+        .filter(|c| c.matches_search && c.progress.matches_overview_status(&status_filter))
+        .count();
+    let visible_release_count = cards
+        .iter()
+        .filter(|(row, progress)| {
+            !hidden_release_ids.contains(&row.id)
+                && progress.matches_overview_status(&status_filter)
+        })
+        .count();
     let cards = if individual { cards } else { Vec::new() };
 
     let recycle_enabled = cfg
@@ -361,6 +376,7 @@ pub async fn index(
         list_counts,
         custom_list_filter,
         search_query,
+        status_filter,
         sort_value,
         sort_key: sort_key.to_string(),
         sort_desc,

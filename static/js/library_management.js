@@ -72,6 +72,7 @@
             }
             if (active === 'downloads') { refreshDownloads(); timer = setInterval(refreshDownloads, 15000); }
             const filters = titlePage?.querySelector('[data-franchise-filters]');
+            const filterNames = ['f_q', 'f_monitor', 'f_type', 'f_status'];
             function filterReleases(update) {
                 if (!filters) return;
                 const values = Object.fromEntries(new FormData(filters));
@@ -88,16 +89,20 @@
                 titlePage.querySelector('[data-franchise-empty]').hidden = shown > 0;
                 if (update) {
                     const u = new URL(location.href);
-                    ['f_q', 'f_monitor', 'f_type', 'f_status'].forEach(name => { values[name] ? u.searchParams.set(name, values[name]) : u.searchParams.delete(name); });
+                    filterNames.forEach(name => { values[name] ? u.searchParams.set(name, values[name]) : u.searchParams.delete(name); });
                     history.replaceState(null, '', u.pathname + u.search);
                     tabs.forEach(a => { const destination = new URL(u); destination.searchParams.set('tab', a.dataset.titleTab); a.href = destination.pathname + destination.search; });
                 }
             }
             if (filters) {
-                ['f_q', 'f_monitor', 'f_type', 'f_status'].forEach(name => { if (params.has(name)) filters.elements[name].value = params.get(name); });
+                filterNames.forEach(name => { if (params.has(name)) filters.elements[name].value = params.get(name); });
                 filters.addEventListener('input', () => filterReleases(true));
                 filters.addEventListener('submit', e => { e.preventDefault(); filterReleases(true); });
-                filters.addEventListener('reset', () => queueMicrotask(() => filterReleases(true)));
+                filters.addEventListener('reset', event => {
+                    event.preventDefault();
+                    filterNames.forEach(name => { filters.elements[name].value = ''; });
+                    filterReleases(true);
+                });
                 filterReleases(false);
             }
             function enhance() {

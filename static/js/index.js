@@ -64,11 +64,19 @@ function librarySortParams(what, el) {
     var search = document.getElementById('library-search');
     var q = search ? search.value.trim() : '';
     if (q) params.search = q;
+    var status = document.getElementById('library-status')?.value;
+    if (status) params.status = status;
     return params;
+}
+
+function filterLibraryStatus() {
+    if (document.body.classList.contains('bulk-selecting')) toggleBulkSelectMode();
+    _liveLibrarySearchImmediate(document.getElementById('library-search'));
 }
 
 function _liveLibrarySearchImmediate(input) {
     const q = (input.value || '').trim().toLowerCase();
+    const status = document.getElementById('library-status')?.value || '';
     const grid = document.getElementById('library-grid');
     if (!grid) return;
 
@@ -87,6 +95,7 @@ function _liveLibrarySearchImmediate(input) {
                 }
             }
         }
+        matches &&= !status || card.dataset.states.split(' ').includes(status);
         card.style.display = matches ? '' : 'none';
         if (matches) visibleCount++;
     });
@@ -96,19 +105,29 @@ function _liveLibrarySearchImmediate(input) {
     const url = new URL(window.location.href);
     if (q) url.searchParams.set('search', q);
     else url.searchParams.delete('search');
+    if (status) url.searchParams.set('status', status);
+    else url.searchParams.delete('status');
     window.history.replaceState(null, '', url);
+    for (const field of document.querySelectorAll('input[type="hidden"][name="status"]')) {
+        field.value = status;
+    }
+    const count = document.getElementById('library-visible-count');
+    if (count) {
+        const unit = document.getElementById('library-individual')?.checked ? 'releases' : 'franchises';
+        count.textContent = `${visibleCount} of ${grid.querySelectorAll('[data-library-card]').length} ${unit}`;
+    }
 
     // No-matches inline empty state. Built once and toggled — avoids
     // navigation while still telling the user their query found
     // nothing.
     let empty = document.getElementById('library-search-empty');
-    if (visibleCount === 0 && q) {
+    if (visibleCount === 0) {
         if (!empty) {
             empty = document.createElement('div');
             empty.id = 'library-search-empty';
             empty.className = 'empty-state';
             const p = document.createElement('p');
-            p.textContent = 'No library entries match your search.';
+            p.textContent = 'No library entries match these filters.';
             empty.appendChild(p);
             grid.parentNode.insertBefore(empty, grid.nextSibling);
         }

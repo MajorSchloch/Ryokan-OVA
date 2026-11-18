@@ -46,8 +46,44 @@ pub(crate) fn monitoring_label(row: &series::Series, states: &[EpisodeMonitorSta
     }
 }
 
-fn upcoming_status(status: &str) -> bool {
+pub(super) fn upcoming_status(status: &str) -> bool {
     matches!(status, "NOT_YET_RELEASED" | "NOT_YET_AIRED")
+}
+
+pub(super) const OVERVIEW_STATUSES: [&str; 6] = [
+    "following",
+    "available",
+    "downloading",
+    "missing",
+    "upcoming",
+    "attention",
+];
+
+impl CardProgress {
+    pub(super) fn matches_overview_status(&self, status: &str) -> bool {
+        match status {
+            "following" => self.following,
+            "available" => self.files.episodes > 0,
+            "downloading" => self.downloading > 0,
+            "missing" => self.missing > 0,
+            "upcoming" => self.upcoming,
+            "attention" => {
+                !self.files.complete_scan
+                    || self.unknown > 0
+                    || self.files.unmet > 0
+                    || self.files.unverified > 0
+            }
+            _ => true,
+        }
+    }
+
+    pub(super) fn overview_states(&self) -> String {
+        OVERVIEW_STATUSES
+            .into_iter()
+            .filter(|status| self.matches_overview_status(status))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 fn finished_status(status: &str) -> bool {
     matches!(status, "FINISHED" | "FINISHED_AIRING")
@@ -216,6 +252,7 @@ pub(super) fn aggregate<'a>(rows: impl Iterator<Item = &'a CardProgress>) -> Car
         p.availability_known &= row.availability_known;
         p.files.add(&row.files);
         p.monitored |= row.monitored;
+        p.upcoming |= row.upcoming;
         p.downloaded += row.downloaded;
         p.downloading += row.downloading;
         p.missing += row.missing;
@@ -317,6 +354,7 @@ pub(super) async fn load(
             availability_known: facts.have.is_some() && facts.missing.is_some(),
             added_date: added_label(&row.added_at),
             following: followed.contains(&row.id),
+            upcoming: upcoming_status(&row.status) || next_airing_at.is_some(),
             next_airing_at,
             monitored: if states.is_empty() {
                 row.monitor_mode != "none"
@@ -356,6 +394,7 @@ pub(super) async fn load(
                 p.missing += 1;
             }
         }
+        p.upcoming |= p.future > 0;
         result.insert(row.id, finish(p));
     }
     let summaries = super::summary::load(db, root, library).await?;
