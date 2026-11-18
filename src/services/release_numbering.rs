@@ -17,6 +17,10 @@ use crate::services::{auto_search, media};
 mod publication;
 pub(crate) use publication::PremiereBound;
 
+#[path = "release_numbering_provider.rs"]
+mod provider;
+pub(crate) use provider::ProviderNumbering;
+
 // Positive source evidence is narrower than the search parser's season
 // rejection hints. In particular, bare Romans and Part/Cour are not seasons.
 static SOURCE_EPISODE: LazyLock<Regex> = LazyLock::new(|| {
@@ -318,6 +322,8 @@ pub struct ReleaseMapping {
     source_season: Option<i32>,
     basis: NumberingBasis,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_heading: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     bound_source: Option<crate::services::source_numbering::BoundSourceProof>,
 }
 
@@ -328,12 +334,54 @@ enum NumberingBasis {
     EntryRelative,
     /// An explicit source season, reconciled with known provider maps.
     SeasonRelative,
+    /// One explicitly numbered episode in a confirmed provider season.
+    ProviderSeason,
     /// A reviewed exact source selects a finite provider-root domain.
     SourceBound,
 }
 
 impl ReleaseMapping {
+    pub(crate) fn from_provider(
+        anilist_id: i64,
+        tv_series: bool,
+        season: i32,
+        provider_episode: i32,
+        local_episode: i32,
+        heading: String,
+    ) -> Result<Self, String> {
+        let mapping = Self {
+            version: 1,
+            anilist_id,
+            tv_series,
+            source_first: provider_episode,
+            source_last: provider_episode,
+            target_first: local_episode,
+            source_season: Some(season),
+            basis: NumberingBasis::ProviderSeason,
+            provider_heading: Some(heading),
+            bound_source: None,
+        };
+        mapping.validate()?;
+        Ok(mapping)
+    }
+
+    pub(crate) fn provider_heading(&self) -> Option<&str> {
+        self.provider_heading.as_deref()
+    }
+
     pub fn validate(&self) -> Result<(), String> {
+        if self.basis == NumberingBasis::ProviderSeason {
+            if self.anilist_id <= 0
+                || self.source_first != self.source_last
+                || self.provider_heading.as_ref().is_none_or(|name| {
+                    name.is_empty() || name.len() > media::MAX_RELEASE_TITLE_BYTES
+                })
+            {
+                return Err("Episode mapping: invalid provider episode decision".into());
+            }
+        } else if self.provider_heading.is_some() {
+            return Err("Episode mapping: unexpected provider title".into());
+        }
         if self.basis == NumberingBasis::SourceBound {
             let proof = self
                 .bound_source
@@ -411,6 +459,7 @@ impl ReleaseMapping {
         }
         if (self.tv_series && span.special)
             || span.season == Some(0)
+            || (self.provider_heading.is_some() && self.source_season != span.season)
             || (self.source_season.is_some()
                 && span.season.is_some()
                 && self.source_season != span.season)
@@ -445,6 +494,15 @@ impl ReleaseMapping {
                 .is_some_and(|payload| payload.first != span.first || payload.last != span.last)
         {
             return Err("Episode mapping: file heading differs from the release decision".into());
+        }
+        if let Some(expected) = self.provider_heading()
+            && (span.special
+                || heading.season != self.source_season
+                || source_identity_name(filename, true)? != expected)
+        {
+            return Err(
+                "Episode mapping: file does not match the provider title and season".into(),
+            );
         }
         self.resolve_file(span)
     }
@@ -481,6 +539,7 @@ impl ReleaseMapping {
                 .filter_map(|file| file.source_season)
                 .next(),
             basis: NumberingBasis::SourceBound,
+            provider_heading: None,
             bound_source: Some(proof.clone()),
         };
         mapping.validate()?;
@@ -646,6 +705,7 @@ impl NumberingContext {
             } else {
                 NumberingBasis::EntryRelative
             },
+            provider_heading: None,
             bound_source: None,
         };
         mapping.validate()?;
@@ -701,6 +761,7 @@ impl NumberingContext {
             } else {
                 NumberingBasis::EntryRelative
             },
+            provider_heading: None,
             bound_source: None,
         };
         mapping.validate()?;
@@ -912,6 +973,7 @@ pub(crate) async fn filter_automatic_candidates_with_pack_mappings(
     .await;
     let mut accepted = Vec::new();
     let automatic_sources = crate::services::source_numbering::loader::Resolver::default();
+    let provider = ProviderNumbering::load(db, detail, target).await;
     for mut candidate in candidates {
         if let Some(bound) = PremiereBound::from_detail(detail)
             && let Err(reason) = bound.check(candidate.published_at)
@@ -958,6 +1020,44 @@ pub(crate) async fn filter_automatic_candidates_with_pack_mappings(
             }
             Ok(false) => {}
         }
+        let saved_provider = candidate
+            .release_mapping
+            .as_ref()
+            .filter(|mapping| mapping.provider_heading().is_some());
+        let provider_decision = provider.as_ref().map_or(Ok(None), |provider| {
+            provider.choose(&candidate.title, candidate.is_batch)
+        });
+        let provider_decision = provider_decision.and_then(|current| {
+            if saved_provider.is_some() && saved_provider != current.as_ref() {
+                return Err("Episode mapping: provider decision changed during search".into());
+            }
+            Ok(current)
+        });
+        match provider_decision {
+            Ok(Some(mapping)) => {
+                let phase = candidate
+                    .match_provenance
+                    .as_ref()
+                    .map_or(auto_search::MatchPhase::Primary, |p| p.phase);
+                candidate.match_provenance = mapping
+                    .provider_heading()
+                    .map(|title| auto_search::MatchProvenance::provider_season(phase, title));
+                candidate.release_mapping = Some(mapping);
+                accepted.push(candidate);
+                continue;
+            }
+            Err(reason) => {
+                crate::services::logger::warn(
+                    db,
+                    crate::models::log::LogCategory::Grab,
+                    "Automatic grab held: provider numbering",
+                    &reason,
+                )
+                .await;
+                continue;
+            }
+            Ok(None) => {}
+        }
         match automatic_sources
             .apply(db, detail.id, target, &mut candidate)
             .await
@@ -994,7 +1094,7 @@ pub(crate) async fn filter_automatic_candidates_with_pack_mappings(
                     match mapping.basis {
                         NumberingBasis::EntryRelative => None,
                         NumberingBasis::SeasonRelative => mapping.source_season,
-                        NumberingBasis::SourceBound => return Err("Episode mapping: published-pack evidence cannot replace an exact source proof".into()),
+                        NumberingBasis::SourceBound | NumberingBasis::ProviderSeason => return Err("Episode mapping: published-pack evidence cannot replace an exact source decision".into()),
                     },
                 )?;
                 if !candidate.is_batch || expected != *mapping {

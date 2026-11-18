@@ -894,6 +894,7 @@ async fn collect_scored_batches_for_target_filtered(
         crate::services::indexers::search_categories(&detail.format, detail.is_adult);
     let automatic_sources = crate::services::source_numbering::loader::Resolver::default();
     let ctx = AutoQueryCtx {
+        provider_numbering: None,
         automatic_sources: &automatic_sources,
         premiere_bound: require_verbatim
             .then(|| crate::services::release_numbering::PremiereBound::from_detail(detail))
@@ -1380,7 +1381,10 @@ async fn collect_scored_for_target_filtered(
     let fuzzy_rejected = std::sync::Mutex::new(Vec::new());
     let indexer_categories =
         crate::services::indexers::search_categories(&detail.format, detail.is_adult);
+    let provider_numbering =
+        crate::services::release_numbering::ProviderNumbering::load(db, detail, target).await;
     let ctx = AutoQueryCtx {
+        provider_numbering: provider_numbering.as_ref(),
         automatic_sources: &automatic_sources,
         premiere_bound: crate::services::release_numbering::PremiereBound::from_detail(detail),
         numbering_target: target,
@@ -1415,6 +1419,20 @@ async fn collect_scored_for_target_filtered(
 
     // Phase 1: standard queries (primary aliases + episode variants).
     run_queries(&queries, ctx, &mut seen, &mut candidates).await;
+
+    // A legacy-shaped result may still fail the final numbering gate.
+    // Search the provider coordinate unless it already yielded a candidate.
+    if let Some(provider) = &provider_numbering
+        && !candidates.iter().any(|result| {
+            result
+                .release_mapping
+                .as_ref()
+                .is_some_and(|mapping| mapping.provider_heading().is_some())
+        })
+    {
+        let provider_queries = append_custom_tokens(provider.queries(), &series_ctx.custom_tokens);
+        run_queries(&provider_queries, ctx, &mut seen, &mut candidates).await;
+    }
 
     // Phase 1.5: if no candidates, try extended aliases (synonyms +
     // decomposed sub-phrases). Rebuild the sibling precompute with the
@@ -1734,6 +1752,12 @@ impl AutoQueryCtx<'_> {
         {
             return Ok(true);
         }
+        if let Some(provider) = self.provider_numbering
+            && let Some(mapping) = provider.choose(&result.title, result.is_batch)?
+        {
+            result.release_mapping = Some(mapping);
+            return Ok(true);
+        }
         if self.require_verbatim {
             let normalized = normalize_title(&result.title);
             if sibling_match_rejects(
@@ -1752,7 +1776,13 @@ impl AutoQueryCtx<'_> {
     }
 
     fn source_provenance(&self, result: &SearchResult) -> MatchProvenance {
-        if result
+        if let Some(title) = result
+            .release_mapping
+            .as_ref()
+            .and_then(|m| m.provider_heading())
+        {
+            MatchProvenance::provider_season(self.phase, title)
+        } else if result
             .release_mapping
             .as_ref()
             .and_then(|m| m.bound_source())
@@ -1779,6 +1809,7 @@ impl AutoQueryCtx<'_> {
 
 #[derive(Clone, Copy)]
 struct AutoQueryCtx<'a> {
+    provider_numbering: Option<&'a crate::services::release_numbering::ProviderNumbering>,
     automatic_sources: &'a crate::services::source_numbering::loader::Resolver,
     premiere_bound: Option<crate::services::release_numbering::PremiereBound>,
     numbering_target: &'a SearchTarget,

@@ -786,7 +786,12 @@ async fn run_auto_search_targets_with_upgrades(
                         continue;
                     }
                 }
-                let wants_selective = upgrades.recent_demand.is_none()
+                let provider_numbered = result
+                    .release_mapping
+                    .as_ref()
+                    .is_some_and(|mapping| mapping.provider_heading().is_some());
+                let wants_selective = !provider_numbered
+                    && upgrades.recent_demand.is_none()
                     && !result.info_hash.is_empty()
                     && auto_search::has_selective_discriminator(&detail);
                 let url = if wants_selective && !result.torrent.is_empty() {
@@ -820,6 +825,26 @@ async fn run_auto_search_targets_with_upgrades(
                     .lock()
                     .await;
                 let _config = crate::handlers::settings::CONFIG_WRITE_LOCK.lock().await;
+                if provider_numbered {
+                    if series_id.is_none() {
+                        skipped.push(format!(
+                            "{label}: add this release before using provider numbering"
+                        ));
+                        continue;
+                    }
+                    if let Err(reason) =
+                        crate::models::grabbed_torrents::ensure_automatic_compatibility(
+                            &state.db,
+                            &result.info_hash,
+                            detail.id,
+                            result.release_mapping.as_ref(),
+                        )
+                        .await
+                    {
+                        skipped.push(format!("{label}: {reason}"));
+                        continue;
+                    }
+                }
                 if let Some(demand) = &upgrades.recent_demand {
                     if let Err(reason) = demand.recheck(state).await {
                         skipped.push(format!("{label}: {reason}"));
@@ -1027,7 +1052,8 @@ async fn run_auto_search_targets_with_upgrades(
                         qbit.add_torrent_returning_id(&url, &result.info_hash)
                             .await
                             .map(|(outcome, hash)| {
-                                existing_recent = upgrades.recent_demand.is_some()
+                                existing_recent = (provider_numbered
+                                || upgrades.recent_demand.is_some())
                                 && outcome
                                     == crate::services::download_client::AddOutcome::AlreadyPresent;
                                 (None, hash)

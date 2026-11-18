@@ -302,7 +302,8 @@ pub(super) fn rescore_for_auto_search_with_breakdown(
             MatchKind::Verbatim
             | MatchKind::SeadexCurated
             | MatchKind::ReviewedSource
-            | MatchKind::AutomaticSource => 0,
+            | MatchKind::AutomaticSource
+            | MatchKind::ProviderSeason => 0,
         } + if p.phase.is_fallback() {
             FALLBACK_PHASE_PENALTY
         } else {
