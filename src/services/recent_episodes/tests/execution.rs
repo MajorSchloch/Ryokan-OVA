@@ -155,6 +155,74 @@ async fn bounded_recovery_dispatches_one_missing_episode_once_and_records_the_ou
     assert_eq!(finished, 1);
 }
 #[tokio::test]
+async fn recovery_cooldown_uses_one_release_hold_and_leaves_search_slots_available() {
+    let (state, client, _root) = state(0).await;
+    let capped = seed_series(&state.db, 102, "Capped Series").await;
+    sqlx::query(
+        "UPDATE series SET format='TV',status='RELEASING',monitor_mode='all',folder_name='Capped' WHERE id=?",
+    )
+    .bind(capped)
+    .execute(&state.db)
+    .await
+    .unwrap();
+    // These episodes sort ahead of the fixture's older episode seven.
+    let newer_airing = chrono::Utc::now().timestamp() - 1800;
+    for episode in 1..=PASS_LIMIT as i32 + 1 {
+        sqlx::query(
+            "INSERT INTO episode_airings(series_id,episode,airing_at,duration_minutes) VALUES(?,?,?,24)",
+        )
+        .bind(capped)
+        .bind(episode)
+        .bind(newer_airing)
+        .execute(&state.db)
+        .await
+        .unwrap();
+        crate::models::monitoring::set_episode_monitored(&state.db, capped, episode, true)
+            .await
+            .unwrap();
+    }
+    for failure in 0..redownload::LOOP_BREAKER {
+        sqlx::query(
+            "INSERT INTO grabbed_torrents(hash,torrent_name,series_id,episode_numbers,state,failure_reason)
+             VALUES(?,'Previous release',?,'[1]','failed','requirements_rejected')",
+        )
+        .bind(format!("failed-{failure}"))
+        .bind(capped)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    let summary = run_once(&state).await.unwrap();
+    assert!(
+        summary.contains("Checked 1 missing episodes: 1 queued"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("Retry cooldown held 1 release."),
+        "{summary}"
+    );
+    assert_eq!(client.adds.load(Ordering::SeqCst), 1);
+    let holds: Vec<(String, String)> =
+        sqlx::query_as("SELECT action,reason FROM library_activity WHERE series_id=? ORDER BY id")
+            .bind(capped)
+            .fetch_all(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(holds.len(), 1);
+    assert_eq!(holds[0].0, COOLDOWN_HELD);
+    assert!(holds[0].1.contains("Retry limit reached"));
+
+    sqlx::query("UPDATE grabbed_torrents SET grabbed_at=datetime('now', ?) WHERE series_id=?")
+        .bind(format!("-{} hours", redownload::WINDOW_HOURS + 1))
+        .bind(capped)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(retry_limit_reason(&state.db, capped).await.unwrap(), None);
+}
+
+#[tokio::test]
 async fn an_old_gap_is_revisited_when_a_suitable_source_appears_later() {
     let (state, client, _root) = state(0).await;
     let sources = state.indexers.read().await.clone();
