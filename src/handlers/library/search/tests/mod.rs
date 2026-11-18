@@ -8,6 +8,7 @@ use crate::services::auto_expand::{AutoExpandGrabContext, expand_from_files};
 
 fn empty_anime_detail(id: i64, title_english: &str) -> anilist::AnimeDetail {
     anilist::AnimeDetail {
+        country_of_origin: None,
         release_date: None,
         is_adult: false,
         id,

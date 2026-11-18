@@ -83,12 +83,13 @@
         <div class="detail-actions">
             {% if is_tracked %}
             <button class="btn btn-primary" id="btn-auto-search" onclick="autoSearchSeries(this)">
-                <span class="btn-label">Search Monitored Episodes</span>
+                <span class="btn-label">Search monitored episodes</span>
             </button>
+            <button type="button" class="btn btn-secondary" onclick="openInteractiveBatchSearch(this)" aria-label="Choose a batch for this release">Choose a batch…</button>
             {% endif %}
             {% if is_tracked %}
                 {% if let Some(id) = db_id %}
-                <button class="btn btn-danger" id="btn-track" onclick="removeSeries({{ id }})">Remove from Library</button>
+                <button class="btn btn-secondary" id="btn-track" onclick="removeSeries({{ id }})">Remove from Library</button>
                 {% endif %}
             {% else %}
             <button class="btn btn-primary" id="btn-track" onclick="addSeries()">+ Add to Library</button>
@@ -99,6 +100,7 @@
             {% if !anilist_url.is_empty() %}<a href="{{ anilist_url }}" target="_blank" rel="noopener noreferrer" class="btn btn-ghost">AniList</a>{% endif %}
             {% if !mal_url.is_empty() %}<a href="{{ mal_url }}" target="_blank" rel="noopener noreferrer" class="btn btn-ghost">MyAnimeList</a>{% endif %}
         </div>
+        {% if is_tracked %}<p class="form-hint">Search uses monitored episodes and may download matching files. Choose a batch to review available releases before download.</p>{% endif %}
         {% if !is_tracked %}<p class="form-hint">Outside your library. Explore this release and its relations, then add what you want to track.</p>{% endif %}
         {% if metadata_is_stale %}
         <div class="alert alert-warn metadata-stale-banner" role="status">
@@ -197,82 +199,9 @@
 {% if is_tracked %}
 <div class="detail-section monitoring-section">
     <div class="monitoring-card">
-        <div class="monitoring-row">
-            <span class="folder-label">Monitor episodes:</span><p class="form-hint">Monitoring controls missing and future episodes. Searches follow your app setting; use Search to request one explicitly.</p>
-            <div class="monitoring-controls">
-                {# Issue #166 — declarative HTMX. `change` triggers the
-                   POST; the server returns `HX-Refresh: true` for the
-                   HTMX branch so the page reloads (equivalent to the
-                   prior `location.reload()` in JS). The non-HTMX path
-                   still returns JSON for `toggleMonitorAll` callers
-                   in series_episode_actions.js. #}
-                   <select id="monitor-mode" class="folder-select monitoring-select"
-                   name="monitor_mode"
-                   hx-post="/api/library/monitoring"
-                   hx-trigger="change"
-                   hx-vals='js:{series_id: parseInt(SD.dbId)}'
-                   hx-swap="none">
-                   <option value="all" {% if monitor_mode_select_value == "all" %}selected{% endif %}>All Episodes</option>
-                   <option value="future" {% if monitor_mode_select_value == "future" %}selected{% endif %}>Future Episodes</option>
-                   <option value="missing" {% if monitor_mode_select_value == "missing" %}selected{% endif %}>Missing Episodes</option>
-                   <option value="existing" {% if monitor_mode_select_value == "existing" %}selected{% endif %}>Existing Episodes</option>
-                   <option value="none" {% if monitor_mode_select_value == "none" %}selected{% endif %}>None</option>
-                   {% if can_sync_from_external_account %}
-                   {# #62 — clearing the manual-override flag.
-                   Only visible when the series came from sync; for
-                   manually-added series the option would be a
-                   no-op. The "follow your AL/MAL list" choice
-                   lives in the same dropdown as the manual modes
-                   so the user has one control surface for "auto
-                   vs. pinned." #}
-                   <option value="sync"{% if monitor_mode_select_value == "sync" %} selected{% endif %}>Sync from {{ sync_provider_label }}</option>
-                   {% endif %}
-                   </select>
-                   <span class="form-hint" id="monitor-summary">(<span id="monitor-count">{{ monitored_count }} monitored</span><span id="monitor-pinned"{% if !(monitor_mode_manual_override && can_sync_from_external_account) %} hidden{% endif %}> · pinned</span>)</span>
-                   </div>
-                   </div>
-                   <div class="monitoring-divider"></div>
-                   <div class="monitoring-row">
-                   <span class="folder-label">Upgrades:</span>
-                   <div class="monitoring-controls">
-                   {# Issue #166 — HTMX-driven series-level toggles. The
-                   server takes form data (series_id, allow) and acks
-                   with an empty 200 for the HTMX branch. `hx-swap=none`
-                   keeps the rendered checkbox as the source of truth
-                   for the visual state; the `hx-on::response:error`
-                   handler reverts the click + toasts when the server
-                   rejects (4xx/5xx). The `noSwap` config in base.html
-                   keeps error bodies out of the page, so the visual
-                   revert is the only client work needed. #}
-                <div class="monitoring-toggles">
-                    <label class="checkbox-row">
-                        <input type="checkbox" id="allow-upgrades"
-                               {% if allow_upgrades %}checked{% endif %}
-                               hx-post="/api/library/allow-upgrades"
-                               hx-vals='js:{series_id: parseInt(SD.dbId), allow: this.checked}'
-                               hx-swap="none"
-                               hx-on::response:error="this.checked = !this.checked; window.ryokanToast({kind: 'error', category: 'library', title: 'Upgrades toggle failed', body: 'Failed to update upgrades toggle', log: true})">
-                        Allow automatic upgrades
-                    </label>
-                    {# Issue #28 — PT upgrade opt-in, a sub-decision of
-                       "upgrades at all", so it sits second on the line. #}
-                    <label class="checkbox-row">
-                        <input type="checkbox" id="allow-pt-upgrades"
-                               {% if allow_pt_upgrades %}checked{% endif %}
-                               hx-post="/api/library/allow-pt-upgrades"
-                               hx-vals='js:{series_id: parseInt(SD.dbId), allow: this.checked}'
-                               hx-swap="none"
-                               hx-on::response:error="this.checked = !this.checked; window.ryokanToast({kind: 'error', category: 'library', title: 'PT-upgrades toggle failed', body: 'Failed to update PT-upgrades toggle', log: true})">
-                        Include private trackers
-                    </label>
-                </div>
-            </div>
-        </div>
-
         {# #23 — Per-series search overrides. Both fields are blank by
            default; leaving them blank inherits the global defaults from
            Settings → Quality (rendered as placeholders here). #}
-        <div class="monitoring-divider"></div>
         <section class="monitoring-row" id="advanced-search-panel">
             <h3 class="folder-label">Manual alternate titles</h3>
             {# Issue #166 — HTMX-driven save. The form posts to
@@ -318,6 +247,19 @@
 {% if let Some(requirements) = requirements %}{% include "partials/library/requirements.html" %}{% else %}<p class="form-hint">Add this release to configure its requirements.</p>{% endif %}
 </section>
 <section data-title-panel="episodes">
+<section class="release-overview" aria-label="Release management">
+    <div class="management-panel release-policy">
+        <div class="release-panel-heading"><h3>Download requirements</h3><a class="btn btn-ghost btn-sm" href="?tab=settings" data-title-tab="settings">Edit requirements</a></div>
+        <p class="original-language-hint"><strong>Original language hint:</strong> {% if let Some((language,country)) = detail.original_language_hint() %}{{ language }} <span class="form-hint">(inferred from {{ country }})</span>{% else %}Unknown{% endif %}</p>
+        <p class="form-hint">Country data cannot confirm audio language. The requirements below control downloads.</p>
+        {% if let Some(policy) = requirements %}
+        {% if !policy.enabled %}<p class="alert alert-warn">Minimum + good enough mode is off. Language rules still apply; upgrades use the quality cutoff.</p>{% endif %}
+        {% if !policy.error.is_empty() %}<p class="alert alert-error" role="alert">{{ policy.error }}</p>{% endif %}
+        <dl class="release-policy-values">{% for field in policy.fields %}<div><dt>{{ field.label }}</dt><dd>{{ field.effective }}<small>{{ field.origin }}</small></dd></div>{% endfor %}</dl>
+        {% else %}<p class="form-hint">{% if is_tracked %}Requirements are unavailable. Open Settings to try again.{% else %}Add this release to configure its requirements.{% endif %}</p>{% endif %}
+    </div>
+    {% if is_tracked %}<div class="release-automation"><h3>Episode monitoring &amp; upgrades</h3>{% include "partials/series/release_controls.html" %}</div>{% endif %}
+</section>
 {% include "partials/library/file_summary.html" %}
 <!-- Episodes -->
 {% if !episodes.is_empty() || ep_total > 0 %}

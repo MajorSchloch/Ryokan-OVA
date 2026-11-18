@@ -20,6 +20,7 @@ async fn selected_pack_import_preserves_exact_history_coverage_without_recaps() 
         .await
         .unwrap();
     let detail = AnimeDetail {
+        country_of_origin: None,
         release_date: None,
         is_adult: false,
         id: 17074,

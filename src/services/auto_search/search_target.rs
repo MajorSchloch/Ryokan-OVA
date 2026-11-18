@@ -504,6 +504,7 @@ mod tests {
 
     fn detail_with(format: &str, episodes: Option<i32>) -> AnimeDetail {
         AnimeDetail {
+            country_of_origin: None,
             release_date: None,
             is_adult: false,
             id: 1,

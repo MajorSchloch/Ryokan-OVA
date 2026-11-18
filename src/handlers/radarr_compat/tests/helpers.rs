@@ -141,6 +141,7 @@ mod from_tracked {
 
     fn detail_with_score(id: i64, score: Option<i32>) -> anilist::AnimeDetail {
         anilist::AnimeDetail {
+            country_of_origin: None,
             release_date: None,
             is_adult: false,
             id,

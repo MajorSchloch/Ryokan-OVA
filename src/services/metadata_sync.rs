@@ -1209,6 +1209,7 @@ mod tests {
 
     fn detail_fixture(id: i64) -> anilist::AnimeDetail {
         anilist::AnimeDetail {
+            country_of_origin: None,
             release_date: None,
             is_adult: false,
             id,

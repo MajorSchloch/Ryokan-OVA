@@ -8,6 +8,23 @@
 .management-panel h3 { margin:0 0 12px; }.management-panel p { overflow-wrap:anywhere; }
 .management-panel label { display:block; margin-bottom:6px; }.management-panel small { display:block; color:var(--text-muted); margin:6px 0 12px; }
 .requirement-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:20px; }
+.release-overview { display:grid; grid-template-columns:minmax(0,1.25fr) minmax(0,1fr); gap:20px; margin:20px 0; align-items:start; }
+.release-overview > * { min-width:0; }
+.release-overview .management-panel,.release-overview .monitoring-section { margin:0; }
+.release-panel-heading { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; margin-bottom:12px; }
+.release-panel-heading h3 { margin:0; }
+.release-policy-values { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; margin:16px 0 0; }
+.release-policy-values dt { color:var(--text-muted); font-size:12px; margin-bottom:4px; }
+.release-policy-values dd { margin:0; overflow-wrap:anywhere; }
+.release-policy-values small { margin:4px 0 0; font-size:11px; }
+.release-automation > h3 { margin:0 0 12px; font-size:15px; }
+.release-automation .monitoring-card .monitoring-row { display:block; padding:14px; }
+.release-automation .monitoring-controls { margin-top:8px; }
+.release-automation .monitoring-select { max-width:100%; }
+.release-automation .form-hint { display:block; margin:8px 0 0; }
+.release-automation .monitoring-toggles { gap:12px; }
+@media(max-width:900px) { .release-overview { grid-template-columns:minmax(0,1fr); } }
+@media(max-width:420px) { .release-policy-values { grid-template-columns:minmax(0,1fr); } }
 .requirement-fields .form-group { margin:0; }.requirement-fields select,.requirement-fields input { width:100%; }
 .file-summary { color:var(--text-muted); font-size:.85rem; margin:12px 0; }.file-summary p { margin:5px 0; }.file-summary-quality { line-height:1.5; }
 .file-gate { margin-top:6px; font-size:.75rem; text-align:left; }.file-gate summary { display:flex; align-items:center; justify-content:center; gap:5px; cursor:pointer; }

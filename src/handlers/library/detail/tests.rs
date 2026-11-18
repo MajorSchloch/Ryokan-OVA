@@ -311,3 +311,165 @@ async fn all_detail_routes_remain_behind_authentication() {
         assert_eq!(response.headers()["Location"], "/login");
     }
 }
+
+#[tokio::test]
+async fn release_overview_shows_inferred_origin_separate_from_effective_requirements() {
+    use crate::models::series_language_preferences::{self, LanguagePreferences};
+    let db = in_memory_pool().await;
+    let temp = tempfile::tempdir().unwrap();
+    let cfg = config::Config {
+        media_root: temp.path().to_string_lossy().into_owned(),
+        media_requirements_enabled: true,
+        required_audio_languages: "ja".into(),
+        required_subtitle_languages: "en".into(),
+        minimum_resolution: "720".into(),
+        target_resolution: "1080".into(),
+        ..Default::default()
+    };
+    config::save_config(&db, &cfg).await.unwrap();
+    let mut detail = anilist::parse_media_node(&json!({
+        "id": 123, "countryOfOrigin": "JP", "format": "TV", "episodes": 1,
+        "status": "FINISHED", "title": {"english": "Language test"}
+    }))
+    .unwrap();
+    let series_id = seed_series(&db, 123, "Language test").await;
+    metadata_cache::upsert_provider(&db, 123, None, &detail)
+        .await
+        .unwrap();
+    let html = body(request(&db, "/anime/anilist/123", false).await).await;
+    let overview = html
+        .split("aria-label=\"Release management\"")
+        .nth(1)
+        .unwrap()
+        .split("<!-- Episodes -->")
+        .next()
+        .unwrap();
+    assert!(overview.contains("Japanese"));
+    assert!(overview.contains("inferred from Japan"));
+    assert!(overview.contains("English"));
+    assert!(overview.contains("App default"));
+    assert!(overview.contains("720p"));
+    assert!(overview.contains("1080p"));
+    assert_eq!(html.matches("id=\"monitor-mode\"").count(), 1);
+    assert_eq!(html.matches("id=\"allow-upgrades\"").count(), 1);
+    assert!(html.contains("Choose a batch"));
+    assert!(overview.contains("/api/library/monitoring"));
+    assert!(overview.contains("/api/library/allow-upgrades"));
+
+    let mut connection = db.acquire().await.unwrap();
+    crate::models::library_layout::record(
+        &mut connection,
+        123,
+        &crate::models::library_layout::Assignment {
+            path: "Language test/Language test".into(),
+            root: "Language test".into(),
+            owner: 123,
+        },
+    )
+    .await
+    .unwrap();
+    drop(connection);
+    let page_id = crate::models::library_layout::page_for_provider(&db, 123)
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    crate::models::requirement_preferences::save_franchise(
+        &db,
+        &crate::models::requirement_preferences::FranchisePreferences {
+            page_id,
+            audio_languages: Some("zh".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let inherited = body(request(&db, "/anime/anilist/123", false).await).await;
+    let inherited = inherited
+        .split("aria-label=\"Release management\"")
+        .nth(1)
+        .unwrap()
+        .split("<!-- Episodes -->")
+        .next()
+        .unwrap();
+    assert!(inherited.contains("Chinese"));
+    assert!(inherited.contains("<small>Franchise</small>"));
+    assert!(inherited.contains("inferred from Japan"));
+
+    let exception = LanguagePreferences {
+        audio_languages: Some("de".into()),
+        subtitle_languages: Some(String::new()),
+        ..Default::default()
+    };
+    series_language_preferences::save(&db, series_id, &exception)
+        .await
+        .unwrap();
+    let html = body(request(&db, "/anime/anilist/123", false).await).await;
+    let overview = html
+        .split("aria-label=\"Release management\"")
+        .nth(1)
+        .unwrap()
+        .split("<!-- Episodes -->")
+        .next()
+        .unwrap();
+    assert!(overview.contains("inferred from Japan"));
+    assert!(overview.contains("German"));
+    assert!(overview.contains("No language requirement"));
+    assert_eq!(
+        overview.matches("No required subtitle languages").count(),
+        2
+    );
+    assert!(overview.contains("<small>Release</small>"));
+    assert_eq!(
+        series_language_preferences::get(&db, series_id)
+            .await
+            .unwrap(),
+        exception
+    );
+
+    detail.country_of_origin = Some("CN".into());
+    metadata_cache::upsert_provider(&db, 123, None, &detail)
+        .await
+        .unwrap();
+    let chinese = LanguagePreferences {
+        audio_languages: Some("zh".into()),
+        ..Default::default()
+    };
+    series_language_preferences::save(&db, series_id, &chinese)
+        .await
+        .unwrap();
+    let html = body(request(&db, "/anime/anilist/123", false).await).await;
+    assert!(html.contains("Chinese"));
+    assert!(html.contains("inferred from China"));
+    assert_eq!(
+        series_language_preferences::get(&db, series_id)
+            .await
+            .unwrap(),
+        chinese
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM grabbed_torrents")
+            .fetch_one(&db)
+            .await
+            .unwrap(),
+        0
+    );
+    detail.country_of_origin = None;
+    metadata_cache::upsert_provider(&db, 123, None, &detail)
+        .await
+        .unwrap();
+    config::save_config(
+        &db,
+        &config::Config {
+            media_requirements_enabled: false,
+            ..cfg
+        },
+    )
+    .await
+    .unwrap();
+    let html = body(request(&db, "/anime/anilist/123", false).await).await;
+    assert!(html.contains("Original language hint:</strong> Unknown"));
+    assert!(html.contains("Minimum + good enough mode is off."));
+    assert!(html.contains("Uses the configured quality cutoff."));
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+}
