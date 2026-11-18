@@ -89,6 +89,7 @@ async fn delicious_unmonitored_first_season_and_future_sequel_are_neutral() {
     .await;
     states(&db, &first, 24, &[]).await;
     states(&db, &second, 12, &(1..=12).collect::<Vec<_>>()).await;
+    file(root.path(), &first, "Show - S01E02.mkv");
     let library = vec![first.clone(), second.clone()];
     let before:Vec<(i64,i32,bool)>=sqlx::query_as("SELECT series_id,episode_number,monitored FROM episode_monitor_state ORDER BY series_id,episode_number").fetch_all(&db).await.unwrap();
     sqlx::query("PRAGMA query_only=ON")
@@ -106,6 +107,10 @@ async fn delicious_unmonitored_first_season_and_future_sequel_are_neutral() {
         (progress[&second.id].missing, progress[&second.id].future),
         (0, 12)
     );
+    assert!(progress[&first.id].matches_overview_status("available"));
+    assert_eq!(progress[&first.id].downloaded, 0);
+    assert!(!progress[&first.id].matches_overview_status("missing"));
+    assert!(progress[&second.id].matches_overview_status("upcoming"));
     let combined = aggregate(progress.values());
     assert_eq!(
         (
@@ -377,6 +382,7 @@ async fn follow_selection_never_hides_or_creates_demand_and_parent_matches_poste
     assert_eq!(summary.value().attr("data-missing"), Some("3"));
     assert_eq!(summary.value().attr("data-unmonitored"), Some("2"));
     assert!(parent.contains("Back to library"));
+    assert!(parent.contains("Selected in follow"));
     let response = super::super::pages::index(
         State(build_test_app_state(db, None)),
         Query(super::super::pages::LibraryIndexQuery {

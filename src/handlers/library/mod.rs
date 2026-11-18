@@ -63,6 +63,7 @@ pub struct CardProgress {
     pub next_airing: String,
     pub next_airing_at: Option<i64>,
     pub following: bool,
+    pub upcoming: bool,
     pub added_date: String,
 }
 
@@ -111,6 +112,7 @@ struct IndexTemplate {
     /// Echoed back so the input's `value` persists across
     /// navigations.
     search_query: String,
+    status_filter: String,
     /// Canonical sort value (`recent` / `oldest` / `title_asc` /
     /// `title_desc` / `score` / `score_asc`). The handler has
     /// already applied it to `library`; chips carry it through
