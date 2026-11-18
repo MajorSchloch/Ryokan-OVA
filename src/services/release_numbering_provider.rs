@@ -133,8 +133,8 @@ impl ProviderNumbering {
             return None;
         }
         let inferred_season = infer_season_from_detail(detail).max(1);
-        // Ordinary canonical SxxExx keeps its existing decision and file
-        // validation. Only changed coordinates need a provider receipt.
+        // An agreeing canonical SxxExx keeps its ordinary file validation.
+        // Only changed coordinates need a provider receipt.
         let coordinates: Vec<_> = map
             .coordinates_for(episode)
             .into_iter()
@@ -346,6 +346,13 @@ impl ProviderNumbering {
                         // can belong to an owner title, so test complete
                         // prefixes rather than splitting the title itself.
                         for alias in segment.split(';') {
+                            if alias
+                                .split(',')
+                                .next()
+                                .is_some_and(|first| normalize_title(first).is_empty())
+                            {
+                                continue;
+                            }
                             for end in alias
                                 .match_indices(',')
                                 .map(|(index, _)| index)
