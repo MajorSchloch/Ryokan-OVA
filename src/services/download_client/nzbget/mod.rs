@@ -53,6 +53,11 @@ impl Job {
                 // COPY discarded this exact duplicate. Reconcile its attempt
                 // without failed-download cleanup or adoption of the older job.
                 ("DELETED", "MANUAL" | "COPY") => Removed,
+                // Mark as good can finalize a discarded job without an
+                // importable download. Close only its exact pending attempt.
+                ("DELETED", "GOOD") if self.kind == "NZB" && self.delete_status == "GOOD" => {
+                    Removed
+                }
                 ("WARNING", "SKIPPED") if self.kind == "URL" => Errored,
                 ("SUCCESS", _) if self.kind == "NZB" => PausedComplete,
                 ("FAILURE", _) => Errored,
