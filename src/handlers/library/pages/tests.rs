@@ -18,6 +18,7 @@ fn unique_media_root(suffix: &str) -> std::path::PathBuf {
 
 fn empty_anime_detail(id: i64, title_english: &str, episodes: Option<i32>) -> anilist::AnimeDetail {
     anilist::AnimeDetail {
+        country_of_origin: None,
         release_date: None,
         is_adult: false,
         id,

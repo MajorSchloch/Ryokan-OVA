@@ -46,6 +46,10 @@ Release detail pages use provider identities: `/anime/anilist/130003` for an Ani
 
 Search result covers and titles open these Ryokan pages. Provider links remain available separately. Relation cards, franchise pages, and franchise previews also link to release details. A tracked release shows its library controls; an untracked release offers **Add to Library**. Releases with a saved parent link to its franchise page. Other releases offer **Explore franchise**.
 
+The release **Episodes** tab shows effective audio, subtitle and quality requirements with their source: app, franchise or release. **Edit requirements** opens Settings. Monitoring and upgrade controls apply to that release. **Search monitored episodes** can download matching files; **Choose a batch** opens release selection. Removal keeps its existing confirmation.
+
+**Original language hint** uses AniList's country of origin and is marked as inferred. It does not confirm audio or change requirements. Old caches show **Unknown** until the normal metadata refresh includes country data. Explicit language exceptions remain in effect.
+
 Legacy `/series/<library row id>` bookmarks redirect to the provider page. The existing `?by=anilist` links still identify provider IDs explicitly. Mutation and playback APIs retain their library row IDs. An AniList ID that equals another release's library row ID cannot select that release.
 
 A franchise remains a Ryokan group of releases. Its follow owner is a release, not a provider identity for the whole franchise. Browsing a release or its franchise preview does not save a follow or move files.

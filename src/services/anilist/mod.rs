@@ -865,6 +865,9 @@ fn de_plausible_count<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<i
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AnimeDetail {
+    /// Provider country, not confirmed audio. Missing from older cached JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country_of_origin: Option<String>,
     /// AniList premiere date, with the precision supplied by the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_date: Option<String>,
@@ -910,6 +913,16 @@ pub struct AnimeDetail {
 }
 
 impl AnimeDetail {
+    /// A display-only inference. Never use country as an acquisition requirement.
+    pub fn original_language_hint(&self) -> Option<(&'static str, &'static str)> {
+        match self.country_of_origin.as_deref() {
+            Some("JP") => Some(("Japanese", "Japan")),
+            Some("CN") => Some(("Chinese", "China")),
+            Some("KR") => Some(("Korean", "South Korea")),
+            _ => None,
+        }
+    }
+
     /// Effective episode count for rendering, episode cache building, and
     /// monitoring. AniList reports `episodes: null` for currently-airing
     /// series because the final count isn't known yet, so we fall back to
@@ -1103,6 +1116,7 @@ fn relation_start_date(value: &serde_json::Value) -> Option<String> {
 const MEDIA_DETAIL_FIELDS: &str = r#"
     id
     idMal
+    countryOfOrigin
     title { romaji english native }
     synonyms
     coverImage { large extraLarge }
@@ -1343,6 +1357,7 @@ pub(crate) fn parse_media_node(m: &serde_json::Value) -> Option<AnimeDetail> {
 
     let id = m["id"].as_i64().filter(|&n| n > 0)?;
     Some(AnimeDetail {
+        country_of_origin: m["countryOfOrigin"].as_str().map(str::to_owned),
         release_date: premiere_date(&m["startDate"]),
         is_adult: m["isAdult"].as_bool().unwrap_or(false),
         id,
@@ -1487,6 +1502,7 @@ pub async fn get_anime_details_batch(ids: &[i64]) -> Result<HashMap<i64, AnimeDe
                         media(id_in: $ids, type: ANIME) {{
                             id
                             idMal
+                            countryOfOrigin
                             title {{ romaji english native }}
                             synonyms
                             coverImage {{ large extraLarge }}
@@ -2105,6 +2121,31 @@ mod tests {
             assert_eq!(sequel.release_date.as_deref(), display);
             assert_eq!(sequel.start_date.as_deref(), earliest);
         }
+    }
+
+    #[test]
+    fn country_language_hint_is_explicitly_inferred_and_old_blobs_remain_readable() {
+        for (country, expected) in [
+            ("JP", Some(("Japanese", "Japan"))),
+            ("CN", Some(("Chinese", "China"))),
+            ("KR", Some(("Korean", "South Korea"))),
+            ("TW", None),
+            ("ZZ", None),
+        ] {
+            let detail = parse_media_node(&serde_json::json!({
+                "id": 1, "countryOfOrigin": country
+            }))
+            .unwrap();
+            assert_eq!(detail.country_of_origin.as_deref(), Some(country));
+            assert_eq!(detail.original_language_hint(), expected);
+            let mut blob = serde_json::to_value(&detail).unwrap();
+            blob.as_object_mut().unwrap().remove("country_of_origin");
+            let legacy: AnimeDetail = serde_json::from_value(blob).unwrap();
+            assert_eq!(legacy.country_of_origin, None);
+            assert_eq!(legacy.original_language_hint(), None);
+        }
+        let no_country = parse_media_node(&serde_json::json!({"id": 1})).unwrap();
+        assert_eq!(no_country.original_language_hint(), None);
     }
 
     #[test]

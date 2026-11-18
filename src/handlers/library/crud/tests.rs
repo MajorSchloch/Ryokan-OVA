@@ -361,7 +361,7 @@ mod crud_ci {
 
     #[test]
     fn monitor_mode_sync_sentinel_matches_template_literal() {
-        // The dropdown in templates/series.html hardcodes
+        // The release-controls dropdown hardcodes
         // <option value="sync">; the handler's branch keys off
         // MONITOR_MODE_SYNC_SENTINEL. A rename of the constant
         // would silently desync the two and the dropdown option
@@ -371,10 +371,10 @@ mod crud_ci {
         // Also confirm the template still emits the literal —
         // catches the inverse: someone renames the template
         // option but forgets the const.
-        let template = include_str!("../../../../templates/series.html");
+        let template = include_str!("../../../../templates/partials/series/release_controls.html");
         assert!(
             template.contains(r#"<option value="sync""#),
-            "templates/series.html must keep the sync sentinel option in sync with MONITOR_MODE_SYNC_SENTINEL"
+            "release_controls.html must keep the sync sentinel option in sync with MONITOR_MODE_SYNC_SENTINEL"
         );
     }
 

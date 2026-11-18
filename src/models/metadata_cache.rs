@@ -176,6 +176,7 @@ mod tests {
 
     fn detail(id: i64) -> AnimeDetail {
         AnimeDetail {
+            country_of_origin: None,
             release_date: None,
             is_adult: false,
             id,
@@ -204,6 +205,26 @@ mod tests {
             synonyms: Vec::new(),
             streaming_episodes: Vec::new(),
             relations: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn country_hint_round_trips_through_both_metadata_caches() {
+        let db = in_memory_pool().await;
+        let series_id = seed_series(&db, 123, "Country cache").await;
+        let mut detail = detail(123);
+        detail.country_of_origin = Some("CN".into());
+        upsert(&db, series_id, 123, None, &detail).await.unwrap();
+        upsert_provider(&db, 123, None, &detail).await.unwrap();
+        for cached in [
+            get_by_series_id(&db, series_id).await.unwrap().unwrap(),
+            get_by_provider_id(&db, 123).await.unwrap().unwrap(),
+        ] {
+            assert_eq!(cached.detail.country_of_origin.as_deref(), Some("CN"));
+            assert_eq!(
+                cached.detail.original_language_hint(),
+                Some(("Chinese", "China"))
+            );
         }
     }
 

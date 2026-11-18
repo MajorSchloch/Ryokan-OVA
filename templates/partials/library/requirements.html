@@ -1,6 +1,7 @@
 <section id="media-requirements-form" class="management-panel">
     <h3>{% if requirements.scope == "franchise" %}Franchise defaults{% else %}Release requirements{% endif %}</h3>
     <p class="form-hint">App defaults → franchise defaults → release overrides. Inherit each field or set an exception. Saving does not start a search.</p>
+    {% if !requirements.enabled %}<p class="alert alert-warn">Minimum + good enough mode is off. Language rules still apply; upgrades use the quality cutoff.</p>{% endif %}
     {% if !requirements.error.is_empty() %}<p class="alert alert-error" role="alert">{{ requirements.error }}</p>{% endif %}
     {% if !requirements.message.is_empty() %}<p class="alert alert-success" role="status">{{ requirements.message }}</p>{% endif %}
     <form action="/library/requirements" method="post" hx-post="/library/requirements" hx-target="#media-requirements-form" hx-swap="outerHTML" hx-disable="find button[type='submit']">

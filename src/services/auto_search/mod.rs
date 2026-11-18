@@ -3713,6 +3713,7 @@ mod tests {
 
     fn detail(id: i64, romaji: &str, english: &str, native: &str) -> AnimeDetail {
         AnimeDetail {
+            country_of_origin: None,
             release_date: None,
             is_adult: false,
             id,
