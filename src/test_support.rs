@@ -764,6 +764,9 @@ window.addEventListener('DOMContentLoaded', function () {
             // Phase D pentagon-nav test exercises every route here.
             .route("/", get(crate::handlers::library::pages::index))
             .route("/library/table", get(crate::handlers::library::table::page))
+            .route("/franchises/{id}", get(crate::handlers::library::navigation::page))
+            .merge(crate::handlers::library::detail::routes())
+            .route("/api/library/remove", post(crate::handlers::library::crud::remove_series))
             // First-run library step
             // (`tests/htmx_browser_e2e_setup_library.rs`).
             .route(
@@ -881,6 +884,38 @@ window.addEventListener('DOMContentLoaded', function () {
 
 #[cfg(feature = "browser-e2e")]
 pub use e2e::build as e2e_browser_app;
+
+/// Seed a release detail and its franchise without contacting a metadata provider.
+#[cfg(feature = "browser-e2e")]
+pub async fn seed_browser_franchise_release(
+    db: &SqlitePool,
+    provider_id: i64,
+    title: &str,
+) -> (i64, String) {
+    let series_id = seed_series(db, provider_id, title).await;
+    let detail = crate::services::anilist::parse_media_node(&serde_json::json!({
+        "id": provider_id,
+        "type": "ANIME",
+        "title": { "english": title },
+        "format": "TV",
+        "status": "FINISHED",
+        "episodes": 1
+    }))
+    .expect("parse fixture metadata");
+    crate::models::metadata_cache::upsert_provider(db, provider_id, None, &detail)
+        .await
+        .expect("cache release metadata");
+    let mut tx = db.begin().await.expect("begin franchise fixture");
+    crate::models::library_layout::record_move(&mut tx, series_id, &format!("{title}/{title}"))
+        .await
+        .expect("save franchise fixture");
+    tx.commit().await.expect("commit franchise fixture");
+    let (franchise, _) = crate::models::library_layout::page_for_provider(db, provider_id)
+        .await
+        .expect("look up seeded franchise")
+        .expect("franchise was seeded");
+    (series_id, franchise)
+}
 
 /// Persist a `Config` row with the Sonarr shim enabled and a known
 /// API key, so arr-compat tests can exercise authenticated paths
