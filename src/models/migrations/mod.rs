@@ -2290,6 +2290,13 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Only new NZBGet imports with verified copies can create this receipt.
+    // A historical imported state alone cannot authorize automatic deletion.
+    sqlx::query("ALTER TABLE grabbed_torrents ADD COLUMN nzbget_cleanup_receipt TEXT")
+        .execute(db)
+        .await
+        .ok();
+
     // Issue #28 — per-series PT-upgrade opt-in. The UI + sweep
     // filter land in a later change; the column lands here up front
     // so the search code can filter on it without a chained

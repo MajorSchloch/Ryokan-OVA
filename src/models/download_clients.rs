@@ -148,7 +148,10 @@ pub async fn list_enabled(db: &SqlitePool) -> Result<Vec<DownloadClientRow>, sql
     Ok(rows.into_iter().map(map_row).collect())
 }
 
-pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<DownloadClientRow>, sqlx::Error> {
+pub async fn get_by_id<'a>(
+    db: impl sqlx::Executor<'a, Database = sqlx::Sqlite>,
+    id: i64,
+) -> Result<Option<DownloadClientRow>, sqlx::Error> {
     let row = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {SELECT_COLS} FROM download_clients WHERE id = ?"
     )))

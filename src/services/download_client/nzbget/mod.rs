@@ -44,6 +44,10 @@ struct Job {
     remaining_size_hi: u32,
 }
 
+fn valid_directory_path(path: &Path) -> bool {
+    path.is_absolute() && !path.components().any(|part| part == Component::ParentDir)
+}
+
 impl Job {
     fn state(&self, history: bool) -> DownloadItemState {
         use DownloadItemState::*;
@@ -85,15 +89,26 @@ impl Job {
                 .is_some_and(|suffix| {
                     !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())
                 });
-        if !self.name.is_empty()
-            && matches_name
-            && path.is_absolute()
-            && !path.components().any(|c| c == Component::ParentDir)
-        {
+        if !self.name.is_empty() && matches_name && valid_directory_path(path) {
             Some(path)
         } else {
             None
         }
+    }
+
+    fn reported_dirs(&self) -> impl Iterator<Item = &str> {
+        [self.dest_dir.as_str(), self.final_dir.as_str()]
+            .into_iter()
+            .filter(|dir| !dir.is_empty())
+    }
+
+    // HistoryFinalDelete can erase a failed unpack even if the job was
+    // later marked successful. NZBGet has no keep-data flag.
+    fn can_keep_files(&self, history: bool) -> bool {
+        self.state(history).is_complete()
+            && self.delete_status == "NONE"
+            && !matches!(self.par_status.as_str(), "" | "FAILURE")
+            && !matches!(self.unpack_status.as_str(), "" | "FAILURE" | "PASSWORD")
     }
 
     fn item(&self, history: bool, local_path: &str) -> DownloadItem {
@@ -200,23 +215,34 @@ impl NzbgetClient {
             .ok_or_else(|| format!("NZBGet {method} returned no result"))
     }
 
-    async fn jobs(&self) -> Result<Vec<(Job, bool)>, String> {
+    async fn native_jobs(&self, include_hidden: bool) -> Result<Vec<(Job, bool)>, String> {
         let mut jobs = Vec::new();
         for (method, params, history) in [
             ("listgroups", json!([0]), false),
-            ("history", json!([false]), true),
+            ("history", json!([include_hidden]), true),
         ] {
-            for job in self.rpc::<Vec<Job>>(method, params).await? {
-                if job.id > 0
+            jobs.extend(
+                self.rpc::<Vec<Job>>(method, params)
+                    .await?
+                    .into_iter()
+                    .map(|job| (job, history)),
+            );
+        }
+        Ok(jobs)
+    }
+
+    async fn jobs(&self) -> Result<Vec<(Job, bool)>, String> {
+        Ok(self
+            .native_jobs(false)
+            .await?
+            .into_iter()
+            .filter(|(job, _)| {
+                job.id > 0
                     && job.category == self.category
                     && self.owns_key(&job.dupe_key)
                     && matches!(job.kind.as_str(), "NZB" | "URL")
-                {
-                    jobs.push((job, history));
-                }
-            }
-        }
-        Ok(jobs)
+            })
+            .collect())
     }
 
     fn owns_key(&self, key: &str) -> bool {
@@ -286,13 +312,7 @@ impl NzbgetClient {
         };
         let command = match (action, history) {
             ("delete", _) => {
-                // HistoryFinalDelete can erase a failed unpack even if the job
-                // was later marked successful. NZBGet has no keep-data flag.
-                let can_keep_files = job.state(history).is_complete()
-                    && job.delete_status == "NONE"
-                    && !matches!(job.par_status.as_str(), "" | "FAILURE")
-                    && !matches!(job.unpack_status.as_str(), "" | "FAILURE" | "PASSWORD");
-                if !delete_files && !can_keep_files {
+                if !delete_files && !job.can_keep_files(history) {
                     return Err("NZBGet cannot remove this job and guarantee that its partial files are kept.".into());
                 }
                 if job.kind == "NZB"
@@ -310,14 +330,50 @@ impl NzbgetClient {
             (_, true) => return Err("Only queued NZBGet jobs can be paused or resumed.".into()),
             _ => action,
         };
+        self.edit_job(command, job.id).await
+    }
+
+    async fn edit_job(&self, command: &str, nzbid: i64) -> Result<(), String> {
         if self
-            .rpc::<bool>("editqueue", json!([command, "", [job.id]]))
+            .rpc::<bool>("editqueue", json!([command, "", [nzbid]]))
             .await?
         {
             Ok(())
         } else {
             Err(format!("NZBGet could not apply {command}."))
         }
+    }
+
+    fn verified_cleanup_dirs<'a>(
+        &self,
+        job: &'a Job,
+        content_path: &str,
+    ) -> Result<Vec<&'a Path>, String> {
+        if job.id <= 0
+            || job.category != self.category
+            || !job.can_keep_files(true)
+            // GOOD and MARK can be assigned manually after a failed download.
+            || !matches!(
+                job.status.as_str(),
+                "SUCCESS/ALL" | "SUCCESS/UNPACK" | "SUCCESS/PAR" | "SUCCESS/HEALTH"
+            )
+            || !matches!(job.par_status.as_str(), "NONE" | "SUCCESS")
+            || !matches!(job.unpack_status.as_str(), "NONE" | "SUCCESS")
+        {
+            return Err("NZBGet did not verify a unique successful history item.".into());
+        }
+
+        let directories = job
+            .reported_dirs()
+            .map(|path| job.job_dir(path))
+            .collect::<Option<Vec<_>>>()
+            .ok_or("NZBGet did not report separate job directories.")?;
+        if !valid_directory_path(Path::new(content_path))
+            || job.item(true, &self.local_path).content_path != content_path
+        {
+            return Err("The completed NZBGet job directory changed.".into());
+        }
+        Ok(directories)
     }
 }
 
@@ -382,6 +438,69 @@ impl DownloadClient for NzbgetClient {
     }
     async fn delete(&self, key: &str, delete_files: bool) -> Result<(), String> {
         self.edit(key, "delete", delete_files).await
+    }
+
+    async fn verify_completed_cleanup(&self, key: &str, content_path: &str) -> Result<i64, String> {
+        if !self.owns_key(key) {
+            return Err("This job does not belong to this Ryokan client.".into());
+        }
+        let jobs = self.native_jobs(true).await?;
+        let mut matching = jobs.iter().filter(|(job, _)| job.dupe_key == key);
+        let Some((job, true)) = matching.next() else {
+            return Err("The completed NZBGet job is unavailable.".into());
+        };
+        if matching.next().is_some() {
+            return Err("NZBGet did not verify a unique successful history item.".into());
+        }
+        let directories = self.verified_cleanup_dirs(job, content_path)?;
+
+        // An unrelated app can use the same NZBGet instance. Inspect raw
+        // paths across all categories before applying Ryokan's path mapping.
+        for (other, history) in jobs.iter().filter(|(other, _)| other.dupe_key != key) {
+            let mut paths = other.reported_dirs().peekable();
+            if other.id == job.id
+                || (!history
+                    && paths.peek().is_none()
+                    && (other.name.is_empty() || other.name.eq_ignore_ascii_case(&job.name)))
+            {
+                return Err("Another NZBGet job may share the completed job directory.".into());
+            }
+            for path in paths.map(Path::new) {
+                if !valid_directory_path(path)
+                    || directories
+                        .iter()
+                        .any(|own| path.starts_with(own) || own.starts_with(path))
+                {
+                    return Err("Another NZBGet job may share the completed job directory.".into());
+                }
+            }
+        }
+        Ok(job.id)
+    }
+
+    async fn finish_completed_cleanup(
+        &self,
+        key: &str,
+        content_path: &str,
+        nzbid: i64,
+    ) -> Result<(), String> {
+        if !self.owns_key(key) {
+            return Err("This job does not belong to this Ryokan client.".into());
+        }
+        let history = self.rpc::<Vec<Job>>("history", json!([false])).await?;
+        let mut matching = history.iter().filter(|job| job.dupe_key == key);
+        let Some(job) = matching.next().filter(|job| job.id == nzbid) else {
+            return Err("The completed NZBGet job ID changed.".into());
+        };
+        if matching.next().is_some()
+            || history
+                .iter()
+                .any(|other| other.id == nzbid && other.dupe_key != key)
+        {
+            return Err("NZBGet did not verify a unique successful history item.".into());
+        }
+        self.verified_cleanup_dirs(job, content_path)?;
+        self.edit_job("HistoryFinalDelete", nzbid).await
     }
 }
 #[cfg(test)]
