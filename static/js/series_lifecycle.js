@@ -65,6 +65,7 @@ function removeSeries(dbId) {
     // stakes (path, file count, size) that the generic confirm primitive
     // can't represent. See the #remove-series-modal block above.
     const modal = document.getElementById('remove-series-modal');
+    if (!modal || modal.style.display === 'flex') return;
     const cancelBtn = document.getElementById('remove-series-cancel');
     const closeBtn = document.getElementById('remove-series-close');
     const confirmBtn = document.getElementById('remove-series-confirm');
@@ -167,3 +168,12 @@ function performRemoveSeries(dbId) {
         btn.textContent = originalText;
     });
 }
+
+// A boosted franchise link can finish swapping the page before this script
+// loads. Open the confirmation here, once its handlers are available.
+(() => {
+    const dbId = document.getElementById('series-data')?.dataset.dbId;
+    if (dbId && new URLSearchParams(location.search).get('remove') === '1') {
+        removeSeries(Number(dbId));
+    }
+})();

@@ -505,3 +505,127 @@ async fn saved_future_follows_filter_survives_a_library_reload() {
     );
     client.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn cold_boosted_franchise_remove_opens_dialog_after_release_script_loads() {
+    use axum::extract::Request;
+    use axum::middleware::{self, Next};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tokio::sync::Notify;
+
+    let client = match try_connect_browser().await {
+        Ok(c) => c,
+        Err(msg) => {
+            eprintln!("[skip] {msg}");
+            return;
+        }
+    };
+    let db = in_memory_pool().await;
+    let (series_id, franchise) =
+        ryokan::test_support::seed_browser_franchise_release(&db, 12345, "Removal fixture").await;
+    let session = seed_user_session(&db).await;
+    let release_script = Arc::new(Notify::new());
+    let remove_requests = Arc::new(AtomicUsize::new(0));
+    let app = ryokan::test_support::e2e_browser_app(build_test_app_state(db.clone(), None)).layer(
+        middleware::from_fn({
+            let release_script = Arc::clone(&release_script);
+            let remove_requests = Arc::clone(&remove_requests);
+            move |request: Request, next: Next| {
+                let release_script = Arc::clone(&release_script);
+                let remove_requests = Arc::clone(&remove_requests);
+                async move {
+                    if request.uri().path() == "/static/js/series_lifecycle.js" {
+                        release_script.notified().await;
+                    }
+                    if request.method() == axum::http::Method::POST
+                        && request.uri().path() == "/api/library/remove"
+                    {
+                        remove_requests.fetch_add(1, Ordering::Relaxed);
+                    }
+                    next.run(request).await
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    open_with_session(&client, addr, &session, &format!("/franchises/{franchise}"))
+        .await
+        .expect("open franchise");
+    client
+        .execute("window.__coldRemoveShortcut = true;", vec![])
+        .await
+        .unwrap();
+    client
+        .find(Locator::Css(".release-manage summary"))
+        .await
+        .unwrap()
+        .click()
+        .await
+        .unwrap();
+    client
+        .find(Locator::Css("a[href$='?remove=1']"))
+        .await
+        .unwrap()
+        .click()
+        .await
+        .unwrap();
+
+    let wait = Duration::from_secs(5);
+    wait_for_js_truthy(
+        &client,
+        "window.__coldRemoveShortcut &&
+         document.querySelector('[data-title-tab=episodes]')?.href.includes('remove=1') &&
+         typeof window.removeSeries === 'undefined'",
+        wait,
+    )
+    .await
+    .expect("boosted release mounted while its script is delayed");
+    // Let the old shared-navigation auto-click run before the script can load.
+    client
+        .execute(
+            "requestAnimationFrame(() => requestAnimationFrame(() => { window.__coldRemoveFrames = true; }));",
+            vec![],
+        )
+        .await
+        .unwrap();
+    wait_for_js_truthy(&client, "window.__coldRemoveFrames === true", wait)
+        .await
+        .unwrap();
+    release_script.notify_one();
+
+    wait_for_js_truthy(
+        &client,
+        "document.querySelector('#remove-series-modal')?.style.display === 'flex'",
+        wait,
+    )
+    .await
+    .expect("the release script opens the confirmation dialog");
+    client
+        .find(Locator::Id("remove-series-cancel"))
+        .await
+        .unwrap()
+        .click()
+        .await
+        .unwrap();
+    wait_for_js_truthy(
+        &client,
+        "document.querySelector('#remove-series-modal')?.style.display === 'none'",
+        wait,
+    )
+    .await
+    .expect("Cancel closes the confirmation dialog");
+    assert_eq!(remove_requests.load(Ordering::Relaxed), 0);
+    assert!(
+        ryokan::models::series::get_by_id(&db, series_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    client.close().await.unwrap();
+}
