@@ -149,7 +149,6 @@
             document.addEventListener('change', change); document.addEventListener('htmx:after:settle', enhance); enhance();
             const previous = read('ryokan.libraryScroll', {})[location.pathname + location.search];
             if (Number.isFinite(previous)) requestAnimationFrame(() => requestAnimationFrame(() => scrollTo(0, previous)));
-            if (params.get('remove') === '1') requestAnimationFrame(() => document.querySelector('[onclick*="removeSeries"], #remove-series-btn')?.click());
             cleanup = () => {
                 mountedRoot = null;
                 controller?.abort(); if (timer !== null) clearInterval(timer);
