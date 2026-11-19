@@ -15,6 +15,8 @@ use crate::services::{logger, media, naming, nfo};
 mod artwork_copy;
 pub mod client_cleanup;
 pub mod extras;
+mod nzbget_cleanup;
+mod nzbget_cleanup_files;
 mod single_source;
 mod state;
 pub(crate) mod subtitle_guard;
@@ -1290,9 +1292,9 @@ async fn load_series_import_ctx(
 /// - `Protected` — existing episodes were kept. Normal cleanup applies when
 ///   all files were handled; missing slots in a skipped video or other failures
 ///   require review and retain the download.
-pub(crate) enum ImportOutcome {
+enum ImportOutcome {
     NotReady,
-    Imported,
+    Imported(Option<nzbget_cleanup::Receipt>),
     PartiallyImported {
         failed_episodes: Vec<i32>,
     },
@@ -1923,6 +1925,11 @@ async fn import_torrent(
     // move mode has no surviving source). Captured in
     // local-translated form (Ryokan's view of the path).
     let mut imported_source_paths: Vec<String> = Vec::new();
+    let nzbget_verified_import = nzbget_cleanup::is_nzbget(client.as_ref())
+        && migration_replay.is_none()
+        && edition_review.is_none()
+        && matches!(cfg.post_processing_mode.as_str(), "copy" | "hardlink");
+    let mut nzbget_copies = Vec::new();
     // Episode numbers (post-offset, the same value the rest of the
     // codebase uses) that reached `do_file_op` but failed. Drives the
     // PartiallyImported / AllFailed branches below so partial failures
@@ -2965,7 +2972,9 @@ async fn import_torrent(
                         let target = state
                             .resolve_grab_client(old_grab.download_client_id, &old_grab.hash)
                             .await;
-                        if let Some(target) = target {
+                        if let Some(target) = target
+                            && !nzbget_cleanup::is_nzbget(target.as_ref())
+                        {
                             let _ = target.delete(&old_grab.hash, true).await;
                         }
                     }
@@ -3117,6 +3126,29 @@ async fn import_torrent(
                 // file reaching this point is a legitimate import,
                 // and its source path is safe to stamp.
                 imported_source_paths.push(src.display().to_string());
+                if nzbget_verified_import && import_cfg.media_requirements_enabled {
+                    let verified_mapping = if let Some(mapping) = release_mapping.as_ref() {
+                        (mapping.provider_heading().is_some()
+                            || single_source::canonical_season(&ctx.series, filename_only)
+                                .is_some())
+                        .then(|| mapping.resolve_named_file(filename_only).ok())
+                        .flatten()
+                    } else if exact_single && !grab.is_batch {
+                        single_source::mapping(grab, &ctx.series, filename_only)
+                            .await
+                            .and_then(|mapping| mapping.resolve_named_file(filename_only).ok())
+                    } else {
+                        None
+                    };
+                    if verified_mapping.is_some_and(|mapped| {
+                        mapped.entry == ctx.series.anilist_id
+                            && (mapped.first, mapped.last) == (ep_num, ep_last)
+                    }) && let Some(copy) =
+                        nzbget_cleanup::ImportedCopy::observe(&src, &dest_video).await
+                    {
+                        nzbget_copies.push(copy);
+                    }
+                }
                 touched_series.insert(target_series_id);
                 logger::info(
                     &state.db,
@@ -3462,7 +3494,7 @@ async fn import_torrent(
                     failed_episodes: Vec::new(),
                 });
             }
-            return Ok(ImportOutcome::Imported);
+            return Ok(ImportOutcome::Imported(None));
         }
         if specials_refused > 0 {
             // Nothing landed: the folder already holds a different
@@ -3638,6 +3670,23 @@ async fn import_torrent(
             failed_episodes,
         })
     } else if failed_episodes.is_empty() && specials_refused == 0 {
+        // Keep the entire source when any video was skipped or unverified.
+        let cleanup_receipt = if !nzbget_copies.is_empty()
+            && nzbget_copies.len() == imported_source_paths.len()
+            && nzbget_copies.len()
+                == files
+                    .iter()
+                    .filter(|file| is_video_file(&file.name))
+                    .count()
+        {
+            Some(nzbget_cleanup::Receipt::new(
+                grab,
+                &source_base,
+                nzbget_copies,
+            ))
+        } else {
+            None
+        };
         // Interactive grabs can arrive without a numbering decision. Save
         // one only for an exact single source that actually landed.
         if exact_single
@@ -3658,7 +3707,7 @@ async fn import_torrent(
         {
             single_source::record(&state.db, grab, &ctx.series, &video_files[0].1.name).await;
         }
-        Ok(ImportOutcome::Imported)
+        Ok(ImportOutcome::Imported(cleanup_receipt))
     } else {
         Ok(ImportOutcome::PartiallyImported { failed_episodes })
     }
@@ -3758,7 +3807,7 @@ pub(crate) async fn resolve_edition(
         Some(&review),
     )
     .await?;
-    if !matches!(outcome, ImportOutcome::Imported) {
+    if !matches!(outcome, ImportOutcome::Imported(_)) {
         return Err("The candidate could not be imported. The review remains open.".into());
     }
     crate::models::edition_review::finish(&state.db, &review, dismiss_others).await?;
@@ -4381,15 +4430,34 @@ pub async fn run_once(state: &AppState) {
                         .await;
                 }
             }
-            Ok(ImportOutcome::Imported) => {
+            Ok(ImportOutcome::Imported(cleanup_receipt)) => {
                 any_imported = true;
-                let _ = grabbed_torrents::mark_imported(&state.db, grab.id).await;
-                let _ = grabbed_torrents::stamp_import_mode(
-                    &state.db,
-                    grab.id,
-                    &cfg.post_processing_mode,
-                )
-                .await;
+                let verified_nzbget = match cleanup_receipt {
+                    Some(receipt) => match nzbget_cleanup::finish_import(
+                        &state.db,
+                        grab,
+                        &cfg.post_processing_mode,
+                        receipt,
+                    )
+                    .await
+                    {
+                        Ok(saved) => saved,
+                        Err(error) => {
+                            tracing::warn!(grab_id = grab.id, %error, "Could not save verified NZBGet import receipt");
+                            false
+                        }
+                    },
+                    None => false,
+                };
+                if !verified_nzbget {
+                    let _ = grabbed_torrents::mark_imported(&state.db, grab.id).await;
+                    let _ = grabbed_torrents::stamp_import_mode(
+                        &state.db,
+                        grab.id,
+                        &cfg.post_processing_mode,
+                    )
+                    .await;
+                }
                 // #27 — log every successful import so there's a trail
                 // from grab → complete in System → Logs. Before this,
                 // the only log a successful grab produced was the grab

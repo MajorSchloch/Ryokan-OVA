@@ -13,7 +13,7 @@
 //!   in the client). A usenet job has nothing to seed and leaves SAB's
 //!   history at once. So does a torrent in move mode: its file has left
 //!   the download folder and cannot seed anyway. Hardlink and copy mode
-//!   torrents keep seeding.
+//!   torrents keep seeding. NZBGet uses its separate verified-copy receipt.
 //! - [`sweep_finished_seeds`] runs after every post-processing tick,
 //!   throttled to [`FINISHED_SEED_SWEEP_INTERVAL`] and serialized on
 //!   `SEED_SWEEP_LOCK`, over grabs post-processing really imported
@@ -29,8 +29,9 @@
 //!   is also removed once its stamped source files are gone while their
 //!   folders still exist (errored or not; the files are gone either
 //!   way), which is how the torrents #228 was reported against leave
-//!   the client after an upgrade. Usenet rows present and complete are
-//!   removed on sight. Partial imports are never in the work list.
+//!   the client after an upgrade. NZBGet requires a receipt from a new,
+//!   verified import and a current identical library copy. Partial imports
+//!   are never in the work list.
 //!
 //! Removal always deletes the client's copy of the files: the library
 //! holds its own (a hardlink shares the inode and survives; copy mode
@@ -59,6 +60,8 @@ use crate::models::log::LogCategory;
 use crate::models::{config, grabbed_torrents};
 use crate::services::download_client::{DownloadClient, DownloadItem};
 use crate::services::logger;
+
+use super::nzbget_cleanup;
 
 /// How often the finished-seed sweep asks each client for its list.
 pub const FINISHED_SEED_SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -122,6 +125,15 @@ pub(super) async fn remove_after_import(
     client: &Arc<dyn DownloadClient>,
 ) {
     if !client_allows_removal(&state.db, client_id).await {
+        return;
+    }
+    if nzbget_cleanup::is_nzbget(client.as_ref()) {
+        if matches!(
+            nzbget_cleanup::is_registered(&state.db, grab).await,
+            Ok(true)
+        ) {
+            clean_verified_nzbget(state, grab, client_id, client).await;
+        }
         return;
     }
     let reason = if client.protocol() == "usenet" {
@@ -207,6 +219,19 @@ pub async fn sweep_finished_seeds_now(state: &AppState) -> Result<SweepReport, S
         }
         if !switches[&client_id] {
             report.disabled += 1;
+            continue;
+        }
+        if nzbget_cleanup::is_nzbget(client.as_ref()) {
+            if nzbget_cleanup::is_registered(&state.db, grab)
+                .await
+                .map_err(|error| error.to_string())?
+                && let Ok(_import_guard) = super::POST_PROC_LOCK.try_lock()
+                && clean_verified_nzbget(state, grab, client_id, &client).await
+            {
+                report.removed += 1;
+            } else {
+                report.waiting += 1;
+            }
             continue;
         }
         let key = Arc::as_ptr(&client) as *const () as usize;
@@ -299,6 +324,32 @@ pub async fn sweep_finished_seeds_now(state: &AppState) -> Result<SweepReport, S
         "finished-seed sweep"
     );
     Ok(report)
+}
+
+async fn clean_verified_nzbget(
+    state: &AppState,
+    grab: &grabbed_torrents::GrabbedTorrent,
+    client_id: i64,
+    client: &Arc<dyn DownloadClient>,
+) -> bool {
+    match nzbget_cleanup::remove(state, grab, client_id, client).await {
+        Ok(removed) => {
+            logger::info(
+                &state.db,
+                LogCategory::PostProcess,
+                &format!("Cleaned verified NZBGet download '{}'", grab.torrent_name),
+                &format!(
+                    "Removed {removed} original video files after verifying the library copies"
+                ),
+            )
+            .await;
+            true
+        }
+        Err(reason) => {
+            tracing::debug!(grab_id = grab.id, %reason, "NZBGet cleanup deferred");
+            false
+        }
+    }
 }
 
 /// The client row's "Remove completed downloads" switch. A client the
