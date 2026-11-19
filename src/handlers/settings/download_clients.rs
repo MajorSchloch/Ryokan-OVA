@@ -483,6 +483,9 @@ pub async fn settings_download_clients_upsert(
         );
     }
 
+    // Keep the stored route and its live client together during cleanup.
+    let guard = super::CONFIG_WRITE_LOCK.lock().await;
+
     // The password field is write-only (`handlers::secret_field`). A
     // failed lookup is an error, not "no saved row": read as none, a
     // blank field resolved to an empty password and the save wiped it.
@@ -586,6 +589,7 @@ pub async fn settings_download_clients_upsert(
             // on its next render rather than showing a stale "ok" pill
             // against the old credentials for up to DC_STATUS_CACHE_TTL.
             state.dc_status_cache.lock().unwrap().clear();
+            drop(guard);
             if is_htmx {
                 // Re-render the whole section in one swap — picks up
                 // the new card, the moved "default" badge if the user
@@ -629,6 +633,7 @@ pub async fn settings_download_clients_delete(
     HxRequest(is_htmx): HxRequest,
     Form(form): Form<DownloadClientIdForm>,
 ) -> Response {
+    let guard = super::CONFIG_WRITE_LOCK.lock().await;
     let display_name = crate::models::download_clients::get_by_id(&state.db, form.id)
         .await
         .ok()
@@ -653,6 +658,7 @@ pub async fn settings_download_clients_delete(
             // on its next render rather than showing a stale "ok" pill
             // against the old credentials for up to DC_STATUS_CACHE_TTL.
             state.dc_status_cache.lock().unwrap().clear();
+            drop(guard);
             crate::services::indexers::refresh_cache_in_place(&state.indexers, &state.db).await;
             // HTMX redesign (#129 follow-up) — re-render the whole
             // section so the "+ Add" button + empty-state CTA both

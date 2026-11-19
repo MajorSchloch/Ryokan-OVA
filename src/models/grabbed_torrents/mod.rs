@@ -308,7 +308,7 @@ async fn record_grab_in_connection(
             "UPDATE grabbed_torrents SET state='pending', imported_at=NULL,
             client_content_path='', completed_seen_at=NULL, client_removed_at=NULL,
             grabbed_at=CURRENT_TIMESTAMP, replacement_episode=?,
-            import_mode=NULL, failure_reason='' WHERE id=?",
+            import_mode=NULL, nzbget_cleanup_receipt=NULL, failure_reason='' WHERE id=?",
         )
         .bind(replacement_episode)
         .bind(id)
@@ -478,7 +478,8 @@ async fn record_grab_in_connection(
              replacement_episode = ?,
              imported_episode_coverage = NULL,
              import_mode = NULL,
-             imported_source_paths = NULL
+             imported_source_paths = NULL,
+             nzbget_cleanup_receipt = NULL
          WHERE hash = ? AND state = 'imported'
          RETURNING id",
     )

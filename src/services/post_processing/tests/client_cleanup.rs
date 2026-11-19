@@ -19,6 +19,7 @@ use crate::services::post_processing::client_cleanup::SweepReport;
 use crate::test_support::{build_test_app_state, in_memory_pool, seed_series};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::POST_PROC_TEST_SERIALIZER;
@@ -28,6 +29,9 @@ struct CleanupClient {
     items: Vec<DownloadItem>,
     files: Vec<DownloadFile>,
     protocol: &'static str,
+    implementation: &'static str,
+    source_before_delete: Option<PathBuf>,
+    native_cleanup_verified: AtomicBool,
     list_fails: bool,
     deletes: Mutex<Vec<(String, bool)>>,
 }
@@ -38,6 +42,9 @@ impl CleanupClient {
             items,
             files,
             protocol: "torrent",
+            implementation: "QBittorrent",
+            source_before_delete: None,
+            native_cleanup_verified: AtomicBool::new(false),
             list_fails: false,
             deletes: Mutex::new(Vec::new()),
         }
@@ -47,6 +54,14 @@ impl CleanupClient {
         Self {
             protocol: "usenet",
             ..Self::torrent(items, files)
+        }
+    }
+
+    fn nzbget(item: DownloadItem, source: &Path) -> Self {
+        Self {
+            implementation: "Nzbget",
+            source_before_delete: Some(source.to_owned()),
+            ..Self::usenet(vec![item], Vec::new())
         }
     }
 
@@ -95,11 +110,43 @@ impl DownloadClient for CleanupClient {
         Ok(())
     }
     async fn delete(&self, hash: &str, delete_files: bool) -> Result<(), String> {
+        if let Some(source) = &self.source_before_delete {
+            assert!(!delete_files, "NZBGet cleanup must only delete history");
+            assert!(
+                !source.exists(),
+                "the proven source must be unlinked before history cleanup"
+            );
+        }
         self.deletes
             .lock()
             .unwrap()
             .push((hash.to_string(), delete_files));
         Ok(())
+    }
+    async fn verify_completed_cleanup(
+        &self,
+        hash: &str,
+        content_path: &str,
+    ) -> Result<i64, String> {
+        if self.native_cleanup_verified.load(Ordering::Relaxed)
+            && matches!(self.items.as_slice(), [item] if item.hash == hash
+                && item.content_path == content_path && item.state_kind.is_complete())
+        {
+            Ok(41)
+        } else {
+            Err("native cleanup verification refused".into())
+        }
+    }
+    async fn finish_completed_cleanup(
+        &self,
+        hash: &str,
+        content_path: &str,
+        nzbid: i64,
+    ) -> Result<(), String> {
+        if self.verify_completed_cleanup(hash, content_path).await? != nzbid {
+            return Err("native cleanup job ID changed".into());
+        }
+        self.delete(hash, false).await
     }
     async fn set_file_wanted(
         &self,
@@ -110,7 +157,7 @@ impl DownloadClient for CleanupClient {
         Ok(())
     }
     fn sonarr_impl_name(&self) -> &'static str {
-        "QBittorrent"
+        self.implementation
     }
     fn protocol(&self) -> &'static str {
         self.protocol
@@ -155,6 +202,16 @@ fn temp_dirs(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
 /// (id 1, matching the mock the pool holds at id 1) whose "Remove
 /// completed downloads" switch is `remove`.
 async fn seed_config(db: &sqlx::SqlitePool, media_root: &Path, mode: &str, remove: bool) {
+    seed_config_for_client(db, media_root, mode, remove, "qbittorrent").await;
+}
+
+async fn seed_config_for_client(
+    db: &sqlx::SqlitePool,
+    media_root: &Path,
+    mode: &str,
+    remove: bool,
+    kind: &str,
+) {
     sqlx::query(
         "INSERT INTO config (id, post_processing_enabled, media_root, post_processing_mode) \
          VALUES (1, 1, ?, ?) \
@@ -170,7 +227,7 @@ async fn seed_config(db: &sqlx::SqlitePool, media_root: &Path, mode: &str, remov
         db,
         DownloadClientForm {
             name: "mock",
-            kind: "qbittorrent",
+            kind,
             url: "http://mock",
             username: "",
             password: "",
@@ -762,6 +819,273 @@ async fn sweep_removes_legacy_usenet_jobs_and_their_sources() {
     assert!(!downloads.exists(), "the job folder is pruned");
     assert!(client_removed_at(&db, id).await.is_some());
     let _ = std::fs::remove_dir_all(&root);
+}
+
+const NZBGET_RELEASE: &str = "[Group] Example Anime - 01 (1080p)";
+const NZBGET_VIDEO: &[u8] = b"verified NZBGet video bytes";
+
+struct NzbgetCleanupFixture {
+    _root: tempfile::TempDir,
+    state: crate::AppState,
+    client: Arc<CleanupClient>,
+    grab_id: i64,
+    series_id: i64,
+    source: PathBuf,
+    library_file: PathBuf,
+}
+
+async fn pin_nzbget_client(state: &crate::AppState, client: Arc<CleanupClient>) {
+    *state.download_clients.write().await = Arc::new(crate::DownloadClientPool {
+        clients: [(1, client as Arc<dyn DownloadClient>)].into(),
+        default_torrent_id: None,
+        default_usenet_id: Some(1),
+    });
+}
+
+async fn nzbget_cleanup_fixture() -> NzbgetCleanupFixture {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let job = base.join("downloads").join(NZBGET_RELEASE);
+    let media = base.join("media");
+    std::fs::create_dir_all(&job).unwrap();
+    std::fs::create_dir(&media).unwrap();
+    let source = job.join(format!("{NZBGET_RELEASE}.mkv"));
+    let library_file = media.join("Example Anime/Season 01/Example Anime - S01E01.mkv");
+    std::fs::write(&source, NZBGET_VIDEO).unwrap();
+
+    let db = in_memory_pool().await;
+    seed_config_for_client(&db, &media, "hardlink", true, "nzbget").await;
+    sqlx::query(
+        "UPDATE config SET media_requirements_enabled=1, minimum_resolution='720', \
+         target_resolution='1080', required_audio_languages='ja', required_subtitle_languages='en', \
+         minimum_subtitle_check=1, auto_redownload_failed=0, episode_file_format=? WHERE id=1",
+    )
+    .bind("{series.title} - S{season.number:00}E{episode.number:00}{ext}")
+    .execute(&db)
+    .await
+    .unwrap();
+    let series_id = seed_series(&db, 981_001, "Example Anime").await;
+    sqlx::query("UPDATE series SET episodes=12, format='TV', status='FINISHED' WHERE id=?")
+        .bind(series_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    let hash = format!("nzbget-1-{}", "a".repeat(96));
+    let grab_id = grabbed_torrents::record_grab(&db, &hash, NZBGET_RELEASE, series_id, &[1], false)
+        .await
+        .unwrap()
+        .unwrap();
+    grabbed_torrents::set_download_client(&db, grab_id, Some(1))
+        .await
+        .unwrap();
+    grabbed_torrents::stamp_verification(&db, grab_id, "verified", "{}")
+        .await
+        .unwrap();
+    let identity = crate::services::media_info::FileIdentity::from_metadata(
+        &std::fs::metadata(&source).unwrap(),
+    )
+    .unwrap();
+    let probe = serde_json::json!({"streams":[
+        {"index":0,"codec_type":"video","codec_name":"h264","width":1920,"height":1080},
+        {"index":1,"codec_type":"audio","codec_name":"aac","tags":{"language":"jpn"}},
+        {"index":2,"codec_type":"subtitle","codec_name":"ass","tags":{"language":"eng"}}
+    ],"format":{"duration":"1440"}})
+    .to_string();
+    // A hardlink has the same probe identity at both paths. Seed both so
+    // import verification and post-download classification need no ffprobe.
+    for path in [&source, &library_file] {
+        crate::models::media_probe_cache::upsert_identified(
+            &db,
+            path.to_str().unwrap(),
+            &identity.cache_key(),
+            identity.size as i64,
+            &probe,
+        )
+        .await;
+    }
+    let mut job_item = item(
+        &hash,
+        Path::new(""),
+        DownloadItemState::PausedComplete,
+        false,
+    );
+    job_item.name = NZBGET_RELEASE.into();
+    job_item.state = "SUCCESS/UNPACK".into();
+    job_item.content_path = job.to_str().unwrap().into();
+    let client = Arc::new(CleanupClient::nzbget(job_item, &source));
+    let state = build_test_app_state(db, None);
+    pin_nzbget_client(&state, client.clone()).await;
+    NzbgetCleanupFixture {
+        _root: root,
+        state,
+        client,
+        grab_id,
+        series_id,
+        source,
+        library_file,
+    }
+}
+
+impl NzbgetCleanupFixture {
+    async fn receipt(&self) -> Option<String> {
+        sqlx::query_scalar("SELECT nzbget_cleanup_receipt FROM grabbed_torrents WHERE id=?")
+            .bind(self.grab_id)
+            .fetch_one(&self.state.db)
+            .await
+            .unwrap()
+    }
+
+    async fn assert_retained(&self) {
+        let report = post_processing::sweep_finished_seeds_now(&self.state)
+            .await
+            .unwrap();
+        assert_eq!(report.removed, 0, "{report:?}");
+        assert!(self.client.deletes().is_empty());
+        assert!(
+            client_removed_at(&self.state.db, self.grab_id)
+                .await
+                .is_none()
+        );
+        assert_eq!(std::fs::read(&self.source).unwrap(), NZBGET_VIDEO);
+    }
+
+    fn verify_native_cleanup(&self) {
+        self.client
+            .native_cleanup_verified
+            .store(true, Ordering::Relaxed);
+    }
+}
+
+#[tokio::test]
+async fn nzbget_sweep_unlinks_verified_import_source_then_removes_only_history() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    let fixture = nzbget_cleanup_fixture().await;
+    let unrelated = fixture
+        .source
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("other.mkv");
+    std::fs::write(&unrelated, b"another download").unwrap();
+
+    post_processing::run_once(&fixture.state).await;
+
+    assert!(
+        fixture.receipt().await.is_some(),
+        "save proof before cleanup"
+    );
+    let (state, coverage): (String, String) =
+        sqlx::query_as("SELECT state, imported_episode_coverage FROM grabbed_torrents WHERE id=?")
+            .bind(fixture.grab_id)
+            .fetch_one(&fixture.state.db)
+            .await
+            .unwrap();
+    assert_eq!(state, "imported");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&coverage).unwrap(),
+        serde_json::json!({(fixture.series_id.to_string()): [1]})
+    );
+    assert!(post_processing::files_share_inode(
+        &fixture.source,
+        &fixture.library_file
+    ));
+    assert!(fixture.client.deletes().is_empty());
+
+    fixture.assert_retained().await;
+    fixture.verify_native_cleanup();
+    let report = post_processing::sweep_finished_seeds_now(&fixture.state)
+        .await
+        .unwrap();
+    assert_eq!(report.removed, 1, "{report:?}");
+    assert_eq!(
+        fixture.client.deletes(),
+        vec![(fixture.client.items[0].hash.clone(), false)]
+    );
+    assert!(!fixture.source.exists());
+    assert_eq!(std::fs::read(&fixture.library_file).unwrap(), NZBGET_VIDEO);
+    assert_eq!(std::fs::read(unrelated).unwrap(), b"another download");
+    assert!(
+        client_removed_at(&fixture.state.db, fixture.grab_id)
+            .await
+            .is_some()
+    );
+    assert_eq!(
+        post_processing::sweep_finished_seeds_now(&fixture.state)
+            .await
+            .unwrap(),
+        SweepReport::default()
+    );
+}
+
+#[tokio::test]
+async fn nzbget_import_can_clean_up_immediately_after_committing() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    let fixture = nzbget_cleanup_fixture().await;
+    fixture.verify_native_cleanup();
+
+    post_processing::run_once(&fixture.state).await;
+
+    assert!(fixture.receipt().await.is_some());
+    assert_eq!(
+        fixture.client.deletes(),
+        vec![(fixture.client.items[0].hash.clone(), false)]
+    );
+    assert!(
+        client_removed_at(&fixture.state.db, fixture.grab_id)
+            .await
+            .is_some()
+    );
+    assert_eq!(std::fs::read(&fixture.library_file).unwrap(), NZBGET_VIDEO);
+}
+
+#[tokio::test]
+async fn nzbget_sweep_keeps_a_legacy_import_without_cleanup_proof() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    let fixture = nzbget_cleanup_fixture().await;
+    post_processing::run_once(&fixture.state).await;
+    assert!(fixture.receipt().await.is_some());
+    sqlx::query("UPDATE grabbed_torrents SET nzbget_cleanup_receipt=NULL WHERE id=?")
+        .bind(fixture.grab_id)
+        .execute(&fixture.state.db)
+        .await
+        .unwrap();
+
+    fixture.verify_native_cleanup();
+    fixture.assert_retained().await;
+}
+
+#[tokio::test]
+async fn nzbget_sweep_keeps_a_source_if_native_history_no_longer_reports_success() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    let mut fixture = nzbget_cleanup_fixture().await;
+    post_processing::run_once(&fixture.state).await;
+    assert!(fixture.receipt().await.is_some());
+    let mut failed = fixture.client.items[0].clone();
+    failed.state = "FAILURE/UNPACK".into();
+    failed.state_kind = DownloadItemState::Errored;
+    fixture.client = Arc::new(CleanupClient::nzbget(failed, &fixture.source));
+    pin_nzbget_client(&fixture.state, fixture.client.clone()).await;
+
+    fixture.verify_native_cleanup();
+    fixture.assert_retained().await;
+}
+
+#[tokio::test]
+async fn nzbget_cleanup_keeps_a_job_with_an_unmapped_video() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    let fixture = nzbget_cleanup_fixture().await;
+    let extra = fixture
+        .source
+        .with_file_name("[Group] Other Anime - 02 (1080p).mkv");
+    std::fs::write(&extra, b"unmapped bytes").unwrap();
+    fixture.verify_native_cleanup();
+
+    post_processing::run_once(&fixture.state).await;
+
+    assert!(fixture.receipt().await.is_none());
+    fixture.assert_retained().await;
+    assert_eq!(std::fs::read(extra).unwrap(), b"unmapped bytes");
 }
 
 #[tokio::test]

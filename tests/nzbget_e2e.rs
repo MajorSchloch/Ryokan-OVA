@@ -44,6 +44,9 @@ impl Daemon {
         job["Status"] = json!(status);
         job["NZBName"] = json!(TITLE);
         job["DestDir"] = json!(format!("/remote/ryokan/{TITLE}"));
+        job["DeleteStatus"] = json!("NONE");
+        job["ParStatus"] = json!("NONE");
+        job["UnpackStatus"] = json!("SUCCESS");
         self.history.push(job);
     }
 
@@ -60,7 +63,7 @@ impl Daemon {
                 json!(self.queue)
             }
             "history" => {
-                assert_eq!(p, &json!([false]));
+                assert!(p == &json!([false]) || p == &json!([true]));
                 json!(self.history)
             }
             "append" => {
@@ -179,8 +182,8 @@ async fn fixture(remove: bool) -> Fixture {
         .await;
     let daemon = Arc::new(Mutex::new(Daemon::default()));
     let foreign = vec![
-        json!({"NZBID":81,"Kind":"NZB","Status":"DOWNLOADING","DupeKey":"sonarr-key","Category":"ryokan"}),
-        json!({"NZBID":82,"Kind":"NZB","Status":"DOWNLOADING","DupeKey":OTHER,"Category":"radarr"}),
+        json!({"NZBID":81,"Kind":"NZB","Status":"DOWNLOADING","DupeKey":"sonarr-key","Category":"ryokan","DestDir":"/remote/ryokan/Sonarr"}),
+        json!({"NZBID":82,"Kind":"NZB","Status":"DOWNLOADING","DupeKey":OTHER,"Category":"radarr","DestDir":"/remote/radarr/Elsewhere"}),
     ];
     daemon.lock().unwrap().queue = foreign.clone();
     let rpc = daemon.clone();
@@ -192,8 +195,9 @@ async fn fixture(remove: bool) -> Fixture {
         .await;
 
     let tmp = tempfile::tempdir().unwrap();
-    let mount = tmp.path().join("completed");
-    let media = tmp.path().join("library");
+    let root = tmp.path().canonicalize().unwrap();
+    let mount = root.join("completed");
+    let media = root.join("library");
     let sibling = mount.join("Sonarr");
     fs::create_dir_all(&sibling).unwrap();
     fs::create_dir(&media).unwrap();
@@ -265,7 +269,7 @@ async fn fixture(remove: bool) -> Fixture {
     }
 }
 
-async fn exercise(failed: bool, remove: bool) {
+async fn exercise(failed: bool, remove: bool, verified: bool) {
     let Fixture {
         _server,
         tmp,
@@ -276,8 +280,9 @@ async fn exercise(failed: bool, remove: bool) {
         release_url,
         hash,
     } = fixture(remove).await;
-    let mount = tmp.path().join("completed");
-    let media = tmp.path().join("library");
+    let root = tmp.path().canonicalize().unwrap();
+    let mount = root.join("completed");
+    let media = root.join("library");
     let sibling = mount.join("Sonarr");
     let client = app.client_for_indexer(Some(1)).await.unwrap();
     let listed = client.list_scoped().await.unwrap();
@@ -315,7 +320,37 @@ async fn exercise(failed: bool, remove: bool) {
     assert_eq!(recovered, hash);
     let job = mount.join(TITLE);
     fs::create_dir(&job).unwrap();
-    fs::write(job.join("Space Brothers - 07.mkv"), b"episode seven").unwrap();
+    let source = job.join("Space Brothers - 07.mkv");
+    fs::write(&source, b"episode seven").unwrap();
+    if verified {
+        sqlx::query("UPDATE config SET post_processing_mode='hardlink', media_requirements_enabled=1,
+            minimum_resolution='720', required_audio_languages='ja', required_subtitle_languages='en',
+            season_folder_format='Season {season.number:00}',
+            episode_file_format='{series.title} - S{season.number:00}E{episode.number:00}{ext}'")
+            .execute(&app.db).await.unwrap();
+        let identity =
+            ryokan::services::media_info::FileIdentity::from_metadata(&source.metadata().unwrap())
+                .unwrap();
+        let probe = json!({"streams":[
+            {"index":0,"codec_type":"video","codec_name":"h264","width":1920,"height":1080},
+            {"index":1,"codec_type":"audio","codec_name":"aac","tags":{"language":"jpn"}},
+            {"index":2,"codec_type":"subtitle","codec_name":"ass","tags":{"language":"eng"}}
+        ],"format":{"duration":"1440"}})
+        .to_string();
+        for path in [
+            &source,
+            &media.join("Space Brothers/Season 01/Space Brothers - S01E07.mkv"),
+        ] {
+            ryokan::models::media_probe_cache::upsert_identified(
+                &app.db,
+                path.to_str().unwrap(),
+                &identity.cache_key(),
+                identity.size as i64,
+                &probe,
+            )
+            .await;
+        }
+    }
     {
         let mut d = daemon.lock().unwrap();
         d.finish(
@@ -351,7 +386,7 @@ async fn exercise(failed: bool, remove: bool) {
         assert!(imported[0].path().starts_with(media.join("Space Brothers")));
         assert!(imported[0].file_name().to_str().unwrap().contains("S01E07"));
         assert_eq!(fs::read(imported[0].path()).unwrap(), b"episode seven");
-        assert_eq!(job.join("Space Brothers - 07.mkv").exists(), !remove);
+        assert_eq!(source.exists(), !(remove && verified));
     }
     assert_eq!(
         fs::read(sibling.join("Other - 07.mkv")).unwrap(),
@@ -369,7 +404,7 @@ async fn exercise(failed: bool, remove: bool) {
         json!(["GroupPause", "", [10]]),
         json!(["GroupResume", "", [10]]),
     ];
-    if remove {
+    if remove && (failed || verified) {
         expected.push(json!(["HistoryFinalDelete", "", [11]]));
     }
     assert_eq!(d.edits, expected);
@@ -377,19 +412,23 @@ async fn exercise(failed: bool, remove: bool) {
 
 #[tokio::test]
 async fn newznab_import_retries_after_restart_and_leaves_foreign_jobs_alone() {
-    exercise(false, true).await;
+    exercise(false, true, false).await;
+}
+#[tokio::test]
+async fn verified_nzbget_import_cleans_only_its_own_source_and_history() {
+    exercise(false, true, true).await;
 }
 #[tokio::test]
 async fn retained_completed_job_keeps_its_source() {
-    exercise(false, false).await;
+    exercise(false, false, false).await;
 }
 #[tokio::test]
 async fn failure_honors_remove_failed_on() {
-    exercise(true, true).await;
+    exercise(true, true, false).await;
 }
 #[tokio::test]
 async fn failure_honors_remove_failed_off() {
-    exercise(true, false).await;
+    exercise(true, false, false).await;
 }
 
 #[tokio::test]

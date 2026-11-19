@@ -9,25 +9,17 @@ use crate::services::release_numbering::{
     NumberingContext, ReleaseMapping, source_identity_name, validated_source_file_span,
 };
 
-async fn mapping(grab: &GrabbedTorrent, series: &Series, name: &str) -> Option<ReleaseMapping> {
-    let [episode] = grab.episode_numbers.as_slice() else {
-        return None;
-    };
-    normalize_info_hash(&grab.hash)?;
-    let basename = Path::new(name).file_name()?.to_str()?;
+pub(super) fn canonical_season(series: &Series, basename: &str) -> Option<i32> {
     let heading = source_identity_name(basename, true).ok()?;
-    // Interactive titles and the misgrab verdict can match related titles.
-    // Require the actual file and listing to name this exact library entry.
     let aliases = [
         &series.title_romaji,
         &series.title_english,
         &series.title_native,
         &series.title,
     ];
-    if source_identity_name(&grab.torrent_name, true).ok()? != heading
-        || !aliases.iter().any(|title| {
-            source_identity_name(title, false).is_ok_and(|canonical| canonical == heading)
-        })
+    if !aliases
+        .iter()
+        .any(|title| source_identity_name(title, false).is_ok_and(|canonical| canonical == heading))
     {
         return None;
     }
@@ -42,11 +34,28 @@ async fn mapping(grab: &GrabbedTorrent, series: &Series, name: &str) -> Option<R
     }
     // A canonical season suffix is removed by source_identity_name. The
     // remaining words alone cannot certify an unqualified later season.
-    if season > 1
-        && [basename, &grab.torrent_name].iter().any(|name| {
-            !validated_source_file_span(name)
-                .is_ok_and(|(_, named_season)| named_season == Some(season))
-        })
+    let (_, named_season) = validated_source_file_span(basename).ok()?;
+    if named_season.is_some_and(|named| named != season) || (season > 1 && named_season.is_none()) {
+        return None;
+    }
+    Some(season)
+}
+
+pub(super) async fn mapping(
+    grab: &GrabbedTorrent,
+    series: &Series,
+    name: &str,
+) -> Option<ReleaseMapping> {
+    let [episode] = grab.episode_numbers.as_slice() else {
+        return None;
+    };
+    let basename = Path::new(name).file_name()?.to_str()?;
+    let season = canonical_season(series, basename)?;
+    // Interactive titles and the misgrab verdict can match related titles.
+    // Require the actual file and listing to name this exact library entry.
+    if source_identity_name(&grab.torrent_name, true).ok()?
+        != source_identity_name(basename, true).ok()?
+        || canonical_season(series, &grab.torrent_name)? != season
     {
         return None;
     }
@@ -70,6 +79,9 @@ async fn mapping(grab: &GrabbedTorrent, series: &Series, name: &str) -> Option<R
 }
 
 pub(super) async fn record(db: &SqlitePool, grab: &GrabbedTorrent, series: &Series, name: &str) {
+    if normalize_info_hash(&grab.hash).is_none() {
+        return;
+    }
     let Some(mapping) = mapping(grab, series, name).await else {
         return;
     };
