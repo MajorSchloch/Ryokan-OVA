@@ -510,6 +510,35 @@ async fn record_grab_in_connection(
     Ok(reactivated)
 }
 
+/// Fill a missing decision for this import attempt only. Existing mapping
+/// evidence must survive if any other path supplied it during the import.
+pub(crate) async fn record_imported_single_mapping(
+    db: &SqlitePool,
+    grab: &GrabbedTorrent,
+    mapping: &crate::services::release_numbering::ReleaseMapping,
+) -> Result<(), sqlx::Error> {
+    let json = serde_json::to_string(mapping).map_err(|error| sqlx::Error::Decode(error.into()))?;
+    sqlx::query(
+        "UPDATE grabbed_torrents SET release_mapping = ?1
+         WHERE id = ?2 AND hash = ?3 AND series_id = ?4 AND grabbed_at = ?5
+         AND download_client_id = ?6 AND state = 'pending' AND is_batch = 0
+         AND verification IN ('verified', 'whitelisted')
+         AND release_mapping IS NULL AND library_migration_bridge IS NULL
+         AND imported_source_paths IS NOT NULL AND imported_episode_coverage IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM grabbed_torrent_numbering WHERE grab_id = ?2)
+         AND NOT EXISTS (SELECT 1 FROM grabbed_torrent_series WHERE grab_id = ?2)",
+    )
+    .bind(json)
+    .bind(grab.id)
+    .bind(&grab.hash)
+    .bind(grab.series_id)
+    .bind(&grab.grabbed_at)
+    .bind(grab.download_client_id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 pub async fn get_release_mapping(
     db: &SqlitePool,
     grab_id: i64,

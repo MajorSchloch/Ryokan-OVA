@@ -40,6 +40,117 @@ use super::POST_PROC_TEST_SERIALIZER;
 mod selected_file_coverage;
 
 #[tokio::test]
+async fn interactive_single_import_saves_seed_mapping_only_for_the_exact_title() {
+    use crate::models::{config, download_clients, media_probe_cache};
+    use crate::services::{media_info, seed_policy};
+
+    let _guard = POST_PROC_TEST_SERIALIZER.lock().await;
+    let hash = "1234567890123456789012345678901234567890";
+    let title = "[Group] Example Anime - 01 (1080p)";
+    for (filename, exact_title) in [
+        ("[Group] Example Anime - 01 (1080p).mkv", true),
+        ("[Group] Example Anime: Side Story - 01 (1080p).mkv", false),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let downloads = root.join("downloads");
+        let library = root.join("library");
+        std::fs::create_dir(&downloads).unwrap();
+        let source = downloads.join(filename);
+        std::fs::write(&source, [0; 100]).unwrap();
+        let db = in_memory_pool().await;
+        let cfg = config::Config {
+            accepted_only_seeding: true,
+            post_processing_enabled: true,
+            post_processing_mode: "hardlink".into(),
+            media_root: library.to_string_lossy().into_owned(),
+            media_requirements_enabled: true,
+            required_audio_languages: "ja".into(),
+            required_subtitle_languages: "en".into(),
+            ..config::Config::default()
+        };
+        config::save_config(&db, &cfg).await.unwrap();
+        let client_id = download_clients::insert(
+            &db,
+            download_clients::DownloadClientForm {
+                name: "Test torrent client",
+                kind: "qbittorrent",
+                url: "http://test",
+                username: "",
+                password: "",
+                label: "anime",
+                download_path: "",
+                enabled: true,
+                is_default: true,
+            },
+        )
+        .await
+        .unwrap();
+        let series_id = seed_series(&db, 101, "Example Anime").await;
+        let grab = grabbed_torrents::source_replay::record(
+            &db,
+            hash,
+            title,
+            series_id,
+            &[1],
+            false,
+            None,
+            Some(1),
+            grabbed_torrents::source_replay::SourceRef {
+                client_id: Some(client_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // Match the existing verdict for a title with a known sibling alias.
+        grabbed_torrents::stamp_verification(&db, grab.id, "verified", "{}")
+            .await
+            .unwrap();
+        let facts = serde_json::json!({"streams":[
+            {"index":0,"codec_type":"video","codec_name":"h264","width":1920,"height":1080},
+            {"index":1,"codec_type":"audio","codec_name":"aac","tags":{"language":"jpn"}},
+            {"index":2,"codec_type":"subtitle","codec_name":"ass","tags":{"language":"eng"}}
+        ],"format":{"duration":"1440"}});
+        let identity =
+            media_info::FileIdentity::from_metadata(&source.metadata().unwrap()).unwrap();
+        media_probe_cache::upsert_identified(
+            &db,
+            &source.to_string_lossy(),
+            &identity.cache_key(),
+            identity.size as i64,
+            &facts.to_string(),
+        )
+        .await;
+        let torrent = complete_torrent(hash, &downloads);
+        let client: Arc<dyn DownloadClient> = Arc::new(BatchClient::new(
+            torrent.clone(),
+            vec![complete_file(filename)],
+        ));
+        let state = build_test_app_state(db.clone(), Some(client.clone()));
+        post_processing::run_once(&state).await;
+
+        assert_eq!(grab_state(&db, grab.id).await, "imported");
+        let stored = grabbed_torrents::get_release_mapping(&db, grab.id)
+            .await
+            .unwrap();
+        let verdict =
+            seed_policy::evaluate(&state, &cfg, client_id, &torrent, &client, false).await;
+        if exact_title {
+            assert_eq!(stored.unwrap().episodes(), [1]);
+            assert_eq!(verdict, seed_policy::Decision::Accepted);
+        } else {
+            assert!(
+                stored.is_none(),
+                "a related episode must not gain seed proof"
+            );
+            assert!(matches!(verdict, seed_policy::Decision::Unverified(_)));
+        }
+    }
+}
+
+#[tokio::test]
 async fn verified_migration_replay_uses_file_identities_and_preserves_existing_episodes() {
     use grabbed_torrents::migration_replay::{ReplayFile, ReplayPlan};
     let _guard = POST_PROC_TEST_SERIALIZER.lock().await;

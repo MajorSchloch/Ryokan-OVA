@@ -15,6 +15,7 @@ use crate::services::{logger, media, naming, nfo};
 mod artwork_copy;
 pub mod client_cleanup;
 pub mod extras;
+mod single_source;
 mod state;
 pub(crate) mod subtitle_guard;
 pub mod temp_sweep;
@@ -3637,6 +3638,26 @@ async fn import_torrent(
             failed_episodes,
         })
     } else if failed_episodes.is_empty() && specials_refused == 0 {
+        // Interactive grabs can arrive without a numbering decision. Save
+        // one only for an exact single source that actually landed.
+        if exact_single
+            && !grab.is_batch
+            && release_mapping.is_none()
+            && numbering_snapshot.is_none()
+            && !files_from_walk
+            && client.protocol() == "torrent"
+            && matches!(cfg.post_processing_mode.as_str(), "copy" | "hardlink")
+            && files
+                .iter()
+                .filter(|file| is_video_file(&file.name))
+                .count()
+                == 1
+            && imported_count == 1
+            && coverage.get(&grab.series_id) == Some(&grab.episode_numbers)
+            && let Some(ctx) = series_ctx_cache.get(&grab.series_id)
+        {
+            single_source::record(&state.db, grab, &ctx.series, &video_files[0].1.name).await;
+        }
         Ok(ImportOutcome::Imported)
     } else {
         Ok(ImportOutcome::PartiallyImported { failed_episodes })
