@@ -1,0 +1,81 @@
+use std::path::Path;
+
+use sqlx::SqlitePool;
+
+use crate::models::{grabbed_torrents::GrabbedTorrent, series::Series};
+use crate::services::auto_search;
+use crate::services::download_client::normalize_info_hash;
+use crate::services::release_numbering::{
+    NumberingContext, ReleaseMapping, source_identity_name, validated_source_file_span,
+};
+
+async fn mapping(grab: &GrabbedTorrent, series: &Series, name: &str) -> Option<ReleaseMapping> {
+    let [episode] = grab.episode_numbers.as_slice() else {
+        return None;
+    };
+    normalize_info_hash(&grab.hash)?;
+    let basename = Path::new(name).file_name()?.to_str()?;
+    let heading = source_identity_name(basename, true).ok()?;
+    // Interactive titles and the misgrab verdict can match related titles.
+    // Require the actual file and listing to name this exact library entry.
+    let aliases = [
+        &series.title_romaji,
+        &series.title_english,
+        &series.title_native,
+        &series.title,
+    ];
+    if source_identity_name(&grab.torrent_name, true).ok()? != heading
+        || !aliases.iter().any(|title| {
+            source_identity_name(title, false).is_ok_and(|canonical| canonical == heading)
+        })
+    {
+        return None;
+    }
+
+    let mut seasons = aliases
+        .iter()
+        .map(|title| auto_search::parse_release_season(title))
+        .filter(|season| *season > 0);
+    let season = seasons.next().unwrap_or(1);
+    if seasons.any(|other| other != season) {
+        return None;
+    }
+    // A canonical season suffix is removed by source_identity_name. The
+    // remaining words alone cannot certify an unqualified later season.
+    if season > 1
+        && [basename, &grab.torrent_name].iter().any(|name| {
+            !validated_source_file_span(name)
+                .is_ok_and(|(_, named_season)| named_season == Some(season))
+        })
+    {
+        return None;
+    }
+    let context = NumberingContext::load(
+        series.anilist_id,
+        series.mal_id,
+        &series.format,
+        series.episodes,
+        series.cumulative_prior_episodes,
+        season,
+    )
+    .await
+    .ok()?;
+    let listing = context.choose(&grab.torrent_name, false).ok()?;
+    let file = context.choose(basename, false).ok()?;
+    if listing.episodes() != [*episode] || file.episodes() != [*episode] {
+        return None;
+    }
+    listing.resolve_named_file(basename).ok()?;
+    Some(listing)
+}
+
+pub(super) async fn record(db: &SqlitePool, grab: &GrabbedTorrent, series: &Series, name: &str) {
+    let Some(mapping) = mapping(grab, series, name).await else {
+        return;
+    };
+    if let Err(error) =
+        crate::models::grabbed_torrents::record_imported_single_mapping(db, grab, &mapping).await
+    {
+        tracing::warn!(grab_id = grab.id, %error, "Could not save imported source mapping");
+    }
+}
