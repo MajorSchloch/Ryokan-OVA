@@ -209,6 +209,26 @@ pub trait DownloadClient: Send + Sync {
     async fn resume(&self, info_hash: &str) -> Result<(), String>;
     async fn delete(&self, info_hash: &str, delete_files: bool) -> Result<(), String>;
 
+    /// Verify a unique completed job and its output directory against the
+    /// client's native queue and history. Return its exact native job ID.
+    async fn verify_completed_cleanup(
+        &self,
+        _hash: &str,
+        _content_path: &str,
+    ) -> Result<i64, String> {
+        Err("This client cannot verify completed download cleanup.".into())
+    }
+
+    /// Remove the same verified history entry after automatic file cleanup.
+    async fn finish_completed_cleanup(
+        &self,
+        _hash: &str,
+        _content_path: &str,
+        _nzbid: i64,
+    ) -> Result<(), String> {
+        Err("This client cannot finish verified download cleanup.".into())
+    }
+
     /// Set per-file wanted/unwanted. Binary is sufficient — Ryokan
     /// only uses priority 0 (skip) and "normal" (include); qBit's
     /// higher priority levels are never written from Ryokan. Each

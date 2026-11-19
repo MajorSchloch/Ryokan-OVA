@@ -105,7 +105,11 @@
             <label class="setting-row">
                 <span class="setting-row-text">
                     <span class="setting-row-title">Remove completed downloads</span>
-                    <span class="setting-row-desc">Remove an imported download from this client, files included, once the client reports it finished seeding. Usenet jobs and Move-mode torrents go right after import. Partial and failed imports stay; the library keeps its own copy.</span>
+                    {% if row.kind == "nzbget" %}
+                    <span class="setting-row-desc">Remove source videos after Ryokan verifies a new, complete import and confirms the library copies. Keep older, failed, partial, and unverified downloads for review.</span>
+                    {% else %}
+                    <span class="setting-row-desc">Remove an imported download from this client, files included, once the client reports it finished seeding. Other Usenet jobs and Move-mode torrents go right after import. Partial and failed imports stay available for review.</span>
+                    {% endif %}
                 </span>
                 <input type="checkbox" name="remove_completed" {% if row.remove_completed %}checked{% endif %}>
             </label>
