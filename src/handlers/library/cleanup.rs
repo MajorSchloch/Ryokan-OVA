@@ -13,6 +13,10 @@
 //! [`crud::remove_series`]: super::crud::remove_series
 //! [`bulk::delete_one_series`]: super::bulk
 
+use std::path::Path;
+
+use tokio::sync::MutexGuard;
+
 use crate::AppState;
 use crate::models::{grabbed_torrents, series};
 use crate::services::recycle::{self, RecycleKind, RecycleOutcome};
@@ -38,15 +42,11 @@ pub struct SeriesCleanupReport {
     /// One of `"skipped"` (delete_files=false or empty media_root /
     /// folder_name), `"recycled"` (moved into the recycle bin, #123),
     /// `"removed"`, `"missing"` (canonicalize-NotFound;
-    /// folder already gone), `"refused"` (canonicalized series dir
-    /// resolves outside media_root — traversal guard tripped),
-    /// `"shared"` (another series row has the same folder name, so the
-    /// folder and its files are kept), or `"error"` (canonicalize /
-    /// remove_dir_all error).
+    /// folder already gone), or `"shared"` (another series row uses the
+    /// folder, so it and its files are kept).
     pub folder_status: &'static str,
-    /// Detail for `folder_status`: the canonical removed path, the
-    /// outside-root resolution string, the other series' title for
-    /// `"shared"`, the error message, etc.
+    /// Detail for `folder_status`, such as the removed path, the recycle
+    /// entry ID, or the other series' title for `"shared"`.
     pub folder_detail: String,
     /// `"skipped"` (no Jellyfin client configured), `"refreshed"`, or
     /// `"error"`. Refresh runs whenever the cleanup actually does
@@ -82,14 +82,11 @@ impl SeriesCleanupReport {
     /// [`BulkOutcome`]: super::bulk::BulkOutcome
     pub fn partial_failure_reason(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
-        match self.folder_status {
-            "refused" => parts.push("folder refused (resolves outside media root)".to_string()),
-            "shared" => parts.push(format!(
+        if self.folder_status == "shared" {
+            parts.push(format!(
                 "files kept because {} uses the same folder",
                 self.folder_detail
-            )),
-            "error" => parts.push(format!("folder error: {}", self.folder_detail)),
-            _ => {}
+            ));
         }
         if !self.torrent_failures.is_empty() {
             parts.push(format!("torrent: {}", self.torrent_failures.join("; ")));
@@ -102,42 +99,46 @@ impl SeriesCleanupReport {
     }
 }
 
+#[derive(Debug)]
+pub struct SeriesCleanupFailure {
+    pub stage: &'static str,
+    pub message: String,
+}
+
+/// Keep Ryokan importers out until the caller finishes the catalog removal.
+/// The recycle copy still verifies changes from external writers such as Tdarr.
+pub(super) async fn lock_media_removal() -> (MutexGuard<'static, ()>, MutexGuard<'static, ()>) {
+    use crate::services::manual_import::import::IMPORT_LOCK;
+    use crate::services::post_processing::POST_PROC_LOCK;
+
+    loop {
+        let post_processing = POST_PROC_LOCK.lock().await;
+        if let Ok(manual_import) = IMPORT_LOCK.try_lock() {
+            return (post_processing, manual_import);
+        }
+        // A manual import takes the post-processing lock when classifying
+        // files. Release it before waiting for that import to finish.
+        drop(post_processing);
+        drop(IMPORT_LOCK.lock().await);
+    }
+}
+
 /// Per-series cleanup pass shared by [`crud::remove_series`] and
 /// [`bulk::delete_one_series`]. Runs whenever the user asked for
 /// `delete_files=true`; callers that don't want filesystem cleanup
 /// shouldn't call this at all.
 ///
-/// Order of operations matters and is the same as the original per-row
-/// implementation:
-///
-/// 1. List grabs for the series; for each non-empty hash that doesn't
-///    respect a still-active PT seed rule, resolve its download client
-///    and call `client.delete(hash, with_files=true)`. After the client
-///    delete, replay the import-time-stamped source paths so SAB jobs
-///    whose `storage` field is the parent complete-dir get cleaned up
-///    (the client's own delete is unreliable for those).
-/// 2. Drop the `grabbed_torrents` rows for the series so the table
-///    doesn't accumulate stale references to hashes the client just
-///    forgot.
-/// 3. Canonicalize `media_root`, canonicalize `media_root/<folder_name>`,
-///    assert the resolved series dir starts with the resolved media
-///    root, and only then hand it to `services::recycle::recycle`
-///    (move into the recycle bin; `remove_dir_all` only when no bin is
-///    configured, since an unwritable bin refuses the delete). The
-///    `starts_with` guard is
-///    the security-critical step — without it a corrupted `folder_name`
-///    (`"../escape"`) lets the user wipe arbitrary directories.
-///    Pinned by the `refuses_traversal_when_resolved_path_escapes_media_root`
-///    test in `crud/tests.rs` for per-row and the
-///    `bulk_delete_refuses_traversal_when_resolved_path_escapes_media_root`
-///    test in `bulk.rs` for bulk.
+/// 1. List grabs for the series without changing them.
+/// 2. Validate and remove the series folder. A failed move or verification
+///    stops removal before touching the download jobs or the catalog.
+/// 3. Remove owned jobs and downloaded source files, respecting seed rules.
+///    Clear their grab rows after client cleanup.
 /// 4. Nudge Jellyfin to rescan so the user's library doesn't show
 ///    ghost entries until the next refresh tick. Best-effort; logged
 ///    on failure but doesn't gate cleanup success.
 ///
 /// The DB cascade (`series::remove`) is **not** part of this helper —
-/// callers run it after this returns, ordered last because it's the
-/// irreversible step.
+/// callers run it after the helper returns a report.
 ///
 /// [`crud::remove_series`]: super::crud::remove_series
 /// [`bulk::delete_one_series`]: super::bulk
@@ -148,27 +149,31 @@ pub async fn cleanup_series_files(
     series_title: &str,
     media_root: Option<&str>,
     recycle_bin_path: &str,
-) -> Result<SeriesCleanupReport, String> {
+) -> Result<SeriesCleanupReport, SeriesCleanupFailure> {
+    let hashes = grabbed_torrents::get_all_for_series(&state.db, series_id)
+        .await
+        .map_err(|error| SeriesCleanupFailure {
+            stage: "list_grabbed_torrents",
+            message: format!("Could not list the download jobs ({error})."),
+        })?;
+    let (folder_status, folder_detail) =
+        remove_series_folder(state, series_id, folder_name, series_title, media_root, recycle_bin_path)
+            .await
+            .map_err(|error| SeriesCleanupFailure {
+                stage: "cleanup_folder",
+                message: format!(
+                    "Could not remove the series folder. The library entry and download jobs were kept. {error}"
+                ),
+            })?;
     let mut report = SeriesCleanupReport {
         torrents_removed: 0,
         torrent_failures: Vec::new(),
-        folder_status: "skipped",
-        folder_detail: String::new(),
+        folder_status,
+        folder_detail,
         jellyfin_status: "skipped",
     };
 
-    // 1. Per-grab download client cleanup. List-grabs failure is the
-    //    one preflight DB error that bubbles to the caller; everything
-    //    after this point folds errors into the report. Per-row's
-    //    handler turns the bubble into a 500 + log row; bulk turns it
-    //    into a BulkFailure entry. Letting one failed-DB-list silently
-    //    skip cleanup would leave the user wondering why "Delete with
-    //    files" left their on-disk folder intact.
-    let hashes = grabbed_torrents::get_all_for_series(&state.db, series_id)
-        .await
-        .map_err(|e| format!("list_grabbed_torrents: {e}"))?;
-
-    for &(grab_id, ref hash, dc_id) in &hashes {
+    for (grab_id, hash, dc_id) in &hashes {
         if hash.is_empty() {
             continue;
         }
@@ -185,14 +190,14 @@ pub async fn cleanup_series_files(
         // data, including one another series now downloads (a cancelled
         // grab here, re-grabbed there) or a batch that also feeds a
         // sibling. That download is the other series' to remove.
-        if grabbed_torrents::hash_in_use_elsewhere(&state.db, hash, series_id, grab_id).await {
+        if grabbed_torrents::hash_in_use_elsewhere(&state.db, hash, series_id, *grab_id).await {
             tracing::info!(
                 grab_id,
                 "series delete: leaving torrent {hash} in the client, another series uses it"
             );
             continue;
         }
-        let Some(client) = state.resolve_grab_client(dc_id, hash).await else {
+        let Some(client) = state.resolve_grab_client(*dc_id, hash).await else {
             report
                 .torrent_failures
                 .push("Download client not configured".to_string());
@@ -207,132 +212,20 @@ pub async fn cleanup_series_files(
         // `delete_episode_file`: the client's delete is unreliable
         // for SAB jobs whose history `storage` field is the parent
         // complete dir. Stamped paths are precise and mode-agnostic.
-        let stamped = grabbed_torrents::get_imported_source_paths(&state.db, grab_id).await;
+        let stamped = grabbed_torrents::get_imported_source_paths(&state.db, *grab_id).await;
         if !stamped.is_empty() {
             super::episodes::remove_stamped_source_paths(&stamped).await;
         }
     }
 
-    // 2. Drop grabbed_torrents rows so they don't dangle.
+    // Drop grabbed_torrents rows so they don't dangle.
     if let Err(err) = grabbed_torrents::delete_all_for_series(&state.db, series_id).await {
         report
             .torrent_failures
             .push(format!("clear grabbed_torrents: {}", err));
     }
 
-    // 3. Canonicalize+starts_with-gated folder removal. media_root is
-    //    None when the caller decided to skip filesystem cleanup
-    //    (config not loadable, or empty media_root). folder_name
-    //    being empty also short-circuits — we have no folder to
-    //    delete.
-    //
-    //    A folder another series row also names is kept: new rows get
-    //    their own folder, but two rows written before that rule can
-    //    share one, and recycling it would take the other series'
-    //    episodes. A failed lookup keeps it too.
-    let other_owner: Result<Option<String>, String> = if folder_name.trim().is_empty() {
-        Ok(None)
-    } else {
-        series::other_series_in_folder(&state.db, series_id, folder_name)
-            .await
-            .map_err(|e| e.to_string())
-    };
-    if let Some(root) = media_root
-        && !root.trim().is_empty()
-        && !folder_name.trim().is_empty()
-        && !crate::services::media::valid_library_location(std::path::Path::new(root), folder_name)
-    {
-        // Invalid components or paths outside the supported library layout.
-        report.folder_status = "refused";
-        report.folder_detail = format!("unusable folder name {folder_name:?}");
-    } else if let Some(root) = media_root
-        && !root.trim().is_empty()
-        && !folder_name.trim().is_empty()
-        && !matches!(other_owner, Ok(None))
-    {
-        match other_owner {
-            Ok(Some(other)) => {
-                report.folder_status = "shared";
-                report.folder_detail = other;
-            }
-            Ok(None) => {}
-            Err(err) => {
-                report.folder_status = "error";
-                report.folder_detail = format!("folder owner lookup: {err}");
-            }
-        }
-    } else if let Some(root) = media_root
-        && !root.trim().is_empty()
-        && !folder_name.trim().is_empty()
-    {
-        let series_dir = std::path::Path::new(root).join(folder_name);
-        match tokio::fs::canonicalize(root).await {
-            Ok(media_root_canon) => match tokio::fs::canonicalize(&series_dir).await {
-                // Strictly inside the media root: a folder that resolves
-                // to the root itself (a `.` folder name, a symlink to the
-                // root) would take every series with it.
-                Ok(series_canon)
-                    if series_canon.starts_with(&media_root_canon)
-                        && series_canon != media_root_canon =>
-                {
-                    // Recycle bin (#123): the folder moves into the bin
-                    // when one is configured; with no bin `recycle` does
-                    // the permanent `remove_dir_all` this branch used to
-                    // call directly, and an unwritable bin refuses (Err).
-                    match recycle::recycle(
-                        &state.db,
-                        recycle_bin_path,
-                        RecycleKind::SeriesFolder,
-                        Some(series_id),
-                        series_title,
-                        &series_canon,
-                    )
-                    .await
-                    {
-                        Ok(RecycleOutcome::Recycled { entry_id }) => {
-                            report.folder_status = "recycled";
-                            report.folder_detail =
-                                format!("{} (recycle entry {})", series_canon.display(), entry_id);
-                        }
-                        Ok(RecycleOutcome::DirectDeleted) => {
-                            report.folder_status = "removed";
-                            report.folder_detail = series_canon.display().to_string();
-                        }
-                        Ok(RecycleOutcome::Missing) => {
-                            report.folder_status = "missing";
-                            report.folder_detail = series_canon.display().to_string();
-                        }
-                        Err(err) => {
-                            report.folder_status = "error";
-                            report.folder_detail = format!("{}: {}", series_canon.display(), err);
-                        }
-                    }
-                }
-                Ok(other) => {
-                    report.folder_status = "refused";
-                    report.folder_detail = format!(
-                        "resolves outside media root: {} -> {}",
-                        series_dir.display(),
-                        other.display()
-                    );
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    report.folder_status = "missing";
-                    report.folder_detail = series_dir.display().to_string();
-                }
-                Err(err) => {
-                    report.folder_status = "error";
-                    report.folder_detail = format!("{}: {}", series_dir.display(), err);
-                }
-            },
-            Err(err) => {
-                report.folder_status = "error";
-                report.folder_detail = format!("media_root canonicalize: {}", err);
-            }
-        }
-    }
-
-    // 4. Nudge Jellyfin. Best-effort.
+    // Nudge Jellyfin. Best-effort.
     if let Some(root) = media_root
         && let Err(e) = crate::services::jellyfin_view::sync(&state.db, root).await
     {
@@ -351,4 +244,67 @@ pub async fn cleanup_series_files(
     }
 
     Ok(report)
+}
+
+async fn remove_series_folder(
+    state: &AppState,
+    series_id: i64,
+    folder_name: &str,
+    series_title: &str,
+    media_root: Option<&str>,
+    recycle_bin_path: &str,
+) -> Result<(&'static str, String), String> {
+    let Some(root) =
+        media_root.filter(|root| !root.trim().is_empty() && !folder_name.trim().is_empty())
+    else {
+        return Ok(("skipped", String::new()));
+    };
+    let root = Path::new(root);
+    if !crate::services::media::valid_library_location(root, folder_name) {
+        return Err(format!("Refused to use the folder name {folder_name:?}."));
+    }
+    // Legacy entries can share a folder. Keep it for the other title.
+    if let Some(other) = series::other_series_in_folder(&state.db, series_id, folder_name)
+        .await
+        .map_err(|err| format!("Could not check folder ownership ({err})."))?
+    {
+        return Ok(("shared", other));
+    }
+
+    let folder = root.join(folder_name);
+    let root = tokio::fs::canonicalize(root)
+        .await
+        .map_err(|err| format!("Could not resolve the media root ({err})."))?;
+    let canonical = match tokio::fs::canonicalize(&folder).await {
+        Ok(path) => path,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(("missing", folder.display().to_string()));
+        }
+        Err(err) => return Err(format!("Could not resolve {} ({err}).", folder.display())),
+    };
+    // The media root itself is never a series folder.
+    if !canonical.starts_with(&root) || canonical == root {
+        return Err(format!(
+            "Refused to remove {}. Its resolved path ({}) is at or outside the media root.",
+            folder.display(),
+            canonical.display()
+        ));
+    }
+    let outcome = recycle::recycle(
+        &state.db,
+        recycle_bin_path,
+        RecycleKind::SeriesFolder,
+        Some(series_id),
+        series_title,
+        &canonical,
+    )
+    .await?;
+    let path = canonical.display();
+    Ok(match outcome {
+        RecycleOutcome::Recycled { entry_id } => {
+            ("recycled", format!("{path} (recycle entry {entry_id})"))
+        }
+        RecycleOutcome::DirectDeleted => ("removed", path.to_string()),
+        RecycleOutcome::Missing => ("missing", path.to_string()),
+    })
 }

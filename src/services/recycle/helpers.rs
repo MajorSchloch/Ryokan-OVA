@@ -2,9 +2,11 @@
 //! rename-with-cross-fs-fallback moves, sizes, entry ids. Everything in
 //! here is synchronous and expected to run inside `spawn_blocking`.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 /// Suffix appended to an in-flight cross-filesystem copy so a partially
 /// written file can never be observed at the final name. Same convention
@@ -82,11 +84,12 @@ pub(super) fn move_path(src: &Path, dst: &Path, force_copy: bool) -> io::Result<
     }
     let meta = fs::symlink_metadata(src)?;
     if meta.is_dir() {
-        copy_dir_via_tmp(src, dst)?;
-        if let Err(e) = verify_tree_size(src, dst) {
-            let _ = fs::remove_dir_all(dst);
-            return Err(e);
-        }
+        copy_dir_via_tmp(
+            src,
+            dst,
+            #[cfg(test)]
+            paused_copy.as_deref(),
+        )?;
         fs::remove_dir_all(src)
     } else {
         copy_file_via_tmp(src, dst)?;
@@ -123,23 +126,6 @@ pub(super) fn verify_size(src: &Path, dst: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Tree flavor of [`verify_size`]: total bytes under both roots must match
-/// before the source tree is removed.
-pub(super) fn verify_tree_size(src: &Path, dst: &Path) -> io::Result<()> {
-    let expected = path_size(src);
-    let actual = path_size(dst);
-    if expected != actual {
-        return Err(io::Error::other(format!(
-            "size mismatch after folder copy: {} holds {} bytes, {} holds {} bytes",
-            src.display(),
-            expected,
-            dst.display(),
-            actual
-        )));
-    }
-    Ok(())
-}
-
 fn copy_file_via_tmp(src: &Path, dst: &Path) -> io::Result<()> {
     let tmp = tmp_name(dst);
     if let Err(e) = fs::copy(src, &tmp).and_then(|_| verify_size(src, &tmp)) {
@@ -153,26 +139,97 @@ fn copy_file_via_tmp(src: &Path, dst: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn copy_dir_via_tmp(src: &Path, dst: &Path) -> io::Result<()> {
+#[derive(PartialEq, Eq)]
+struct FileStamp {
+    size: u64,
+    modified: SystemTime,
+    #[cfg(unix)]
+    identity: (u64, u64, i64, i64),
+}
+
+impl FileStamp {
+    fn read(meta: fs::Metadata) -> io::Result<Self> {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+
+        Ok(Self {
+            size: meta.len(),
+            modified: meta.modified()?,
+            #[cfg(unix)]
+            identity: (meta.dev(), meta.ino(), meta.ctime(), meta.ctime_nsec()),
+        })
+    }
+}
+
+// A directory is represented by None. Retain relative names as well as
+// lengths, since equal totals can hide a removed or replaced file.
+fn tree_snapshot(root: &Path) -> io::Result<BTreeMap<PathBuf, Option<FileStamp>>> {
+    let mut snapshot = BTreeMap::new();
+    let mut stack = vec![PathBuf::new()];
+    while let Some(relative) = stack.pop() {
+        for entry in fs::read_dir(root.join(&relative))? {
+            let entry = entry?;
+            let relative = relative.join(entry.file_name());
+            let meta = entry.metadata()?;
+            if meta.is_dir() {
+                stack.push(relative.clone());
+                snapshot.insert(relative, None);
+            } else if meta.is_file() {
+                snapshot.insert(relative, Some(FileStamp::read(meta)?));
+            }
+        }
+    }
+    Ok(snapshot)
+}
+
+fn copy_dir_via_tmp(
+    src: &Path,
+    dst: &Path,
+    #[cfg(test)] paused_copy: Option<&super::test_support::CopyBarrier>,
+) -> io::Result<()> {
+    let before = tree_snapshot(src)?;
     let tmp = tmp_name(dst);
-    if let Err(e) = copy_dir_recursive(src, &tmp) {
+    fs::create_dir(&tmp)?;
+    let result = (|| {
+        copy_dir_recursive(src, &tmp)?;
+        #[cfg(test)]
+        if let Some(copy) = paused_copy {
+            copy.pause();
+        }
+        let copied = tree_snapshot(&tmp)?;
+        if before
+            .iter()
+            .map(|(path, stamp)| (path, stamp.as_ref().map(|s| s.size)))
+            .ne(copied
+                .iter()
+                .map(|(path, stamp)| (path, stamp.as_ref().map(|s| s.size))))
+        {
+            return Err(io::Error::other(format!(
+                "files or sizes differ after copying {}",
+                src.display()
+            )));
+        }
+        if before != tree_snapshot(src)? {
+            return Err(io::Error::other(format!(
+                "folder changed during copy: {}. Retry when its files are idle",
+                src.display()
+            )));
+        }
+        fs::rename(&tmp, dst)
+    })();
+    if result.is_err() {
         let _ = fs::remove_dir_all(&tmp);
-        return Err(e);
     }
-    if let Err(e) = fs::rename(&tmp, dst) {
-        let _ = fs::remove_dir_all(&tmp);
-        return Err(e);
-    }
-    Ok(())
+    result
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
-    fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let ty = entry.file_type()?;
         let to = dst.join(entry.file_name());
         if ty.is_dir() {
+            fs::create_dir(&to)?;
             copy_dir_recursive(&entry.path(), &to)?;
         } else if ty.is_file() {
             fs::copy(entry.path(), &to)?;

@@ -307,7 +307,7 @@ pub async fn reconcile_fallbacks(
     request_body = RemoveSeriesForm,
     responses(
         (status = 200, description = "Series removed", body = serde_json::Value),
-        (status = 500, description = "Database error"),
+        (status = 500, description = "Removal could not complete"),
     ),
 )]
 pub async fn remove_series(
@@ -339,6 +339,11 @@ async fn remove_series_owned(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let series_id = form.id;
     let delete_files = form.delete_files.unwrap_or(true);
+    let writer_guards = if delete_files {
+        Some(super::cleanup::lock_media_removal().await)
+    } else {
+        None
+    };
     // Captured now, written only after the row is gone: an exclusion
     // for a series that stayed in the library would be wrong.
     let exclusion = if form.add_exclusion.unwrap_or(false) {
@@ -416,30 +421,34 @@ async fn remove_series_owned(
     // before — bulk silently bypassed the canonicalize+starts_with
     // traversal guard and the issue-#28 PT seed-rule check (PR #164
     // review). Single-helper keeps them in lockstep.
-    let cleanup_report: Option<super::cleanup::SeriesCleanupReport> = if delete_files
-        && let Some(ref tracked) = tracked
-    {
-        let (media_root, recycle_bin_path): (Option<String>, String) =
-            match config::get_config(&state.db).await.ok().flatten() {
-                Some(c) => (Some(c.media_root), c.recycle_bin_path),
-                None => (None, String::new()),
-            };
-        match super::cleanup::cleanup_series_files(
-            &state,
-            series_id,
-            &tracked.folder_name,
-            &tracked.title,
-            media_root.as_deref(),
-            &recycle_bin_path,
-        )
-        .await
-        {
-            Ok(r) => Some(r),
-            Err(e) => return Err(fail_with(&state.db, series_id, "list_grabbed_torrents", e).await),
-        }
-    } else {
-        None
-    };
+    let cleanup_report: Option<super::cleanup::SeriesCleanupReport> =
+        if delete_files && let Some(ref tracked) = tracked {
+            let (media_root, recycle_bin_path): (Option<String>, String) =
+                match config::get_config(&state.db).await.ok().flatten() {
+                    Some(c) => (Some(c.media_root), c.recycle_bin_path),
+                    None => (None, String::new()),
+                };
+            match super::cleanup::cleanup_series_files(
+                &state,
+                series_id,
+                &tracked.folder_name,
+                &tracked.title,
+                media_root.as_deref(),
+                &recycle_bin_path,
+            )
+            .await
+            {
+                Ok(r) => Some(r),
+                Err(error) => {
+                    activity_event.action = "Removal needs attention".into();
+                    activity_event.reason = error.message.clone();
+                    crate::models::library_activity::append(&state.db, activity_event).await;
+                    return Err(fail_with(&state.db, series_id, error.stage, error.message).await);
+                }
+            }
+        } else {
+            None
+        };
 
     // Pull report fields back out for the response/log shape; using
     // defaults when delete_files=false or `tracked` was None.
@@ -464,12 +473,11 @@ async fn remove_series_owned(
         .map(|r| r.jellyfin_status)
         .unwrap_or("skipped");
 
-    // Remove the DB tracking rows. This is the irreversible step, so
-    // do it last — if filesystem cleanup blew up the operator can
-    // still inspect the half-cleaned state via the Library page.
+    // A failed folder removal returns above with the catalog intact.
     if let Err(e) = series::remove(&state.db, series_id).await {
         return Err(fail_with(&state.db, series_id, "delete_series", e.to_string()).await);
     }
+    drop(writer_guards);
     if let Some(snapshot) = exclusion {
         record_sync_exclusion(&state.db, snapshot).await;
     }
