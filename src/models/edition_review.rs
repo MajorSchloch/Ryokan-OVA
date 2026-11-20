@@ -29,6 +29,13 @@ pub struct Summary {
     pub candidates: i64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, sqlx::FromRow)]
+pub struct OpenEpisode {
+    pub id: i64,
+    pub series_id: i64,
+    pub episode: i32,
+}
+
 impl Review {
     pub(crate) async fn check_files(&self) -> Result<(), String> {
         self.checked_file(false).await?;
@@ -163,6 +170,20 @@ pub async fn summaries(db: &SqlitePool) -> Result<Vec<Summary>, sqlx::Error> {
          JOIN grabbed_torrents g ON g.id = r.grab_id AND g.grabbed_at = r.grabbed_at
          WHERE r.decision IS NULL AND g.state = 'failed'
          GROUP BY r.series_id, r.episode ORDER BY id DESC LIMIT 100",
+    )
+    .fetch_all(db)
+    .await
+}
+
+/// The newest current review for each episode, newest first.
+pub(crate) async fn open_episodes(db: &SqlitePool) -> Result<Vec<OpenEpisode>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT MAX(r.id) AS id, r.series_id, r.episode
+         FROM episode_edition_reviews r
+         JOIN series s ON s.id = r.series_id AND s.anilist_id = r.provider_id
+         JOIN grabbed_torrents g ON g.id = r.grab_id AND g.grabbed_at = r.grabbed_at
+         WHERE r.decision IS NULL AND g.state = 'failed'
+         GROUP BY r.series_id, r.episode ORDER BY id DESC",
     )
     .fetch_all(db)
     .await

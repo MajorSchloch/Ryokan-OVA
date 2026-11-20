@@ -5,7 +5,7 @@ use askama::Template;
 use axum::{
     Form,
     body::Body,
-    extract::{Path as UrlPath, State},
+    extract::{Path as UrlPath, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Response},
 };
@@ -35,6 +35,7 @@ struct Page {
     current: Candidate,
     candidates: Vec<Candidate>,
     message: String,
+    return_to: String,
 }
 
 struct Candidate {
@@ -160,11 +161,33 @@ fn unavailable(status: StatusCode, reason: &str) -> Response {
     (status, reason.to_string()).into_response()
 }
 
-pub async fn page(State(state): State<AppState>, UrlPath(id): UrlPath<i64>) -> Response {
-    show(&state, id, String::new()).await
+#[derive(serde::Deserialize)]
+pub struct Navigation {
+    return_to: Option<String>,
 }
 
-async fn show(state: &AppState, id: i64, message: String) -> Response {
+fn franchise_return(value: Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .filter(|path| path.starts_with("/franchises/"))
+        .and_then(crate::handlers::library::groups::preview::safe_return_to)
+}
+
+pub async fn page(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<i64>,
+    Query(navigation): Query<Navigation>,
+) -> Response {
+    show(
+        &state,
+        id,
+        String::new(),
+        franchise_return(navigation.return_to),
+    )
+    .await
+}
+
+async fn show(state: &AppState, id: i64, message: String, return_to: Option<String>) -> Response {
     let Ok(Some(review)) = reviews::get_open(&state.db, id).await else {
         return unavailable(
             StatusCode::NOT_FOUND,
@@ -237,6 +260,7 @@ async fn show(state: &AppState, id: i64, message: String) -> Response {
         current,
         candidates,
         message,
+        return_to: return_to.unwrap_or_default(),
     };
     match view.render() {
         Ok(html) => Html(html).into_response(),
@@ -254,6 +278,7 @@ async fn show(state: &AppState, id: i64, message: String) -> Response {
 pub struct Decision {
     decision: String,
     dismiss_others: Option<String>,
+    return_to: Option<String>,
 }
 
 pub async fn decide(
@@ -269,6 +294,7 @@ pub async fn decide(
         _ => return unavailable(StatusCode::BAD_REQUEST, "Select a file decision."),
     };
     let owned_state = state.clone();
+    let return_to = franchise_return(form.return_to);
     match tokio::spawn(async move {
         crate::services::post_processing::resolve_edition(
             &owned_state,
@@ -280,10 +306,11 @@ pub async fn decide(
     })
     .await
     {
-        Ok(Ok(())) => {
-            crate::handlers::responses::htmx_aware_redirect(is_htmx, "/system?tab=review")
-        }
-        Ok(Err(error)) => show(&state, id, error).await,
+        Ok(Ok(())) => crate::handlers::responses::htmx_aware_redirect(
+            is_htmx,
+            return_to.as_deref().unwrap_or("/system?tab=review"),
+        ),
+        Ok(Err(error)) => show(&state, id, error, return_to).await,
         Err(error) => {
             tracing::error!(%error, "Edition review task failed");
             unavailable(

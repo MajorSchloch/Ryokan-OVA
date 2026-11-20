@@ -58,6 +58,8 @@ pub struct CardProgress {
     pub future: i64,
     pub unmonitored: i64,
     pub unknown: i64,
+    pub reviews: i64,
+    pub latest_review: Option<crate::models::edition_review::OpenEpisode>,
     pub monitoring_label: String,
     pub files_label: String,
     pub next_airing: String,
