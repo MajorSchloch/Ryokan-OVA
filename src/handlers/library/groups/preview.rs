@@ -158,7 +158,7 @@ fn proposed_owner(entries: &[Entry]) -> Option<i64> {
     }
 }
 
-fn safe_return_to(value: &str) -> Option<String> {
+pub(crate) fn safe_return_to(value: &str) -> Option<String> {
     if value.len() > 2048 || value.contains(['\\', '\r', '\n']) {
         return None;
     }

@@ -185,6 +185,7 @@
             <option value="downloading"{% if status_filter == "downloading" %} selected{% endif %}>Downloading</option>
             <option value="missing"{% if status_filter == "missing" %} selected{% endif %}>Has missing episodes</option>
             <option value="upcoming"{% if status_filter == "upcoming" %} selected{% endif %}>Upcoming</option>
+            <option value="review"{% if status_filter == "review" %} selected{% endif %}>Needs review</option>
             <option value="attention"{% if status_filter == "attention" %} selected{% endif %}>Needs attention</option>
         </select>
         <noscript><button type="submit" class="btn btn-secondary btn-sm">Apply</button></noscript>
@@ -194,24 +195,35 @@
 </div>
 <div class="library-grid" id="library-grid"{% if !individual && visible_franchise_count == 0 || individual && visible_release_count == 0 %} style="display: none"{% endif %}>
     {% for franchise in franchise_cards %}
-    <a href="{{ franchise.path }}" class="franchise-card" data-library-card data-search-titles="{{ franchise.search_titles }}" data-states="{{ franchise.progress.overview_states() }}"{% if !franchise.matches_search || !franchise.progress.matches_overview_status(status_filter.as_str()) %} style="display: none"{% endif %}>
-        <div class="series-cover">
-            {% if !franchise.cover_url.is_empty() %}<img src="{{ franchise.cover_url }}" alt="" loading="lazy">{% else %}<div class="series-cover-placeholder">No Image</div>{% endif %}
-            {% if franchise.progress.following %}<span class="franchise-follow-badge">Follows future releases</span>{% endif %}
-        </div>
-        {% let availability = &franchise.progress %}
-        {% include "partials/library/availability_bar.html" %}
-        <div class="series-info">
+    <article class="franchise-card" data-library-card data-search-titles="{{ franchise.search_titles }}" data-states="{{ franchise.progress.overview_states() }}"{% if !franchise.matches_search || !franchise.progress.matches_overview_status(status_filter.as_str()) %} style="display: none"{% endif %}>
+        <a class="franchise-card-open" href="{{ franchise.path }}" aria-label="Open {{ franchise.title }}">
+            <div class="series-cover">
+                {% if !franchise.cover_url.is_empty() %}<img src="{{ franchise.cover_url }}" alt="" loading="lazy">{% else %}<div class="series-cover-placeholder">No Image</div>{% endif %}
+                {% if franchise.progress.following %}<span class="franchise-follow-badge">Follows future releases</span>{% endif %}
+            </div>
+            {% let availability = &franchise.progress %}
+            {% include "partials/library/availability_bar.html" %}
             <p class="series-title" title="{{ franchise.title }}">{{ franchise.title }}</p>
+        </a>
+        <div class="series-info">
+            {% if !franchise.statuses.is_empty() %}
+            <ul class="franchise-card-statuses" aria-label="Release status">
+                {% for status in franchise.statuses %}
+                <li>{% if franchise.has_detail_page %}<a class="franchise-status franchise-status-{{ status.filter }}" href="{{ franchise.path }}?tab=releases&amp;f_status={{ status.filter }}" aria-label="{{ franchise.title }} · {{ status.label }}">{{ status.label }}</a>{% else %}<span class="franchise-status franchise-status-{{ status.filter }}">{{ status.label }}</span>{% endif %}</li>
+                {% endfor %}
+            </ul>
+            {% endif %}
             <p class="franchise-card-summary">{{ franchise.tracked }} release{% if franchise.tracked != 1 %}s{% endif %} in library{% if franchise.available > 0 %} &middot; {{ franchise.available }} more{% endif %}</p>
             {% if !franchise.formats.is_empty() %}<p class="franchise-card-formats">{{ franchise.formats }}</p>{% endif %}
-            {% include "partials/library/overview_counts.html" %}
+            {% if franchise.progress.files.complete_scan || franchise.progress.files.episodes > 0 %}
+            <p class="franchise-card-progress" data-summary-part="episodes">{% if !franchise.progress.files.complete_scan %}At least {% endif %}{{ franchise.progress.files.episodes }} downloaded</p>
+            {% endif %}
             {% let files = &franchise.progress.files %}{% include "partials/library/overview_file_details.html" %}
             {% if franchise.upcoming_releases > 0 %}<p class="card-date">{{ franchise.upcoming_releases }} upcoming release{% if franchise.upcoming_releases != 1 %}s{% endif %}</p>{% endif %}
             {% if !franchise.next_airing.is_empty() %}<p class="card-date"><span>Next airing</span> {{ franchise.next_airing }}</p>{% endif %}
             {% if !franchise.added_date.is_empty() %}<p class="card-date"><span>Added</span> {{ franchise.added_date }}</p>{% endif %}
         </div>
-    </a>
+    </article>
     {% endfor %}
     {% for (s, prog) in cards %}
     <a href="{{ crate::handlers::library::detail::path(s.anilist_id) }}" class="series-card" data-library-card data-search-titles="{{ search_titles.get(&s.id).cloned().unwrap_or_default() }}" data-states="{{ prog.overview_states() }}" id="series-{{ s.id }}"{% if hidden_release_ids.contains(&s.id) || !prog.matches_overview_status(status_filter.as_str()) %} style="display: none"{% endif %}>

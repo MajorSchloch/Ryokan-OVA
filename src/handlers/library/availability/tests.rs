@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     models::{config, library_layout, monitoring, release_follows},
-    test_support::{build_test_app_state, seed_series},
+    test_support::{build_test_app_state, seed_grabbed_torrent, seed_series},
 };
 use axum::{
     extract::{Path, Query, State},
@@ -130,6 +130,97 @@ async fn delicious_unmonitored_first_season_and_future_sequel_are_neutral() {
     );
     let after:Vec<(i64,i32,bool)>=sqlx::query_as("SELECT series_id,episode_number,monitored FROM episode_monitor_state ORDER BY series_id,episode_number").fetch_all(&db).await.unwrap();
     assert_eq!(before, after, "Browsing must preserve explicit monitoring");
+}
+
+#[tokio::test]
+async fn edition_review_status_counts_current_episodes_across_releases() {
+    let root = tempfile::tempdir().unwrap();
+    let db = fixture(root.path()).await;
+    let mut releases = Vec::new();
+    for (provider, title) in [(100, "Season 1"), (200, "Season 2"), (300, "Season 3")] {
+        let row = release(&db, provider, title, Some(3), "FINISHED", "none", "Parent").await;
+        std::fs::create_dir_all(root.path().join(&row.folder_name)).unwrap();
+        releases.push(row);
+    }
+    let [first, second, excluded] = releases.as_slice() else {
+        unreachable!();
+    };
+    let seed_review = async |row: &series::Series, episode, name: &str| {
+        let grab_id = seed_grabbed_torrent(&db, row.id, name, name, &[episode]).await;
+        let review_id = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO episode_edition_reviews
+             (grab_id, grabbed_at, series_id, provider_id, episode, source_root,
+              source_path, source_identity, current_path, current_identity, reason)
+             SELECT id, grabbed_at, series_id, ?, ?, '', '', '', '', '', ''
+             FROM grabbed_torrents WHERE id = ? RETURNING id",
+        )
+        .bind(row.anilist_id)
+        .bind(episode)
+        .bind(grab_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        (grab_id, review_id)
+    };
+    seed_review(first, 1, "first candidate").await;
+    seed_review(first, 1, "second candidate").await;
+    let (_, first_latest) = seed_review(first, 2, "another episode").await;
+    let (_, second_latest) = seed_review(second, 1, "another release").await;
+    let (stale_grab, _) = seed_review(excluded, 1, "superseded attempt").await;
+    let (active_grab, _) = seed_review(excluded, 1, "active grab").await;
+    let (_, other_provider) = seed_review(excluded, 2, "old provider identity").await;
+    let (_, resolved) = seed_review(excluded, 3, "resolved decision").await;
+
+    sqlx::query("UPDATE grabbed_torrents SET state = 'failed' WHERE id != ?")
+        .bind(active_grab)
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE grabbed_torrents SET grabbed_at = '2000-01-01 00:00:00' WHERE id = ?")
+        .bind(stale_grab)
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE episode_edition_reviews SET provider_id = 999 WHERE id = ?")
+        .bind(other_provider)
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE episode_edition_reviews SET decision = 'kept' WHERE id = ?")
+        .bind(resolved)
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA query_only=ON")
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let progress = load(&db, root.path().to_str().unwrap(), &releases)
+        .await
+        .unwrap();
+    let first_progress = &progress[&first.id];
+    assert_eq!(first_progress.reviews, 2);
+    assert_eq!(first_progress.latest_review.unwrap().id, first_latest);
+    assert!(first_progress.matches_overview_status("attention"));
+    assert!(first_progress.matches_overview_status("review"));
+    assert!(!first_progress.matches_overview_status("missing"));
+    let excluded_progress = &progress[&excluded.id];
+    assert_eq!(excluded_progress.reviews, 0);
+    assert_eq!(excluded_progress.latest_review, None);
+    assert!(!excluded_progress.matches_overview_status("attention"));
+    assert!(!excluded_progress.matches_overview_status("review"));
+
+    let combined = aggregate(progress.values());
+    assert_eq!(combined.reviews, 3);
+    assert_eq!(
+        combined.latest_review,
+        Some(edition_review::OpenEpisode {
+            id: second_latest,
+            series_id: second.id,
+            episode: 1,
+        })
+    );
 }
 
 #[tokio::test]
@@ -371,6 +462,7 @@ async fn follow_selection_never_hides_or_creates_demand_and_parent_matches_poste
     let parent = super::super::navigation::page(
         State(build_test_app_state(db.clone(), None)),
         Path(page_id),
+        Query(Default::default()),
     )
     .await
     .unwrap()
