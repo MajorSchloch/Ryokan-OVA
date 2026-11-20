@@ -1,6 +1,6 @@
 # Docker installation
 
-Ryokan ships as a Docker image at `ghcr.io/johnthreekay/ryokan:latest`. The image runs on `linux/amd64` and `linux/arm64`. The fastest way to get going is `docker compose up`.
+Ryokan ships as a Docker image at `ghcr.io/majorschloch/ryokan-ova:ova`. The image runs on `linux/amd64` and `linux/arm64`. The fastest way to get going is `docker compose up`.
 
 If you're new to Docker, skim [Docker's overview](https://docs.docker.com/get-started/docker-overview/) first; this page assumes you know what `docker compose up -d` does.
 
@@ -11,7 +11,7 @@ Save this as `docker-compose.yml`:
 ```yaml
 services:
   ryokan:
-    image: ghcr.io/johnthreekay/ryokan:latest
+    image: ghcr.io/majorschloch/ryokan-ova:ova
     container_name: ryokan
     ports:
       - "8978:8978"
@@ -42,7 +42,7 @@ The Quick install doesn't mount your media library or your download client's com
 ```yaml
 services:
   ryokan:
-    image: ghcr.io/johnthreekay/ryokan:latest
+    image: ghcr.io/majorschloch/ryokan-ova:ova
     container_name: ryokan
     ports:
       - "8978:8978"

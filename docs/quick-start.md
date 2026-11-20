@@ -32,7 +32,7 @@ Adjust `1000:1000` if your host user has different IDs (`id -u` and `id -g` to c
     ```yaml
     services:
       ryokan:
-        image: ghcr.io/johnthreekay/ryokan:latest
+        image: ghcr.io/majorschloch/ryokan-ova:ova
         container_name: ryokan
         ports:
           - "8978:8978"
@@ -89,7 +89,7 @@ Adjust `1000:1000` if your host user has different IDs (`id -u` and `id -g` to c
     ```yaml
     services:
       ryokan:
-        image: ghcr.io/johnthreekay/ryokan:latest
+        image: ghcr.io/majorschloch/ryokan-ova:ova
         container_name: ryokan
         ports:
           - "8978:8978"
@@ -145,7 +145,7 @@ Adjust `1000:1000` if your host user has different IDs (`id -u` and `id -g` to c
     ```yaml
     services:
       ryokan:
-        image: ghcr.io/johnthreekay/ryokan:latest
+        image: ghcr.io/majorschloch/ryokan-ova:ova
         container_name: ryokan
         ports:
           - "8978:8978"
@@ -203,7 +203,7 @@ Adjust `1000:1000` if your host user has different IDs (`id -u` and `id -g` to c
     ```yaml
     services:
       ryokan:
-        image: ghcr.io/johnthreekay/ryokan:latest
+        image: ghcr.io/majorschloch/ryokan-ova:ova
         container_name: ryokan
         ports:
           - "8978:8978"
@@ -275,7 +275,7 @@ Adjust `1000:1000` if your host user has different IDs (`id -u` and `id -g` to c
     ```yaml
     services:
       ryokan:
-        image: ghcr.io/johnthreekay/ryokan:latest
+        image: ghcr.io/majorschloch/ryokan-ova:ova
         container_name: ryokan
         ports:
           - "8978:8978"

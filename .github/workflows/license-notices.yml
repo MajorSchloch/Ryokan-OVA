@@ -1,5 +1,5 @@
 # Regenerate `licenses/THIRD_PARTY_LICENSES.html` and auto-commit
-# back to the branch when it drifts. Triggered on push to `dev` when
+# back to the branch when it drifts. Triggered on push to `main` when
 # Cargo.lock or about.toml/about.hbs (the cargo-about config) changes.
 #
 # Why a dedicated workflow rather than failing rust.yml's build:
@@ -13,9 +13,9 @@
 #     committed so the README link resolves on the repo's main view,
 #     but it doesn't need human curation.
 #
-# This runs only on push to `dev` (not PRs) because workflows running
+# This publishes only from `main` because workflows running
 # on PRs from forks don't have write access to the repo. A PR that
-# bumps Cargo.lock will land on `dev` after merge; this workflow then
+# bumps Cargo.lock will land on `main` after merge; this workflow then
 # regenerates and commits the licenses-file refresh as a follow-up
 # `chore:` commit. Same pattern Sonarr / `dependabot` use for similar
 # auto-maintenance tasks.
@@ -32,7 +32,7 @@ name: Refresh third-party license notices
 
 on:
   push:
-    branches: [dev]
+    branches: [main]
     paths:
       - Cargo.lock
       - about.toml
@@ -79,6 +79,7 @@ jobs:
           retention-days: 1
 
   commit:
+    if: github.ref == 'refs/heads/main'
     needs: generate
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -86,7 +87,7 @@ jobs:
       contents: write
     steps:
       # The checkout keeps the workflow's own token for the push back to
-      # `dev`; no PAT is needed for the same repo.
+      # `main`; no PAT is needed for the same repo.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
@@ -94,6 +95,7 @@ jobs:
           path: licenses
       - name: Commit and push if changed
         run: |
+          test "$GITHUB_REF" = refs/heads/main
           if git diff --quiet licenses/THIRD_PARTY_LICENSES.html; then
             echo "licenses/THIRD_PARTY_LICENSES.html is already current; nothing to commit."
             exit 0
@@ -106,4 +108,4 @@ jobs:
           # re-run the full verify chain (clippy / nextest / build).
           # The next non-licenses commit will exercise CI normally.
           git commit -m "chore: regenerate THIRD_PARTY_LICENSES.html [skip ci]"
-          git push origin HEAD:dev
+          git push origin HEAD:main

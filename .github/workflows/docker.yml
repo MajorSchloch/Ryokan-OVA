@@ -1,10 +1,10 @@
 name: Publish Docker image
 
-# Every branch push builds and publishes a multi-arch image tagged with
-# the branch name (`feat/foo` -> `:feat-foo`), so a PR from this repo
-# has a pullable image the moment it is pushed; `main` and `dev` keep
-# their tags, semver tags publish releases and `latest`. `gh-pages` is
-# the docs deploy target and has no Dockerfile.
+# Branch pushes publish a multi-arch image tagged by branch name
+# (`feat/foo` -> `:feat-foo`). The default branch also publishes `:ova`
+# for existing installations and `:latest`. Stable version tags can
+# publish `:latest` too. The reserved `ova` and `latest` branch names
+# cannot overwrite these tags.
 #
 # The `pull_request` trigger is for fork PRs, whose branches live
 # outside this repo and never fire the push event. A fork PR's token
@@ -15,11 +15,11 @@ name: Publish Docker image
 # `if` skips same-repo PRs so they are not built twice.
 on:
   push:
-    branches: [ "**", "!gh-pages" ]
+    branches: [ "**", "!gh-pages", "!ova", "!latest" ]
     tags:
       - 'v*.*.*'
   pull_request:
-    branches: [ "main", "dev" ]
+    branches: [ "main" ]
 
 concurrency:
   group: docker-${{ github.ref }}
@@ -238,6 +238,7 @@ jobs:
             type=ref,event=branch
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=ova,enable={{is_default_branch}}
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Create manifest list and push
