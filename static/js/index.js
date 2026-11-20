@@ -107,7 +107,7 @@ function _liveLibrarySearchImmediate(input) {
     else url.searchParams.delete('search');
     if (status) url.searchParams.set('status', status);
     else url.searchParams.delete('status');
-    window.history.replaceState(null, '', url);
+    window.history.replaceState(window.history.state, '', url);
     for (const field of document.querySelectorAll('input[type="hidden"][name="status"]')) {
         field.value = status;
     }

@@ -2,7 +2,7 @@ use super::*;
 use crate::services::anilist;
 use crate::{
     models::{library_layout, metadata_cache},
-    test_support::{build_test_app_state, in_memory_pool, seed_series},
+    test_support::{build_test_app_state, in_memory_pool, seed_grabbed_torrent, seed_series},
 };
 use serde_json::json;
 
@@ -19,6 +19,28 @@ async fn release(db: &SqlitePool, id: i64, title: &str, root: &str) -> series::S
         .unwrap();
     tx.commit().await.unwrap();
     row
+}
+
+async fn seed_review(db: &SqlitePool, series_id: i64, provider: i64, episode: i32) -> i64 {
+    let grab = seed_grabbed_torrent(db, series_id, "edition", "Short edition", &[episode]).await;
+    sqlx::query("UPDATE grabbed_torrents SET state='failed' WHERE id=?")
+        .bind(grab)
+        .execute(db)
+        .await
+        .unwrap();
+    sqlx::query_scalar(
+        "INSERT INTO episode_edition_reviews
+         (grab_id, grabbed_at, series_id, provider_id, episode, source_root, source_path,
+          source_identity, current_path, current_identity, reason)
+         SELECT id, grabbed_at, series_id, ?, ?, '', 'candidate.mkv', '', 'current.mkv', '', 'Edition differs'
+         FROM grabbed_torrents WHERE id=? RETURNING id",
+    )
+    .bind(provider)
+    .bind(episode)
+    .bind(grab)
+    .fetch_one(db)
+    .await
+    .unwrap()
 }
 
 #[tokio::test]
@@ -89,7 +111,9 @@ async fn parent_page_is_read_only_and_links_releases_by_provider_identity() {
         .unwrap()
         .0;
     let state = build_test_app_state(db.clone(), None);
-    let response = page(State(state), Path(page_id)).await.unwrap();
+    let response = page(State(state), Path(page_id), Query(Default::default()))
+        .await
+        .unwrap();
     assert!(response.0.contains("/anime/anilist/100"));
     assert!(response.0.contains("/anime/anilist/200"));
     assert!(!response.0.contains(&format!("id=\"series-{}\"", first.id)));
@@ -181,6 +205,63 @@ async fn grouped_posters_are_default_and_release_mode_keeps_bulk_library_ids() {
 }
 
 #[tokio::test]
+async fn poster_review_link_opens_only_held_releases_on_first_load() {
+    let db = in_memory_pool().await;
+    release(&db, 100, "First show", "Franchise").await;
+    let second = release(&db, 200, "Second season", "Franchise").await;
+    let review = seed_review(&db, second.id, 200, 2).await;
+    let (page_id, _) = library_layout::page_for_provider(&db, 100)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let html = index_html(&db, None, None).await;
+    let document = scraper::Html::parse_document(&html);
+    let selector = |s| scraper::Selector::parse(s).unwrap();
+    let link = document
+        .select(&selector(".franchise-card .franchise-status-review"))
+        .next()
+        .unwrap();
+    let query = link.value().attr("href").unwrap();
+    assert_eq!(
+        query,
+        format!("/franchises/{page_id}?tab=releases&f_status=review")
+    );
+    let query = format!("http://example.test{query}").parse().unwrap();
+    let Query(filters) = Query::try_from_uri(&query).unwrap();
+    let response = page(
+        State(build_test_app_state(db, None)),
+        Path(page_id),
+        Query(filters),
+    )
+    .await
+    .unwrap();
+    let document = scraper::Html::parse_document(&response.0);
+    let rows = document
+        .select(&selector("[data-franchise-release]:not([hidden])"))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].text().any(|text| text == "Second season"));
+    assert_eq!(
+        rows[0]
+            .select(&selector("[data-franchise-review]"))
+            .next()
+            .unwrap()
+            .value()
+            .attr("href"),
+        Some(format!("/system/edition-review/{review}").as_str())
+    );
+    assert!(
+        document
+            .select(&selector(
+                "select[name=f_status] option[selected][value=review]"
+            ))
+            .next()
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn saved_boundaries_hold_across_an_untracked_bridge_and_follow_preview() {
     let db = in_memory_pool().await;
     let first = release(&db, 100, "First show", "First").await;
@@ -257,9 +338,13 @@ async fn untracked_child_links_to_saved_parent_and_mal_identity_keeps_its_page()
         .unwrap()
         .unwrap()
         .0;
-    let response = page(State(build_test_app_state(db, None)), Path(page_id))
-        .await
-        .unwrap();
+    let response = page(
+        State(build_test_app_state(db, None)),
+        Path(page_id),
+        Query(Default::default()),
+    )
+    .await
+    .unwrap();
     assert!(response.0.contains("/anime/mal/800"));
 }
 
@@ -471,9 +556,16 @@ async fn navigation_browser_preview() {
             )
             .unwrap();
         }
+        if id == 200 {
+            seed_review(&db, row.id, id, 7).await;
+        }
     }
     let detail = anilist::parse_media_node(&json!({"id":600,"type":"ANIME","title":{"english":"BOCCHI THE ROCK!"},"relations":{"edges":[{"relationType":"SEQUEL","node":{"id":700,"type":"ANIME","title":{"english":"BOCCHI THE ROCK! Season 2"},"format":"TV","status":"NOT_YET_RELEASED","seasonYear":2027,"coverImage":{"large":"/preview/poster/700"}}}]}})).unwrap();
     metadata_cache::upsert_provider(&db, 600, None, &detail)
+        .await
+        .unwrap();
+    let detail = anilist::parse_media_node(&json!({"id":100,"type":"ANIME","title":{"english":"Bakemonogatari"},"relations":{"edges":[{"relationType":"SIDE_STORY","node":{"id":1200,"type":"ANIME","title":{"english":"Monogatari Side Story","romaji":"Koyomi history"},"format":"OVA","status":"FINISHED","seasonYear":2019,"coverImage":{"large":"/preview/poster/1200"}}},{"relationType":"SEQUEL","node":{"id":1300,"type":"ANIME","title":{"english":"Monogatari Future Season"},"format":"ONA","status":"NOT_YET_RELEASED","seasonYear":2099,"coverImage":{"large":"/preview/poster/1300"}}}]}})).unwrap();
+    metadata_cache::upsert_provider(&db, 100, None, &detail)
         .await
         .unwrap();
     crate::models::release_follows::start(&db, 100, "Monogatari", true, true, false)
@@ -506,6 +598,11 @@ async fn navigation_browser_preview() {
             axum::routing::post(groups::follow::save),
         )
         .route("/preview/poster/{id}", axum::routing::get(poster))
+        .route(
+            "/system/edition-review/{id}",
+            axum::routing::get(crate::handlers::edition_review::page)
+                .post(crate::handlers::edition_review::decide),
+        )
         .merge(super::super::detail::routes())
         .nest_service("/static", tower_http::services::ServeDir::new("static"))
         .with_state(state);

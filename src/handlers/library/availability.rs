@@ -2,7 +2,7 @@
 use super::{AvailabilitySegment, CardProgress, inventory};
 use crate::{
     models::{
-        episode_tags,
+        edition_review, episode_tags,
         monitoring::{EpisodeMonitorState, MonitorMode},
         series,
     },
@@ -50,13 +50,14 @@ pub(super) fn upcoming_status(status: &str) -> bool {
     matches!(status, "NOT_YET_RELEASED" | "NOT_YET_AIRED")
 }
 
-pub(super) const OVERVIEW_STATUSES: [&str; 6] = [
+pub(super) const OVERVIEW_STATUSES: [&str; 7] = [
     "following",
     "available",
     "downloading",
     "missing",
     "upcoming",
     "attention",
+    "review",
 ];
 
 impl CardProgress {
@@ -67,8 +68,10 @@ impl CardProgress {
             "downloading" => self.downloading > 0,
             "missing" => self.missing > 0,
             "upcoming" => self.upcoming,
+            "review" => self.reviews > 0,
             "attention" => {
-                !self.files.complete_scan
+                self.reviews > 0
+                    || !self.files.complete_scan
                     || self.unknown > 0
                     || self.files.unmet > 0
                     || self.files.unverified > 0
@@ -259,6 +262,12 @@ pub(super) fn aggregate<'a>(rows: impl Iterator<Item = &'a CardProgress>) -> Car
         p.future += row.future;
         p.unmonitored += row.unmonitored;
         p.unknown += row.unknown;
+        p.reviews += row.reviews;
+        if let Some(review) = row.latest_review
+            && p.latest_review.is_none_or(|latest| review.id > latest.id)
+        {
+            p.latest_review = Some(review);
+        }
     }
     finish(p)
 }
@@ -268,7 +277,7 @@ pub(super) async fn load(
     root: &str,
     library: &[series::Series],
 ) -> Result<HashMap<i64, CardProgress>, sqlx::Error> {
-    let (facts, monitor_rows, tags, details, followed) = tokio::join!(
+    let (facts, monitor_rows, tags, details, followed, reviews) = tokio::join!(
         inventory::load(db,root,library),
         sqlx::query_as::<_,(i64,i32,bool)>("SELECT series_id,episode_number,monitored FROM episode_monitor_state").fetch_all(db),
         episode_tags::active_states_all_series(db),
@@ -280,6 +289,7 @@ pub(super) async fn load(
             UNION SELECT r.anilist_id FROM followed_releases r WHERE NOT EXISTS (
                 SELECT 1 FROM franchise_choices c WHERE c.anilist_id=r.anilist_id AND c.selected=0)
         ) f USING(anilist_id)",series::LOCAL_ANILIST_IDS))).fetch_all(db),
+        edition_review::open_episodes(db),
     );
     let facts = facts?;
     let followed: HashSet<_> = followed?.into_iter().collect();
@@ -302,6 +312,13 @@ pub(super) async fn load(
         if state == "grabbed" {
             downloading.entry(id).or_default().insert(ep);
         }
+    }
+    let mut reviews_by_series = HashMap::new();
+    for review in reviews? {
+        reviews_by_series
+            .entry(review.series_id)
+            .or_insert((0, review))
+            .0 += 1;
     }
     let now = Utc::now().timestamp();
     let mut result = HashMap::new();
@@ -350,8 +367,14 @@ pub(super) async fn load(
         }
         slots.retain(|ep| plausible_episode_count((*ep).into()).is_some());
         let (next_airing, next_airing_at) = next_label(row, facts, detail, now);
+        let (reviews, latest_review) = reviews_by_series
+            .get(&row.id)
+            .map(|&(count, latest)| (count, Some(latest)))
+            .unwrap_or_default();
         let mut p = CardProgress {
             availability_known: facts.have.is_some() && facts.missing.is_some(),
+            reviews,
+            latest_review,
             added_date: added_label(&row.added_at),
             following: followed.contains(&row.id),
             upcoming: upcoming_status(&row.status) || next_airing_at.is_some(),
