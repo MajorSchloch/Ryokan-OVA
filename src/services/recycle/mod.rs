@@ -4,7 +4,7 @@
 //! the file (plus its companions) or the whole series folder moves into
 //! `<recycle_bin_path>/<YYYY-MM-DD>/<entry_id>/` next to a `manifest.json`
 //! that records where it came from. [`restore`] puts an entry back,
-//! [`purge_old`] runs from the hourly `cleanup` task and drops date buckets
+//! [`purge_old`] runs from the hourly `cleanup` task and removes entries
 //! older than `recycle_bin_age_days`, and [`delete_entry`] / [`empty`]
 //! back the "Delete now" / "Empty recycle bin" buttons.
 //!
@@ -268,9 +268,8 @@ enum InnerErr {
     /// The bin itself couldn't be prepared; the delete is refused and the
     /// original stays in place.
     Unwritable(String),
-    /// Moving the payload failed; the original is left in place (moved
-    /// companions are rolled back best-effort) and the caller surfaces
-    /// the error instead of deleting.
+    /// Moving the payload failed. The caller surfaces the failure and
+    /// incomplete rollback copies stay in the bin for recovery.
     Io(String),
 }
 
@@ -420,20 +419,27 @@ fn recycle_blocking(
     if let Err(e) = write_manifest(&entry_dir, &manifest) {
         rollback(&moved, &entry_dir);
         helpers::remove_dir_if_empty(&date_dir);
-        return Err(InnerErr::Io(format!("write manifest failed: {e}")));
+        return Err(InnerErr::Io(format!(
+            "write manifest at {} failed: {e}",
+            entry_dir.display()
+        )));
     }
 
     Ok(Inner::Recycled { entry_id, manifest })
 }
 
 /// Best-effort undo of a partially completed recycle: move everything
-/// that already landed in the entry back to where it came from, then drop
-/// the (now empty) entry directory.
+/// that already landed in the entry back to where it came from. A failed
+/// copy cleanup or rollback can leave the entry holding the only complete
+/// copy, so only remove the directory if it is empty.
 fn rollback(moved: &[(PathBuf, PathBuf)], entry_dir: &Path) {
     for (src, dst) in moved.iter().rev() {
-        let _ = helpers::move_path(dst, src, false);
+        if matches!(fs::symlink_metadata(src), Err(e) if e.kind() == io::ErrorKind::NotFound) {
+            let _ = helpers::move_path(dst, src, false);
+        }
     }
-    let _ = fs::remove_dir_all(entry_dir);
+    let _ = fs::remove_file(entry_dir.join(format!("{MANIFEST_FILE}.tmp")));
+    helpers::remove_dir_if_empty(entry_dir);
 }
 
 fn permanent_delete(kind: RecycleKind, path: &Path) -> io::Result<()> {
@@ -695,7 +701,7 @@ pub async fn delete_entry(bin_path: &str, entry_id: &str) -> Result<u64, String>
     .map_err(|e| format!("delete task panicked: {e}"))?
 }
 
-/// Drop every date bucket older than `age_days`. `age_days <= 0` disables
+/// Remove completed entries in date buckets older than `age_days`. `age_days <= 0` disables
 /// auto-purge (forever-recycle with manual cleanup) and returns an empty
 /// report without touching disk. Non-date-named directories are ignored.
 pub async fn purge_old(bin_path: &str, age_days: i64) -> Result<PurgeReport, String> {
@@ -710,7 +716,7 @@ pub async fn purge_old(bin_path: &str, age_days: i64) -> Result<PurgeReport, Str
         .map_err(|e| format!("purge task panicked: {e}"))?
 }
 
-/// Permanently delete every entry ("Empty recycle bin").
+/// Permanently delete the completed entries listed in the recycle bin.
 pub async fn empty(bin_path: &str) -> Result<PurgeReport, String> {
     let bin = bin_path.trim().to_string();
     if bin.is_empty() {
@@ -723,8 +729,8 @@ pub async fn empty(bin_path: &str) -> Result<PurgeReport, String> {
         .map_err(|e| format!("empty task panicked: {e}"))?
 }
 
-/// `age_days = None` purges every date bucket; `Some(n)` only those whose
-/// date is more than `n` days before `today`.
+/// `age_days = None` purges entries regardless of date; `Some(n)` only
+/// those whose date is more than `n` days before `today`.
 fn purge_blocking(
     bin: &Path,
     today: NaiveDate,
@@ -750,20 +756,32 @@ fn purge_blocking(
             continue;
         }
         let dir = date_entry.path();
-        if let Ok(entries) = fs::read_dir(&dir) {
-            for e in entries.flatten() {
-                let id = e.file_name().to_string_lossy().into_owned();
-                if !is_valid_entry_id(&id) {
-                    continue;
-                }
-                report.entries += 1;
-                report.bytes += read_manifest(&e.path())
-                    .map(|m| m.size_bytes)
-                    .unwrap_or_else(|_| helpers::path_size(&e.path()));
+        for entry in fs::read_dir(&dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
+            let entry = entry.map_err(|e| format!("read {}: {e}", dir.display()))?;
+            let path = entry.path();
+            if !is_valid_entry_id(&entry.file_name().to_string_lossy())
+                || !entry.file_type().is_ok_and(|ty| ty.is_dir())
+            {
+                continue;
             }
+            // A failed move can leave the only complete copy in an entry
+            // without a manifest. It is outside the recycle list and purge.
+            let Ok(manifest) = read_manifest(&path) else {
+                continue;
+            };
+            fs::remove_dir_all(&path).map_err(|e| format!("remove {}: {e}", path.display()))?;
+            report.entries += 1;
+            report.bytes += manifest.size_bytes;
         }
-        fs::remove_dir_all(&dir).map_err(|e| format!("remove {}: {e}", dir.display()))?;
-        report.date_dirs += 1;
+        match fs::remove_dir(&dir) {
+            Ok(()) => report.date_dirs += 1,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::DirectoryNotEmpty | io::ErrorKind::NotFound
+                ) => {}
+            Err(e) => return Err(format!("remove {}: {e}", dir.display())),
+        }
     }
     Ok(report)
 }
