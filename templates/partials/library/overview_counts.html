@@ -6,6 +6,7 @@
     </li>
     {% endif %}
     {% if !availability.files.complete_scan %}<li><span class="availability-dot availability-unknown" aria-hidden="true"></span>Incomplete file scan</li>{% endif %}
+    {% if availability.reviews > 0 %}<li><span class="availability-dot availability-unknown" aria-hidden="true"></span>{{ availability.reviews }} to review</li>{% endif %}
     {% if availability.downloading > 0 %}<li><span class="availability-dot availability-downloading" aria-hidden="true"></span>{{ availability.downloading }} downloading</li>{% endif %}
     {% if availability.missing > 0 %}<li><span class="availability-dot availability-missing" aria-hidden="true"></span>{{ availability.missing }} missing</li>{% endif %}
     {% if availability.future > 0 %}<li><span class="availability-dot availability-future" aria-hidden="true"></span>{{ availability.future }} upcoming</li>{% endif %}

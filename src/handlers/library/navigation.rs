@@ -7,7 +7,7 @@ use crate::{
 };
 use askama::Template;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::Html,
 };
@@ -16,6 +16,8 @@ use std::collections::{HashMap, HashSet};
 
 pub(super) struct FranchiseCard {
     pub path: String,
+    pub has_detail_page: bool,
+    pub statuses: Vec<PosterStatus>,
     pub title: String,
     pub cover_url: String,
     pub search_titles: String,
@@ -29,6 +31,32 @@ pub(super) struct FranchiseCard {
     pub added_date: String,
     added_at: String,
     score: Option<f64>,
+}
+
+pub(super) struct PosterStatus {
+    pub filter: &'static str,
+    pub label: String,
+}
+
+fn poster_statuses(progress: &CardProgress) -> Vec<PosterStatus> {
+    [
+        ("review", format!("{} to review", progress.reviews)),
+        ("missing", format!("{} missing", progress.missing)),
+        (
+            "downloading",
+            format!("{} downloading", progress.downloading),
+        ),
+        ("upcoming", "Upcoming".into()),
+        ("attention", "Needs attention".into()),
+    ]
+    .into_iter()
+    .filter(|(filter, _)| {
+        (*filter != "attention" || progress.reviews == 0)
+            && progress.matches_overview_status(filter)
+    })
+    .take(2)
+    .map(|(filter, label)| PosterStatus { filter, label })
+    .collect()
 }
 
 pub(crate) async fn parent_for_provider(
@@ -233,6 +261,8 @@ pub(super) async fn cards(
             .to_owned();
         cards.push(FranchiseCard {
             path: path(&group),
+            has_detail_page: group.page_id.is_some(),
+            statuses: poster_statuses(&p),
             title: group.title.clone(),
             cover_url: representative
                 .map(|s| s.cover_url.clone())
@@ -290,7 +320,105 @@ struct Release {
     monitoring_label: String,
     next_airing: String,
     added_date: String,
+    matches_filter: bool,
 }
+
+impl Release {
+    fn monitor_filter(&self) -> &'static str {
+        if !self.in_library {
+            "outside"
+        } else if self.progress.monitored {
+            "monitored"
+        } else {
+            "unmonitored"
+        }
+    }
+
+    fn format_filter(&self) -> &'static str {
+        match self.format.as_str() {
+            "ONA" => "tv",
+            kind if kind.starts_with("TV") => "tv",
+            "MOVIE" => "movie",
+            "OVA" => "ova",
+            _ => "other",
+        }
+    }
+
+    fn matches_status(&self, status: &str) -> bool {
+        status.is_empty()
+            || (self.in_library || matches!(status, "upcoming" | "following"))
+                && self.progress.matches_overview_status(status)
+    }
+
+    fn overview_states(&self) -> String {
+        availability::OVERVIEW_STATUSES
+            .into_iter()
+            .filter(|status| self.matches_status(status))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(default)]
+pub struct FranchiseFilters {
+    f_q: String,
+    f_monitor: String,
+    f_type: String,
+    f_status: String,
+}
+
+impl FranchiseFilters {
+    fn normalize(&mut self) {
+        self.f_q = self.f_q.trim().to_owned();
+        for (value, allowed) in [
+            (
+                &mut self.f_monitor,
+                &["monitored", "unmonitored", "outside"][..],
+            ),
+            (&mut self.f_type, &["tv", "movie", "ova", "other"][..]),
+            (&mut self.f_status, &availability::OVERVIEW_STATUSES[..]),
+        ] {
+            if !allowed.contains(&value.as_str()) {
+                value.clear();
+            }
+        }
+    }
+
+    fn active(&self) -> bool {
+        [&self.f_q, &self.f_monitor, &self.f_type, &self.f_status]
+            .iter()
+            .any(|value| !value.is_empty())
+    }
+
+    fn matches(&self, release: &Release, search: &str) -> bool {
+        (search.is_empty()
+            || release.title.to_lowercase().contains(search)
+            || release.aliases.to_lowercase().contains(search))
+            && (self.f_monitor.is_empty() || self.f_monitor == release.monitor_filter())
+            && (self.f_type.is_empty() || self.f_type == release.format_filter())
+            && release.matches_status(&self.f_status)
+    }
+}
+
+struct ReleaseSection {
+    title: &'static str,
+    collapsible: bool,
+    releases: Vec<Release>,
+    visible: usize,
+}
+
+impl ReleaseSection {
+    fn new(title: &'static str, collapsible: bool) -> Self {
+        Self {
+            title,
+            collapsible,
+            releases: Vec::new(),
+            visible: 0,
+        }
+    }
+}
+
 #[derive(Template)]
 #[template(path = "franchise.html")]
 struct FranchisePage {
@@ -298,7 +426,10 @@ struct FranchisePage {
     title_language: String,
     title: String,
     cover_url: String,
-    releases: Vec<Release>,
+    sections: Vec<ReleaseSection>,
+    filters: FranchiseFilters,
+    total_releases: usize,
+    visible_releases: usize,
     tracked: usize,
     upcoming_releases: usize,
     seed: i64,
@@ -308,11 +439,13 @@ struct FranchisePage {
     requirements: super::requirements::RequirementsView,
     activity: Vec<crate::models::library_activity::Activity>,
     future: super::groups::FutureFollowView,
+    search_on_monitoring_change: bool,
 }
 
 pub async fn page(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(mut filters): Query<FranchiseFilters>,
 ) -> Result<Html<String>, (StatusCode, &'static str)> {
     if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err((StatusCode::NOT_FOUND, "Franchise not found."));
@@ -409,99 +542,121 @@ pub async fn page(
     .map_err(read_error)?;
     let inherited =
         crate::services::language_preferences::franchise_config(&state.db, &cfg, &id).await;
-    let releases = group
-        .entries
-        .iter()
-        .map(|e| {
-            let tracked = e.series_id.and_then(|id| by_id.get(&id));
-            let mut summary = e
-                .series_id
-                .and_then(|id| progress_by_id.get(&id))
-                .cloned()
-                .unwrap_or_else(|| CardProgress {
-                    label: "Outside your library".into(),
-                    monitoring_label: "Not monitored".into(),
-                    ..Default::default()
-                });
-            let upcoming = upcoming_release(e, tracked.copied());
-            summary.upcoming |= upcoming;
-            let next = if tracked.is_some() {
-                summary.next_airing.clone()
-            } else if upcoming {
-                format!("Premiere · {}", availability::premiere_label(&e.date))
+    filters.normalize();
+    let search = filters.f_q.to_lowercase();
+    let mut sections = [
+        ReleaseSection::new("In library", false),
+        ReleaseSection::new("Upcoming releases", false),
+        ReleaseSection::new("Other releases", true),
+    ];
+    for e in &group.entries {
+        let tracked = e.series_id.and_then(|id| by_id.get(&id));
+        let mut summary = e
+            .series_id
+            .and_then(|id| progress_by_id.get(&id))
+            .cloned()
+            .unwrap_or_else(|| CardProgress {
+                label: "Outside your library".into(),
+                monitoring_label: "Not monitored".into(),
+                ..Default::default()
+            });
+        let upcoming = upcoming_release(e, tracked.copied());
+        summary.upcoming |= upcoming;
+        let next = if tracked.is_some() {
+            summary.next_airing.clone()
+        } else if upcoming {
+            format!("Premiere · {}", availability::premiere_label(&e.date))
+        } else {
+            String::new()
+        };
+        let mut release = Release {
+            series_id: e.series_id,
+            monitor_mode: if summary.monitoring_label.contains(" of ") {
+                "custom".into()
             } else {
-                String::new()
-            };
-            Release {
-                series_id: e.series_id,
-                monitor_mode: if summary.monitoring_label.contains(" of ") {
-                    "custom".into()
-                } else {
-                    tracked
-                        .map(|s| s.monitor_mode.clone())
-                        .unwrap_or_else(|| "none".into())
-                },
-                requirements_label: match e
-                    .series_id
-                    .and_then(|id| policy_snapshot.get(&id))
-                    .and_then(|p| p.as_ref().ok())
-                    .map(|p| &p.config)
-                    .or_else(|| {
-                        e.series_id
-                            .is_none()
-                            .then(|| inherited.as_ref().ok())
-                            .flatten()
-                    }) {
-                    Some(cfg) => super::requirements::brief(cfg),
-                    None => "Requirements unavailable".into(),
-                },
-                aliases: tracked
-                    .and_then(|s| aliases.get(&s.id))
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        let mut names = vec![
-                            e.title.clone(),
-                            provider_aliases
-                                .get(&e.provider_id)
-                                .cloned()
-                                .unwrap_or_default(),
-                        ];
-                        if let Some(r) = &e.related {
-                            names.extend([
-                                r.title_english.clone(),
-                                r.title_romaji.clone(),
-                                r.title_native.clone(),
-                            ]);
-                        }
-                        names.join("\n")
-                    }),
-                allow_upgrades: tracked.is_some_and(|s| s.allow_upgrades),
-                title: e.title.clone(),
-                cover_url: tracked
-                    .map(|s| s.cover_url.clone())
-                    .or_else(|| e.related.as_ref().map(|r| r.cover_url.clone()))
-                    .unwrap_or_default(),
-                path: super::detail::path(e.library_provider_id.unwrap_or(e.provider_id)),
-                format: e.format.replace('_', " "),
-                date: availability::premiere_label(&e.date),
-                monitoring_label: summary.monitoring_label.clone(),
-                next_airing: next,
-                added_date: summary.added_date.clone(),
-                progress: summary,
-                in_library: tracked.is_some(),
-            }
-        })
-        .collect();
+                tracked
+                    .map(|s| s.monitor_mode.clone())
+                    .unwrap_or_else(|| "none".into())
+            },
+            requirements_label: match e
+                .series_id
+                .and_then(|id| policy_snapshot.get(&id))
+                .and_then(|p| p.as_ref().ok())
+                .map(|p| &p.config)
+                .or_else(|| {
+                    e.series_id
+                        .is_none()
+                        .then(|| inherited.as_ref().ok())
+                        .flatten()
+                }) {
+                Some(cfg) => super::requirements::brief(cfg),
+                None => "Requirements unavailable".into(),
+            },
+            aliases: tracked
+                .and_then(|s| aliases.get(&s.id))
+                .cloned()
+                .unwrap_or_else(|| {
+                    let mut names = vec![
+                        e.title.clone(),
+                        provider_aliases
+                            .get(&e.provider_id)
+                            .cloned()
+                            .unwrap_or_default(),
+                    ];
+                    if let Some(r) = &e.related {
+                        names.extend([
+                            r.title_english.clone(),
+                            r.title_romaji.clone(),
+                            r.title_native.clone(),
+                        ]);
+                    }
+                    names.join("\n")
+                }),
+            allow_upgrades: tracked.is_some_and(|s| s.allow_upgrades),
+            title: e.title.clone(),
+            cover_url: tracked
+                .map(|s| s.cover_url.clone())
+                .or_else(|| e.related.as_ref().map(|r| r.cover_url.clone()))
+                .unwrap_or_default(),
+            path: super::detail::path(e.library_provider_id.unwrap_or(e.provider_id)),
+            format: e.format.replace('_', " "),
+            date: availability::premiere_label(&e.date),
+            monitoring_label: summary.monitoring_label.clone(),
+            next_airing: next,
+            added_date: summary.added_date.clone(),
+            progress: summary,
+            in_library: tracked.is_some(),
+            matches_filter: false,
+        };
+        release.matches_filter = filters.matches(&release, &search);
+        let section = if upcoming {
+            &mut sections[1]
+        } else if release.in_library {
+            &mut sections[0]
+        } else {
+            &mut sections[2]
+        };
+        section.visible += usize::from(release.matches_filter);
+        section.releases.push(release);
+    }
+    let visible_releases = sections.iter().map(|section| section.visible).sum();
     let page = FranchisePage {
         id,
         requirements,
         activity,
         future,
+        search_on_monitoring_change: cfg.search_on_monitoring_change,
         page: "library",
         title_language: loaded.title_language,
         title: group.title,
         cover_url,
-        releases,
+        sections: sections
+            .into_iter()
+            .filter(|section| !section.releases.is_empty())
+            .collect(),
+        filters,
+        total_releases: group.entries.len(),
+        visible_releases,
         tracked: group.tracked,
         upcoming_releases,
         seed,
