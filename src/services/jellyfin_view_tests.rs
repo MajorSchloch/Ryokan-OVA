@@ -105,6 +105,7 @@ async fn view_preserves_kept_files_and_allocates_distinct_future_aliases() {
             .await
             .unwrap();
     assert_ne!(alias, "Original release (2020)");
+    assert!(!view.join("Franchise").exists());
     assert_eq!(
         fs::read(view.join("Original release (2020)/Season 01/S01E01.mkv")).unwrap(),
         b"original media"
@@ -207,5 +208,113 @@ async fn view_recovers_an_interrupted_link_update() {
     assert_eq!(
         final_state.links["Original release (2020)"],
         "Franchise/Release"
+    );
+}
+
+#[tokio::test]
+async fn view_retains_a_removed_release_inside_its_same_named_franchise_parent() {
+    let (_temp, db, root, view, source, id) = setup().await;
+    let title = "Original release (2020)";
+    fs::rename(root.join(title), root.join("staged-release")).unwrap();
+    fs::create_dir(root.join(title)).unwrap();
+    fs::rename(root.join("staged-release"), root.join(title).join(title)).unwrap();
+    let relative = format!("{title}/{title}");
+    series::update_folder(&db, id, &relative).await.unwrap();
+    sync_with_paths(&db, root.clone(), view.clone(), source.clone())
+        .await
+        .unwrap();
+    let alias = view.join(title);
+    let target = fs::read_link(&alias).unwrap();
+    let state_before = fs::read(view.join(STATE)).unwrap();
+    let state_modified = fs::metadata(view.join(STATE)).unwrap().modified().unwrap();
+    sqlx::query("DELETE FROM series WHERE id=?")
+        .bind(id)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    // A failed recycle or explicit keep-files removal leaves this tree.
+    // The franchise parent must not displace its retained release alias.
+    for _ in 0..2 {
+        sync_with_paths(&db, root.clone(), view.clone(), source.clone())
+            .await
+            .unwrap();
+        assert_eq!(fs::read_link(&alias).unwrap(), target);
+        assert_eq!(
+            fs::read(alias.join("Season 01/S01E01.mkv")).unwrap(),
+            b"original media"
+        );
+        assert_eq!(fs::read(view.join(STATE)).unwrap(), state_before);
+        assert_eq!(
+            fs::metadata(view.join(STATE)).unwrap().modified().unwrap(),
+            state_modified
+        );
+    }
+}
+
+#[tokio::test]
+async fn view_rejects_an_unrelated_untracked_folder_with_a_retained_alias_name() {
+    let (_temp, db, root, view, source, id) = setup().await;
+    let title = "Original release (2020)";
+    fs::create_dir(root.join("Different franchise")).unwrap();
+    let relative = format!("Different franchise/{title}");
+    fs::rename(root.join(title), root.join(&relative)).unwrap();
+    series::update_folder(&db, id, &relative).await.unwrap();
+    sync_with_paths(&db, root.clone(), view.clone(), source.clone())
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM series WHERE id=?")
+        .bind(id)
+        .execute(&db)
+        .await
+        .unwrap();
+    fs::create_dir(root.join(title)).unwrap();
+    fs::write(root.join(title).join("unrelated.mkv"), b"unrelated media").unwrap();
+    let target = fs::read_link(view.join(title)).unwrap();
+    let state_before = fs::read(view.join(STATE)).unwrap();
+
+    let error = sync_with_paths(&db, root.clone(), view.clone(), source)
+        .await
+        .unwrap_err();
+    assert!(error.contains("An untracked folder conflicts"), "{error}");
+    assert_eq!(fs::read_link(view.join(title)).unwrap(), target);
+    assert_eq!(fs::read(view.join(STATE)).unwrap(), state_before);
+    assert_eq!(
+        fs::read(root.join(relative).join("Season 01/S01E01.mkv")).unwrap(),
+        b"original media"
+    );
+    assert_eq!(
+        fs::read(root.join(title).join("unrelated.mkv")).unwrap(),
+        b"unrelated media"
+    );
+}
+
+#[tokio::test]
+async fn view_does_not_treat_a_missing_retained_release_as_an_existing_franchise() {
+    let (_temp, db, root, view, source, id) = setup().await;
+    let title = "Original release (2020)";
+    fs::rename(root.join(title), root.join("staged-release")).unwrap();
+    fs::create_dir(root.join(title)).unwrap();
+    fs::rename(root.join("staged-release"), root.join(title).join(title)).unwrap();
+    let relative = format!("{title}/{title}");
+    series::update_folder(&db, id, &relative).await.unwrap();
+    sync_with_paths(&db, root.clone(), view.clone(), source.clone())
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM series WHERE id=?")
+        .bind(id)
+        .execute(&db)
+        .await
+        .unwrap();
+    fs::remove_dir_all(root.join(relative)).unwrap();
+    fs::write(root.join(title).join("untracked.mkv"), b"remaining media").unwrap();
+
+    sync_with_paths(&db, root, view.clone(), source.clone())
+        .await
+        .unwrap();
+    assert_eq!(fs::read_link(view.join(title)).unwrap(), source.join(title));
+    assert_eq!(
+        fs::read(view.join(title).join("untracked.mkv")).unwrap(),
+        b"remaining media"
     );
 }

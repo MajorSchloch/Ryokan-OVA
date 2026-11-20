@@ -3,7 +3,7 @@
 //! `force_copy` seam on `recycle_blocking` / `move_path` because a second
 //! filesystem isn't available in CI.
 
-use super::helpers::{companions, is_valid_entry_id, move_path, verify_size, verify_tree_size};
+use super::helpers::{companions, is_valid_entry_id, move_path, verify_size};
 use super::*;
 use crate::test_support;
 use std::fs;
@@ -191,14 +191,55 @@ fn size_verification_catches_short_copies() {
     write(&b, b"01234");
     let err = verify_size(&a, &b).unwrap_err();
     assert!(err.to_string().contains("size mismatch"), "{err}");
+}
 
-    let s = tmp.path().join("src");
-    let d = tmp.path().join("dst");
-    write(&s.join("Season 01").join("ep.mkv"), b"abcdef");
-    write(&d.join("Season 01").join("ep.mkv"), b"abcdef");
-    assert!(verify_tree_size(&s, &d).is_ok());
-    write(&d.join("Season 01").join("ep.mkv"), b"abc");
-    assert!(verify_tree_size(&s, &d).is_err());
+#[tokio::test]
+async fn cross_filesystem_series_copy_refuses_a_same_size_replacement() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("original");
+    let dst = tmp.path().join("recycled");
+    let original_file = src.join("episode.mkv");
+    write(&original_file, b"original");
+    let paused = super::test_support::PausedCopy::at(&src);
+    let moved = tokio::task::spawn_blocking({
+        let (src, dst) = (src.clone(), dst.clone());
+        move || move_path(&src, &dst, false)
+    });
+    paused.wait().await;
+    let replacement = tmp.path().join("replacement.mkv");
+    write(&replacement, b"replaced");
+    fs::rename(replacement, &original_file).unwrap();
+    paused.release();
+
+    let error = moved.await.unwrap().unwrap_err();
+    assert!(error.to_string().contains("folder changed during copy"));
+    assert_eq!(fs::read(original_file).unwrap(), b"replaced");
+    assert!(!dst.exists());
+    assert!(!tmp.path().join("recycled.ryokan-tmp").exists());
+}
+
+#[test]
+fn rollback_keeps_the_verified_copy_if_its_source_has_been_recreated() {
+    let tmp = tempfile::tempdir().unwrap();
+    let original = tmp.path().join("original.mkv");
+    let bin = tmp.path().join("recycle");
+    let entry = bin.join("2000-01-01/aaaaaaaa");
+    let payload = entry.join("original.mkv");
+    write(&original, b"new arrival");
+    write(&payload, b"previous payload");
+
+    rollback(&[(original.clone(), payload.clone())], &entry);
+
+    assert_eq!(fs::read(original).unwrap(), b"new arrival");
+    assert_eq!(fs::read(&payload).unwrap(), b"previous payload");
+
+    seed_entry(&bin, "2000-01-01", "bbbbbbbb", 10);
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 8, 28).unwrap();
+    let report = purge_blocking(&bin, today, Some(30)).unwrap();
+    assert_eq!(report.entries, 1);
+    assert_eq!(report.date_dirs, 0);
+    assert_eq!(purge_blocking(&bin, today, None).unwrap().entries, 0);
+    assert_eq!(fs::read(payload).unwrap(), b"previous payload");
 }
 
 /// Note: `RECYCLE_UNWRITABLE` is process-global, so the flag assertions

@@ -191,7 +191,7 @@ fn sync_files(
     view: &Path,
     source: &Path,
     aliases: Links,
-    parents: HashSet<String>,
+    mut parents: HashSet<String>,
 ) -> Result<(), String> {
     let root = root.canonicalize().map_err(error)?;
     if !view.is_absolute()
@@ -256,6 +256,14 @@ fn sync_files(
                 .or_insert_with(|| relative.clone());
         }
     }
+    // A kept nested release still owns its franchise parent after its
+    // tracking row is removed. Do not expose that parent as another release
+    // or let it displace the retained alias with the same name.
+    parents.extend(desired.values().filter_map(|relative| {
+        relative
+            .split_once('/')
+            .map(|(parent, _)| parent.to_string())
+    }));
     for name in directories(&root)? {
         if parents.contains(&name) || !media::usable_folder_name(&name) {
             continue;

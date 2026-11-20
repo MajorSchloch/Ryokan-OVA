@@ -311,17 +311,15 @@ async fn bulk_delete_owned(state: AppState, req: BulkDeleteRequest) -> Json<Bulk
 /// String>` so the loop can collect failures into `BulkOutcome.failed`
 /// without aborting the batch.
 ///
-/// Order of operations: torrent-client + folder cleanup via the
+/// Order of operations: folder + download-client cleanup via the
 /// shared [`super::cleanup::cleanup_series_files`] helper (which the
 /// per-row [`super::crud::remove_series`] handler also uses), then
 /// `series::remove` for the DB cascade. If the DB cascade ran first,
 /// the helper's `grabbed_torrents` lookup would return nothing (FK
 /// cascade dropped the rows) and active torrents would orphan.
 ///
-/// Partial cleanup failures (folder refused / error, per-grab client
-/// errors) are surfaced as a `BulkFailure.reason` rather than counted
-/// as success — user needs to know when their `delete_files=true`
-/// request didn't actually remove the files.
+/// A folder failure keeps the series tracked. Client failures and shared
+/// folders still finish the catalog removal and report the incomplete cleanup.
 async fn delete_one_series(
     state: &AppState,
     series_id: i64,
@@ -329,6 +327,11 @@ async fn delete_one_series(
     media_root: Option<&str>,
     recycle_bin_path: &str,
 ) -> Result<(), String> {
+    let _writer_guards = if delete_files {
+        Some(super::cleanup::lock_media_removal().await)
+    } else {
+        None
+    };
     if delete_files {
         // Look up the series row for `folder_name` (and to detect
         // stale-tab IDs where the row no longer exists). Per-row's
@@ -351,17 +354,10 @@ async fn delete_one_series(
             media_root,
             recycle_bin_path,
         )
-        .await?;
+        .await
+        .map_err(|error| error.message)?;
         if !report.is_clean() {
-            // Don't `?` — DB cascade still runs even on partial
-            // cleanup so the library entry disappears (matches
-            // per-row behavior; user asked for delete and we
-            // honor that). Surface the partial-failure detail so
-            // the user sees what didn't get cleaned. If `series::remove`
-            // *also* fails, concat both — the upstream
-            // traversal-refused / seed-rule signal is more interesting
-            // than the bare sqlx error and should land in the failure
-            // modal regardless.
+            // Report what happened and whether the catalog removal also failed.
             let reason = report.partial_failure_reason();
             if let Err(e) = series::remove(&state.db, series_id).await {
                 return Err(format!("{reason}; db remove after partial cleanup: {e}"));
@@ -613,16 +609,14 @@ mod tests {
         };
         let Json(outcome) = bulk_delete(axum::extract::State(state), Json(req)).await;
 
-        // Series is still removed from the library DB (user asked to
-        // delete; we honor that), but the partial-cleanup signal
-        // surfaces as a BulkFailure so the user knows files weren't
-        // touched.
+        // Refusing the unsafe folder stops the whole removal and reports
+        // the failure without affecting other series in the request.
         assert_eq!(outcome.succeeded.len(), 0);
         assert_eq!(outcome.failed.len(), 1);
         let failure = &outcome.failed[0];
         assert_eq!(failure.series_id, series_id);
         assert!(
-            failure.reason.contains("refused") || failure.reason.contains("outside media root"),
+            failure.reason.contains("Refused"),
             "expected traversal-refused reason, got: {}",
             failure.reason
         );
@@ -633,15 +627,12 @@ mod tests {
         assert!(escape.exists(), "escape dir must survive");
         assert!(media_root.exists(), "media_root must survive");
 
-        // DB row is gone (delete still proceeds despite the partial
-        // cleanup; matches per-row's behavior of going through with
-        // the irreversible step).
         let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM series WHERE id = ?")
             .bind(series_id)
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(remaining, 0);
+        assert_eq!(remaining, 1);
     }
 
     /// Issue #28 — pin the `respects_seed_rules` skip-client-delete

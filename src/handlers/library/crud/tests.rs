@@ -1032,10 +1032,17 @@ mod remove_series_safety {
             delete_files: Some(true),
             add_exclusion: None,
         };
-        let resp = remove_series(State(state), AxumJson(form))
+        let (status, resp) = remove_series(State(state), AxumJson(form))
             .await
-            .expect("handler ok");
-        assert_eq!(folder_status(&resp), "refused");
+            .expect_err("unsafe folder must stop removal");
+        assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp["stage"], "cleanup_folder");
+        assert!(
+            crate::models::series::get_by_id(&db, series_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
         assert!(sentinel.exists(), "escape target must survive");
         assert!(escape.exists(), "escape dir must survive");
         assert!(media_root.exists(), "media_root must survive");
@@ -1063,10 +1070,10 @@ mod remove_series_safety {
             delete_files: Some(true),
             add_exclusion: None,
         };
-        let resp = remove_series(State(state), AxumJson(form))
+        let (_, resp) = remove_series(State(state), AxumJson(form))
             .await
-            .expect("handler ok");
-        assert_eq!(folder_status(&resp), "refused");
+            .expect_err("unsafe folder must stop removal");
+        assert_eq!(resp["stage"], "cleanup_folder");
         assert!(
             other.join("ep01.mkv").exists(),
             "another series' file must survive"
@@ -1094,10 +1101,10 @@ mod remove_series_safety {
             delete_files: Some(true),
             add_exclusion: None,
         };
-        let resp = remove_series(State(state), AxumJson(form))
+        let (_, resp) = remove_series(State(state), AxumJson(form))
             .await
-            .expect("handler ok");
-        assert_eq!(folder_status(&resp), "refused");
+            .expect_err("unsafe folder must stop removal");
+        assert_eq!(resp["stage"], "cleanup_folder");
         assert!(other.join("ep01.mkv").exists(), "the library must survive");
     }
 
@@ -1319,6 +1326,123 @@ mod remove_series_safety {
         fn protocol(&self) -> &'static str {
             "torrent"
         }
+    }
+
+    #[rstest::rstest]
+    #[case::single(false)]
+    #[case::bulk(true)]
+    #[tokio::test]
+    async fn failed_recycle_verification_preserves_series_and_download(#[case] bulk: bool) {
+        use crate::handlers::library::bulk::{BulkDeleteRequest, bulk_delete};
+        use crate::services::recycle::test_support::PausedCopy;
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let media = root.join("media");
+        let folder = media.join("Show");
+        let bin = root.join("recycle");
+        std::fs::create_dir_all(&folder).unwrap();
+        let video = folder.join("Show - S01E01.mkv");
+        std::fs::write(&video, b"library video").unwrap();
+
+        let db = in_memory_pool().await;
+        save_config(
+            &db,
+            &Config {
+                media_root: media.to_str().unwrap().into(),
+                recycle_bin_path: bin.to_str().unwrap().into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let series_id = seed_series(&db, 1014, "Show").await;
+        let grab_id =
+            crate::test_support::seed_grabbed_torrent(&db, series_id, "show-hash", "Show", &[1])
+                .await;
+        sqlx::query("INSERT INTO episode_quality_tags(series_id,episode_number,state) VALUES (?,1,'completed')")
+            .bind(series_id).execute(&db).await.unwrap();
+
+        let client = Arc::new(RecordingClient::default());
+        let state = build_test_app_state(db.clone(), Some(client.clone()));
+        let copy = PausedCopy::at(&folder);
+        let removal = tokio::spawn(async move {
+            if bulk {
+                let AxumJson(outcome) = bulk_delete(
+                    State(state),
+                    AxumJson(BulkDeleteRequest {
+                        note: None,
+                        series_ids: vec![series_id],
+                        delete_files: true,
+                        add_exclusion: false,
+                    }),
+                )
+                .await;
+                assert!(outcome.succeeded.is_empty());
+                assert_eq!(outcome.failed.len(), 1);
+                assert_eq!(outcome.failed[0].series_id, series_id);
+                outcome.failed[0].reason.clone()
+            } else {
+                let (status, body) = remove_series(
+                    State(state),
+                    AxumJson(RemoveSeriesForm {
+                        note: None,
+                        id: series_id,
+                        delete_files: Some(true),
+                        add_exclusion: None,
+                    }),
+                )
+                .await
+                .expect_err("folder verification must stop the removal");
+                assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+                assert_eq!(body["ok"], false);
+                assert_eq!(body["stage"], "cleanup_folder");
+                body["message"].as_str().unwrap().to_string()
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), copy.wait())
+            .await
+            .expect("folder copy reached verification");
+        assert!(
+            crate::services::post_processing::POST_PROC_LOCK
+                .try_lock()
+                .is_err()
+        );
+        assert!(
+            crate::services::manual_import::import::IMPORT_LOCK
+                .try_lock()
+                .is_err()
+        );
+        let new_file = folder.join("new-sidecar.nfo");
+        std::fs::write(&new_file, b"added during copy").unwrap();
+        copy.release();
+
+        let message = removal.await.unwrap();
+        assert!(message.contains("The library entry and download jobs were kept."));
+        assert!(std::fs::read(video).is_ok_and(|bytes| bytes == b"library video"));
+        assert!(new_file.exists());
+        assert!(client.deletes.lock().unwrap().is_empty());
+        assert!(
+            crate::models::series::get_by_id(&db, series_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            crate::models::grabbed_torrents::get_by_id(&db, grab_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let tags = crate::models::episode_tags::get_for_series(&db, series_id)
+            .await
+            .unwrap();
+        assert_eq!(tags[&1].state, "completed");
+        let activities = crate::models::library_activity::recent(&db, &[series_id], None)
+            .await
+            .unwrap();
+        assert_eq!(activities[0].action, "Removal needs attention");
+        assert_eq!(activities[0].reason, message);
     }
 
     #[tokio::test]
