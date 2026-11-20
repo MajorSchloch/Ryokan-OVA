@@ -93,16 +93,16 @@ The named volume preserves your data. The image's binary is replaced. Migrations
 Every branch pushed to the repository publishes a multi-arch image tagged with the branch name, with `/` replaced by `-`. A branch called `feat/misgrab-guardrails` is pullable as:
 
 ```bash
-docker pull ghcr.io/johnthreekay/ryokan:feat-misgrab-guardrails
+docker pull ghcr.io/majorschloch/ryokan-ova:feat-misgrab-guardrails
 ```
 
-`main` and `dev` keep their own tags, and releases keep `latest` and the version tags.
+Builds of `main` publish `:main`, `:ova`, and `:latest`. Existing Compose files that use `:ova` keep receiving builds from `main`. Stable version tags also publish `:latest`.
 
 A pull request from a fork cannot publish to the registry, so its build lands as a workflow artifact instead. Open the pull request's **Publish Docker image** run under Actions, download `ryokan-pr-<number>-linux-amd64` (or `-linux-arm64`), and load it:
 
 ```bash
 docker load -i ryokan-pr-123-linux-amd64.tar
-docker run -p 8978:8978 -v ./data:/data ghcr.io/johnthreekay/ryokan:pr-123
+docker run -p 8978:8978 -v ./data:/data ghcr.io/majorschloch/ryokan-ova:pr-123
 ```
 
 The artifact is kept for 14 days after the run.

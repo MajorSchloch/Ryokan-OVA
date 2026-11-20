@@ -1,11 +1,11 @@
 # Ryokan OVA
 
-[![CI](https://github.com/MajorSchloch/Ryokan-OVA/actions/workflows/rust.yml/badge.svg?branch=ova)](https://github.com/MajorSchloch/Ryokan-OVA/actions/workflows/rust.yml?query=branch%3Aova)
+[![CI](https://github.com/MajorSchloch/Ryokan-OVA/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/MajorSchloch/Ryokan-OVA/actions/workflows/rust.yml?query=branch%3Amain)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
-Ryokan OVA is a fork of [Ryokan](https://github.com/johnthreekay/Ryokan). The `ova` branch uses the AniList entry and episode number as the library identity. A release can use a different number for the same episode.
+Ryokan OVA is a fork of [Ryokan](https://github.com/johnthreekay/Ryokan). It uses the AniList entry and episode number as the library identity. A release can use a different number for the same episode.
 
-The Docker image for this branch is `ghcr.io/majorschloch/ryokan-ova:ova`. For an existing library, review the [migration procedure](docs/migration-preview.md) before you change the image. An image update alone cannot move files or repair old episode assignments.
+Use `ghcr.io/majorschloch/ryokan-ova:ova` to follow the builds from `main`. The same builds are available as `:main`. For an existing library, review the [migration procedure](docs/migration-preview.md) before you change the image. An image update alone cannot move files or repair old episode assignments.
 
 ## Upstream project
 
@@ -15,8 +15,8 @@ I built this because Sonarr doesn't always work well for anime. The RSS sync for
 
 ## Documentation
 
-- [Getting Started](https://johnthreekay.github.io/Ryokan/docs/#get-started): install via Docker, configuration, FAQ.
-- [Build from source](https://johnthreekay.github.io/Ryokan/docs/from-source/): for development or non-Docker deployments.
+- [Install with Docker](docs/install.md)
+- [Build from source](docs/from-source.md)
 
 ## Screenshots
 
@@ -33,11 +33,11 @@ Actively developed. Expect occasional bugs. See [Releases](https://github.com/jo
 
 ## Contributing
 
-Bug reports, feature requests, and PRs are welcome. PRs target the `dev` branch and run a verify chain (`cargo fmt`/`clippy -D warnings`/`cargo t`). See [`CLAUDE.md`](CLAUDE.md) for the build prerequisites (`mold` + `clang`, `cmake`, `cargo-nextest`) and the code conventions. Quick version:
+Bug reports, feature requests, and PRs are welcome. Open PRs against `main`. The checks run `cargo fmt`, Clippy with warnings treated as errors, and the test suite. The build prerequisites and code conventions are in [`CLAUDE.md`](CLAUDE.md).
 
 ```bash
-git clone https://github.com/johnthreekay/Ryokan.git
-cd Ryokan
+git clone https://github.com/MajorSchloch/Ryokan-OVA.git
+cd Ryokan-OVA
 cargo run            # serves on 0.0.0.0:8978, creates data/ryokan.db
 ```
 

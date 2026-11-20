@@ -6,7 +6,7 @@
 
 ## Checklist
 
-- [ ] Targets the `dev` branch (not `main`).
+- [ ] Targets `main`.
 - [ ] `cargo fmt --all -- --check` is clean.
 - [ ] `cargo clippy --workspace --all-targets --features test-support -- -D warnings` is clean.
 - [ ] `cargo t` passes.

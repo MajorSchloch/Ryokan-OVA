@@ -1,6 +1,6 @@
 # Review an existing library
 
-The `ova` branch uses the AniList entry and episode number to identify a library episode. A release can use episode zero for a prologue that has library number one. Ryokan can apply this change when it has a verified mapping. An episode count alone cannot identify the prologue.
+Ryokan OVA uses the AniList entry and episode number to identify a library episode. A release can use episode zero for a prologue that has library number one. Ryokan can apply this change when it has a verified mapping. An episode count alone cannot identify the prologue.
 
 New series have upgrades off by default. You can change the default under **Settings → Quality**. Existing series retain their own setting. With upgrades off, a batch can fill missing episodes and keep files that already occupy other slots.
 

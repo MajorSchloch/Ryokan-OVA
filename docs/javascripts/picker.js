@@ -408,7 +408,7 @@
       }
     }
     return `  ryokan:
-    image: ghcr.io/johnthreekay/ryokan:latest
+    image: ghcr.io/majorschloch/ryokan-ova:ova
     container_name: ryokan
     networks: [media]
     ports:

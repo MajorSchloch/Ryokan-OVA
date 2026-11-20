@@ -1,8 +1,7 @@
 name: Rust
 
 # Every branch push runs the verify pass, so a feature branch has
-# checks before its PR is opened and a PR into `dev` (which used to
-# get nothing) shows them on its head commit. `gh-pages` is the docs
+# checks before its PR is opened. `gh-pages` is the docs
 # deploy target and has no Cargo project; pushes there come from the
 # docs workflow's GITHUB_TOKEN, which never triggers other workflows,
 # so the exclusion is belt and braces. The `pull_request` trigger is
@@ -13,7 +12,7 @@ on:
   push:
     branches: [ "**", "!gh-pages" ]
   pull_request:
-    branches: [ "main", "dev" ]
+    branches: [ "main" ]
 
 concurrency:
   group: rust-${{ github.ref }}
@@ -71,7 +70,7 @@ jobs:
         run: python3 -m unittest discover -s scripts -p 'test_repair_anilist_provider_ids.py'
       # `licenses/THIRD_PARTY_LICENSES.html` is regenerated and
       # auto-committed by `.github/workflows/license-notices.yml` on
-      # push to `dev` when Cargo.lock changes. No freshness check
+      # push to `main` when Cargo.lock changes. No freshness check
       # here — contributors never need to run `cargo about generate`
       # locally; the dedicated workflow keeps the file current.
       - name: Clippy

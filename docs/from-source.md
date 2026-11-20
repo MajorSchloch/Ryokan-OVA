@@ -1,6 +1,6 @@
 # Build from source
 
-You don't need this if you run the Docker image. This page is for contributing to Ryokan or running pre-release commits from the `dev` branch.
+Use these instructions to contribute to Ryokan OVA or run the `main` branch from source.
 
 ## What you need
 
@@ -50,8 +50,8 @@ cargo install cargo-nextest --locked
 ## Clone and run
 
 ```sh
-git clone https://github.com/johnthreekay/Ryokan.git
-cd Ryokan
+git clone https://github.com/MajorSchloch/Ryokan-OVA.git
+cd Ryokan-OVA
 cargo run                # http://localhost:8978; creates data/ryokan.db on first run
 ```
 
