@@ -1866,6 +1866,7 @@ async fn main() {
                 let state = recent_state.clone();
                 async move {
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                    let mut turn = services::recent_episodes::SearchTurn::default();
                     loop {
                         interval.tick().await;
                         let Ok(Some(cfg)) = models::config::get_config(&state.db).await else { continue; };
@@ -1879,7 +1880,7 @@ async fn main() {
                             .bind(services::recent_episodes::TASK).fetch_optional(&state.db).await.ok().flatten().flatten();
                         if elapsed.is_some_and(|minutes| minutes < i64::from(cfg.rss_interval_minutes.clamp(1,60))) { continue; }
                         if models::scheduled_tasks::mark_started(&state.db, services::recent_episodes::TASK,"Checking aired monitored episodes missing on disk").await.is_err() { continue; }
-                        let outcome = services::recent_episodes::run_once(&state).await;
+                        let outcome = services::recent_episodes::run_once(&state, &mut turn).await;
                         let (status, detail) = match outcome { Ok(detail) => ("ok",detail), Err(error) => ("error",error) };
                         let _ = models::scheduled_tasks::mark_finished(&state.db, services::recent_episodes::TASK,status,&detail).await;
                     }

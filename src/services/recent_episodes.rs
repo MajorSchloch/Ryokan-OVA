@@ -3,9 +3,11 @@
 //! whether a source is usable. A queued source is never reported as an import.
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use serde_json::Value;
 use sqlx::SqlitePool;
+use tokio::time::Instant;
 
 use crate::AppState;
 use crate::models::{config, download_clients, grabbed_torrents, library_activity, series};
@@ -21,6 +23,10 @@ const COOLDOWN_HELD: &str = "Automatic recovery held";
 const PASS_LIMIT: usize = 12;
 const PRIORITY_SHARE: usize = 4;
 static RUN_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(Default::default);
+
+/// Carries the older-gap reservation across passes.
+#[derive(Default)]
+pub struct SearchTurn(usize);
 
 // The same airing evidence is used during discovery and immediately before
 // dispatch. Calendar timestamps win over date-only metadata. A finished series
@@ -310,10 +316,11 @@ fn next_target(
     }
 }
 
-pub async fn run_once(state: &AppState) -> Result<String, String> {
+pub async fn run_once(state: &AppState, turn: &mut SearchTurn) -> Result<String, String> {
     let _run = RUN_LOCK
         .try_lock()
         .map_err(|_| "Missing episode check is already running")?;
+    let started = Instant::now();
     let cfg = config::get_config(&state.db)
         .await
         .map_err(|e| e.to_string())?
@@ -321,6 +328,7 @@ pub async fn run_once(state: &AppState) -> Result<String, String> {
     if !enabled(&cfg) {
         return Ok("Automatic missing episode recovery is disabled".into());
     }
+    let deadline = started + Duration::from_secs(cfg.rss_interval_minutes.clamp(1, 60) as u64 * 60);
     let mut candidates = targets(&state.db, &cfg).await?;
     let series_ids: Vec<_> = candidates
         .iter()
@@ -357,8 +365,11 @@ pub async fn run_once(state: &AppState) -> Result<String, String> {
     let mut held = 0;
     let mut errors = 0;
     let mut cooldown_series = HashSet::new();
+    // Complete the admitted search and its history before stopping. Always
+    // allow one search so a slow discovery scan cannot prevent progress.
     while checked < PASS_LIMIT
-        && let Some(t) = next_target(&mut recent, &mut older, checked)
+        && (checked == 0 || Instant::now() < deadline)
+        && let Some(t) = next_target(&mut recent, &mut older, turn.0)
     {
         if cooldown_series.contains(&t.series_id)
             || slots
@@ -411,6 +422,7 @@ pub async fn run_once(state: &AppState) -> Result<String, String> {
             return Err("Could not record automatic episode check".into());
         }
         checked += 1;
+        turn.0 = (turn.0 + 1) % PRIORITY_SHARE;
         let outcome =
             crate::handlers::library::search::run_recent_missing_target(state, t.clone()).await;
         let (status, reason) = match outcome {
