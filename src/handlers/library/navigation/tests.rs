@@ -141,6 +141,118 @@ async fn parent_page_is_read_only_and_links_releases_by_provider_identity() {
     );
 }
 
+#[tokio::test]
+async fn release_rows_support_watch_order_and_hiding_unfollowed() {
+    let db = in_memory_pool().await;
+    let original = release(&db, 100, "Original", "Franchise").await;
+    let prequel = release(&db, 200, "Prequel", "Franchise").await;
+    sqlx::query("UPDATE series SET monitor_mode = 'none' WHERE id IN (?, ?)")
+        .bind(original.id)
+        .bind(prequel.id)
+        .execute(&db)
+        .await
+        .unwrap();
+    let detail = anilist::parse_media_node(&json!({
+        "id": 100, "type": "ANIME", "title": {"english": "Original"},
+        "format": "TV", "status": "FINISHED", "episodes": 12,
+        "startDate": {"year": 2020, "month": 1, "day": 1},
+        "relations": {"edges": [
+            {"relationType": "PREQUEL", "node": {"id": 200, "type": "ANIME",
+                "title": {"english": "Prequel"}, "startDate": {"year": 2022, "month": 1, "day": 1}}},
+            {"relationType": "SIDE_STORY", "node": {"id": 300, "type": "ANIME",
+                "title": {"english": "Side story"}, "startDate": {"year": 2024, "month": 1, "day": 1}}}
+        ]}
+    })).unwrap();
+    metadata_cache::upsert_provider(&db, 100, None, &detail)
+        .await
+        .unwrap();
+    let detail = anilist::parse_media_node(&json!({
+        "id": 200, "type": "ANIME", "title": {"english": "Prequel"},
+        "format": "TV", "status": "FINISHED", "episodes": 12,
+        "startDate": {"year": 2022, "month": 1, "day": 1}
+    }))
+    .unwrap();
+    metadata_cache::upsert_provider(&db, 200, None, &detail)
+        .await
+        .unwrap();
+    crate::models::release_follows::start(&db, 100, "Franchise", true, true, false)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO franchise_choices(anilist_id, follow_id, title, selected)
+                 SELECT 100, id, 'Original', 1 FROM release_follows WHERE anilist_id = 100",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+
+    let page_id = library_layout::page_for_provider(&db, 100)
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    let render = |filters| {
+        page(
+            State(build_test_app_state(db.clone(), None)),
+            Path(page_id.clone()),
+            Query(filters),
+        )
+    };
+    let rows = |html: String| {
+        let document = scraper::Html::parse_document(&html);
+        let row =
+            scraper::Selector::parse("[data-franchise-list] > [data-franchise-release]").unwrap();
+        let title = scraper::Selector::parse("h4 a").unwrap();
+        document
+            .select(&row)
+            .map(|entry| {
+                (
+                    entry
+                        .select(&title)
+                        .next()
+                        .unwrap()
+                        .text()
+                        .collect::<String>(),
+                    entry.attr("data-followed") == Some("true"),
+                    entry.attr("hidden").is_some(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        rows(render(FranchiseFilters::default()).await.unwrap().0),
+        [
+            ("Original".into(), true, false),
+            ("Prequel".into(), false, false),
+            ("Side story".into(), false, false),
+        ]
+    );
+    let filters = FranchiseFilters {
+        f_order: "watch".into(),
+        f_hide_unfollowed: "1".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        rows(render(filters).await.unwrap().0),
+        [
+            ("Prequel".into(), false, true),
+            ("Original".into(), true, false),
+            ("Side story".into(), false, true),
+        ]
+    );
+}
+
+#[test]
+fn watch_order_falls_back_when_links_are_conflicting_or_outside_the_franchise() {
+    let mut entries = [groups::Entry::default(), groups::Entry::default()];
+    entries[0].provider_id = 1;
+    entries[0].watch_predecessors = vec![2];
+    entries[1].provider_id = 2;
+    entries[1].watch_predecessors = vec![1];
+    assert_eq!(watch_ranks(&entries[..1]), None);
+    assert_eq!(watch_ranks(&entries), None);
+}
+
 async fn index_html(db: &SqlitePool, individual: Option<&str>, cookie: Option<&str>) -> String {
     index_html_search(db, individual, cookie, "").await
 }

@@ -107,6 +107,7 @@ pub(super) struct Entry {
     pub(super) season: String,
     pub(super) series_id: Option<i64>,
     pub(super) files: String,
+    pub(super) watch_predecessors: Vec<i64>,
     links: Vec<RelationLabel>,
 }
 
@@ -315,6 +316,13 @@ impl Catalog {
                 links.sort_by(|a, b| (&a.label, &a.peer).cmp(&(&b.label, &b.peer)));
                 let entry = self.entries.get_mut(&id).unwrap();
                 entry.provider_id = id;
+                entry.watch_predecessors = self
+                    .neighbors
+                    .get(&id)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|(peer, label)| (*label == "Sequel to").then_some(*peer))
+                    .collect();
                 entry.links = links;
             }
             let rows: Vec<_> = members

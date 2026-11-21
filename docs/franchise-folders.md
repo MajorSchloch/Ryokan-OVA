@@ -2,15 +2,17 @@
 
 The library uses a general franchise model. A franchise can contain one release or many releases. Its selected releases retain their AniList IDs, episode numbers, monitoring settings, and individual metadata.
 
-The physical layout is `<media root>/<franchise>/<release>/...`. Existing flat release folders remain supported. Folder names do not define watch order. Release order and a future recommended watch order belong to franchise metadata.
+The physical layout is `<media root>/<franchise>/<release>/...`. Existing flat release folders remain supported. The franchise page uses release metadata to order its rows.
 
 ## Browse and manage franchises
 
 The library opens with one poster per franchise, including one-off titles. Select **Show individual releases** to see separate release cards and use release bulk actions. This preference survives reloads and visits to the table view.
 
-Library search finds a franchise by any known member title, including English, Romaji, and native names. A custom-list filter includes a franchise when one of its tracked releases belongs to the list. Sorting uses the franchise title, its latest addition, or the main title's personal score.
+Franchise posters show up to two alternate names for the main release when available. Library search finds a franchise by any known member title, including English, Romaji, and native names. A custom-list filter includes a franchise when one of its tracked releases belongs to the list. Sorting uses the franchise title, its latest addition, or the main title's personal score.
 
-Open a franchise poster to see covers, formats, dates, monitoring and follow settings in premiere order. Parent and release bars distinguish available, downloading, missing, future, unmonitored and unknown episodes. Only aired, monitored episodes absent from disk and active downloads count as missing. Unreleased and unmonitored episodes stay neutral. Existing files remain visible even when monitoring is off. Partial premiere dates retain their precision instead of inventing a day.
+Open a franchise poster to see release rows with covers, formats, dates, monitoring and follow settings. The default order is **Premiere date**. **Watch order** uses known prequel and sequel links within the franchise and falls back to premiere order if the links conflict or are unavailable. Releases with no episode monitoring or follow selection appear dimmed. Use **Hide releases with no monitoring or follow** to hide those rows.
+
+Parent and release bars distinguish available, downloading, missing, future, unmonitored and unknown episodes. Only aired, monitored episodes absent from disk and active downloads count as missing. Unreleased and unmonitored episodes stay neutral. Partial premiere dates retain their precision.
 
 **Choose releases & follow** separates current release choices from future formats. Existing library entries keep their monitoring and files. Selected outside entries are added with episodes monitored. One follow covers the franchise. Main-title, folder and file-preview details are under **Advanced organization**. **Save selection and follow** saves the choices; **Back to franchise** and **Cancel** leave without saving.
 

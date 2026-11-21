@@ -206,6 +206,9 @@
             <p class="series-title" title="{{ franchise.title }}">{{ franchise.title }}</p>
         </a>
         <div class="series-info">
+            {% if !franchise.alternate_titles.is_empty() %}
+            <p class="franchise-card-aliases">{{ franchise.alternate_titles|join(" · ") }}</p>
+            {% endif %}
             {% if !franchise.statuses.is_empty() %}
             <ul class="franchise-card-statuses" aria-label="Release status">
                 {% for status in franchise.statuses %}

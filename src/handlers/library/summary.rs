@@ -317,22 +317,26 @@ pub async fn titles(
                 .get(&s.id)
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
             {
-                for field in ["title_english", "title_romaji", "title_native"] {
-                    if let Some(title) = value.get(field).and_then(|v| v.as_str()) {
-                        names.push(title.into());
-                    }
-                }
-                if let Some(synonyms) = value.get("synonyms").and_then(|s| s.as_array()) {
-                    names.extend(
-                        synonyms
-                            .iter()
-                            .filter_map(|v| v.as_str().map(str::to_owned)),
-                    );
-                }
+                append_provider_titles(&mut names, &value);
             }
             (s.id, names.join("\n"))
         })
         .collect())
+}
+
+fn append_provider_titles(names: &mut Vec<String>, detail: &serde_json::Value) {
+    for field in ["title_english", "title_romaji", "title_native"] {
+        if let Some(title) = detail.get(field).and_then(|v| v.as_str()) {
+            names.push(title.into());
+        }
+    }
+    if let Some(synonyms) = detail.get("synonyms").and_then(|v| v.as_array()) {
+        names.extend(
+            synonyms
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned)),
+        );
+    }
 }
 
 /// Cached provider titles for outside-library releases on a franchise page.
@@ -346,16 +350,100 @@ pub async fn provider_titles(
         .map(|(id, json)| {
             let mut names = Vec::new();
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
-                for key in ["title_english", "title_romaji", "title_native"] {
-                    if let Some(s) = value.get(key).and_then(|v| v.as_str()) {
-                        names.push(s.to_owned());
-                    }
-                }
-                if let Some(values) = value.get("synonyms").and_then(|v| v.as_array()) {
-                    names.extend(values.iter().filter_map(|v| v.as_str().map(str::to_owned)));
-                }
+                append_provider_titles(&mut names, &value);
             }
             (id, names.join("\n"))
         })
         .collect())
+}
+
+pub(super) fn franchise_title_provider(group: &super::groups::Group) -> Option<i64> {
+    match group.owner {
+        Some(id) if id != 0 => Some(id),
+        _ if group.page_id.is_none() => group
+            .entries
+            .iter()
+            .find(|entry| entry.series_id.is_some())
+            .or_else(|| group.entries.first())
+            .map(|entry| entry.provider_id),
+        _ => None,
+    }
+}
+
+/// The main release supplies display aliases. Other releases still contribute
+/// to franchise search independently of the names printed on its poster.
+pub(super) async fn franchise_owner_titles(
+    db: &SqlitePool,
+    groups: &[super::groups::Group],
+    library: &HashMap<i64, &series::Series>,
+) -> Result<HashMap<i64, String>, sqlx::Error> {
+    let mut owners = HashMap::<i64, Vec<String>>::new();
+    for group in groups {
+        let Some(provider_id) = franchise_title_provider(group) else {
+            continue;
+        };
+        let names = owners.entry(provider_id).or_default();
+        if let Some(entry) = group
+            .entries
+            .iter()
+            .find(|entry| entry.provider_id == provider_id)
+        {
+            if let Some(row) = entry.series_id.and_then(|id| library.get(&id)) {
+                names.extend([
+                    row.title_english.clone(),
+                    row.title_romaji.clone(),
+                    row.title.clone(),
+                ]);
+                names.extend(row.alternate_title_list());
+                names.push(row.title_native.clone());
+            }
+            names.push(entry.title.clone());
+            if let Some(detail) = &entry.related {
+                names.extend([
+                    detail.title_english.clone(),
+                    detail.title_romaji.clone(),
+                    detail.title_native.clone(),
+                ]);
+            }
+        }
+    }
+    let ids: Vec<_> = owners.keys().copied().collect();
+    let scope = serde_json::to_string(&ids).unwrap_or_else(|_| "[]".into());
+    let cached = sqlx::query_as::<_, (i64, String)>(
+        "SELECT provider_id, detail_json FROM series_metadata_cache
+         WHERE provider_id IN (SELECT value FROM json_each(?1))
+         UNION ALL SELECT provider_id, detail_json FROM provider_metadata_cache
+         WHERE provider_id IN (SELECT value FROM json_each(?1))",
+    )
+    .bind(scope)
+    .fetch_all(db)
+    .await?;
+    for (provider_id, raw) in cached {
+        if let Ok(detail) = serde_json::from_str::<serde_json::Value>(&raw)
+            && detail.get("id").and_then(serde_json::Value::as_i64) == Some(provider_id)
+            && let Some(names) = owners.get_mut(&provider_id)
+        {
+            append_provider_titles(names, &detail);
+        }
+    }
+    Ok(owners
+        .into_iter()
+        .map(|(id, names)| (id, names.join("\n")))
+        .collect())
+}
+
+pub(super) fn franchise_display_aliases(
+    group: &super::groups::Group,
+    owner_titles: &HashMap<i64, String>,
+) -> Vec<String> {
+    let mut seen = HashSet::from([group.title.trim().to_lowercase()]);
+    franchise_title_provider(group)
+        .and_then(|id| owner_titles.get(&id))
+        .into_iter()
+        .flat_map(|names| names.lines())
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && seen.insert(name.to_lowercase()))
+        .take(2)
+        .map(str::to_owned)
+        .collect()
 }

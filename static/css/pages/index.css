@@ -1313,12 +1313,12 @@
     overflow: hidden;
     transition: border-color 0.2s ease-out;
 }
-.franchise-card:hover, .franchise-card:focus-within,
-.franchise-release-card:hover, .franchise-release-card:focus-visible { border-color: var(--border-accent); }
+.franchise-card:hover, .franchise-card:focus-within { border-color: var(--border-accent); }
 .franchise-card-open:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
 .franchise-card-open { display: block; color: inherit; text-decoration: none; }
 .franchise-card-open:hover .series-title { color: var(--accent); }
 .franchise-card-open .series-title { margin: 0; padding: 12px 12px 0; overflow-wrap: anywhere; }
+.franchise-card-aliases { margin: 0 0 8px; color: var(--text); font-size: .75rem; line-height: 1.4; overflow-wrap: anywhere; }
 .franchise-card-statuses { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; padding: 0; margin: 0 0 6px; }
 .franchise-status {
     display: inline-flex;
@@ -1352,20 +1352,10 @@ a.franchise-status:hover { border-color: currentColor; text-decoration: underlin
 .franchise-heading .card-progress { max-width: 440px; border-radius: var(--radius-pill); }
 .franchise-section-heading { display: flex; align-items: baseline; gap: 16px; margin-bottom: 16px; }
 .franchise-section-heading h3 { margin: 0; }
-.franchise-release-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
-.franchise-release-card { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 16px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-lg); background-color: var(--bg-card); text-decoration: none; color: var(--text); }
-.franchise-release-cover { aspect-ratio: 2 / 3; overflow: hidden; border-radius: var(--radius-md); background-color: var(--bg-elevated); }
-.franchise-release-info { min-width: 0; }
-.franchise-release-info h5 { margin: 0 0 8px; overflow-wrap: anywhere; line-height: 1.4; font-size: 1rem; }
-.franchise-release-info p { margin: 8px 0 0; font-size: 12px; }
-.franchise-release-info .series-meta { flex-wrap: wrap; }
-.franchise-release-membership { color: var(--text); }
 @media (max-width: 640px) {
     .franchise-heading { grid-template-columns: 96px minmax(0, 1fr); gap: 16px; }
     .franchise-heading .detail-actions { margin-left: -112px; padding-top: 12px; }
     .franchise-heading .form-hint { margin-left: -112px; }
-    .franchise-release-grid { grid-template-columns: minmax(0, 1fr); }
-    .franchise-release-card { grid-template-columns: 80px minmax(0, 1fr); gap: 12px; }
 }
 @media (prefers-reduced-motion: reduce) { .franchise-card { transition: none; } }
 .library-scope-row { flex-wrap: wrap; }
