@@ -219,6 +219,7 @@ struct SeriesTemplate {
     /// path serves the cached row regardless of staleness; this flag
     /// just makes the situation visible to the user.
     metadata_is_stale: bool,
+    metadata_mapping_hold: Option<crate::models::metadata_cache::MetadataMappingHold>,
     /// Issue #219 — true when AniList marks the title adult and no
     /// indexer is configured. Drives the warning banner: Nyaa lists
     /// adult releases on sukebei, which Ryokan does not search, so the

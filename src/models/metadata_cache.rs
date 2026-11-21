@@ -1,6 +1,7 @@
 use sqlx::{Row, SqlitePool};
 
 use crate::services::anilist::AnimeDetail;
+use serde::{Deserialize, Serialize};
 
 pub const METADATA_REFRESH_INTERVAL_HOURS: i64 = 12;
 
@@ -24,6 +25,148 @@ pub struct CachedSeriesMetadata {
     /// Older than `METADATA_STALE_WARNING_DAYS`; the series page's
     /// warning banner keys on this. `!is_fresh` is not "stale".
     pub is_stale: bool,
+}
+
+/// Display fields from the exact provider entry, with independent freshness
+/// while the authoritative episode snapshot is held.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VerifiedTitleMetadata {
+    title_romaji: String,
+    title_english: String,
+    title_native: String,
+    synonyms: Vec<String>,
+    description: String,
+    genres: Vec<String>,
+    country_of_origin: Option<String>,
+    cover_url: String,
+    banner_url: String,
+    average_score: Option<i32>,
+    average_score_display: Option<String>,
+    score_is_ten_point: bool,
+    score_class: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct MetadataMappingHold {
+    title: VerifiedTitleMetadata,
+    pub reason: String,
+    pub refreshed_at: String,
+    pub is_stale: bool,
+}
+
+impl MetadataMappingHold {
+    pub(crate) fn apply_title(&self, detail: &mut AnimeDetail) {
+        detail.title_romaji.clone_from(&self.title.title_romaji);
+        detail.title_english.clone_from(&self.title.title_english);
+        detail.title_native.clone_from(&self.title.title_native);
+        detail.synonyms.clone_from(&self.title.synonyms);
+        detail.description.clone_from(&self.title.description);
+        detail.genres.clone_from(&self.title.genres);
+        detail
+            .country_of_origin
+            .clone_from(&self.title.country_of_origin);
+        detail.cover_url.clone_from(&self.title.cover_url);
+        detail.banner_url.clone_from(&self.title.banner_url);
+        detail.average_score = self.title.average_score;
+        detail
+            .average_score_display
+            .clone_from(&self.title.average_score_display);
+        detail.score_is_ten_point = self.title.score_is_ten_point;
+        detail.score_class.clone_from(&self.title.score_class);
+    }
+}
+
+pub(crate) async fn save_mapping_hold(
+    db: &SqlitePool,
+    series_id: i64,
+    detail: &AnimeDetail,
+    reason: &str,
+) -> Result<bool, sqlx::Error> {
+    let title = VerifiedTitleMetadata {
+        title_romaji: detail.title_romaji.clone(),
+        title_english: detail.title_english.clone(),
+        title_native: detail.title_native.clone(),
+        synonyms: detail.synonyms.clone(),
+        description: detail.description.clone(),
+        genres: detail.genres.clone(),
+        country_of_origin: detail.country_of_origin.clone(),
+        cover_url: detail.cover_url.clone(),
+        banner_url: detail.banner_url.clone(),
+        average_score: detail.average_score,
+        average_score_display: detail.average_score_display.clone(),
+        score_is_ten_point: detail.score_is_ten_point,
+        score_class: detail.score_class.clone(),
+    };
+    let title_json = serde_json::to_string(&title).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+    let result = sqlx::query(
+        "INSERT INTO series_metadata_mapping_holds (series_id, provider_id, title_json, reason)
+         SELECT id, anilist_id, ?3, ?4 FROM series WHERE id=?1 AND anilist_id=?2
+         ON CONFLICT(series_id) DO UPDATE SET provider_id=excluded.provider_id,
+            title_json=excluded.title_json, reason=excluded.reason, refreshed_at=CURRENT_TIMESTAMP",
+    )
+    .bind(series_id)
+    .bind(detail.id)
+    .bind(title_json)
+    .bind(reason)
+    .execute(db)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+pub async fn get_mapping_hold(
+    db: &SqlitePool,
+    series_id: i64,
+    provider_id: i64,
+) -> Result<Option<MetadataMappingHold>, sqlx::Error> {
+    let row = sqlx::query_as::<_, (String, String, String, bool)>(
+        "SELECT title_json, reason, refreshed_at, refreshed_at < datetime('now', ?3)
+         FROM series_metadata_mapping_holds WHERE series_id=?1 AND provider_id=?2",
+    )
+    .bind(series_id)
+    .bind(provider_id)
+    .bind(format!("-{} days", METADATA_STALE_WARNING_DAYS))
+    .fetch_optional(db)
+    .await?;
+    row.map(|(title_json, reason, refreshed_at, is_stale)| {
+        let title =
+            serde_json::from_str(&title_json).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        Ok(MetadataMappingHold {
+            title,
+            reason,
+            refreshed_at,
+            is_stale,
+        })
+    })
+    .transpose()
+}
+
+pub(crate) async fn has_fresh_mapping_hold(
+    db: &SqlitePool,
+    series_id: i64,
+    provider_id: i64,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM series_metadata_mapping_holds
+         WHERE series_id=?1 AND provider_id=?2 AND refreshed_at >= datetime('now', ?3))",
+    )
+    .bind(series_id)
+    .bind(provider_id)
+    .bind(format!("-{} hours", METADATA_REFRESH_INTERVAL_HOURS))
+    .fetch_one(db)
+    .await
+}
+
+pub(crate) async fn clear_mapping_hold(
+    db: &SqlitePool,
+    series_id: i64,
+    provider_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM series_metadata_mapping_holds WHERE series_id=? AND provider_id=?")
+        .bind(series_id)
+        .bind(provider_id)
+        .execute(db)
+        .await?;
+    Ok(())
 }
 
 pub async fn get_by_series_id(

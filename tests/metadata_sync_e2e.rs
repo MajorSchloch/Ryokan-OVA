@@ -181,22 +181,143 @@ async fn mapped_refresh_keeps_titles_in_canonical_order_and_preserves_cache_on_c
         assert_eq!(cache[&3].title, "Last Regular");
         assert_eq!(cache[&1].aired, "2024-01-01");
     }
-    // A corrupt/ambiguous daily map must not blank previously good metadata.
-    ryokan::services::anibridge::seed_mapping_data_for_tests(&json!({
-        "mal:981": {"anilist:980": {"1-2": "2-3"}},
-        "mal:982": {"anilist:980": {"1": "2"}}
-    }))
-    .await;
-    let tracked = series::get_by_id(&db, id).await.unwrap().unwrap();
-    let error = metadata_sync::refresh_series_metadata(&db, &tracked, false)
-        .await
-        .unwrap_err();
-    assert!(error.starts_with("Episode mapping:"), "{error}");
-    let cached = local_metadata::get_episode_map_for_series(&db, id)
+    // Age both complete caches. The live response has a verified title and
+    // a different episode count. Only the display fields may advance.
+    sqlx::query(
+        "UPDATE series SET title='Old title',episodes=8,cumulative_prior_episodes=19 WHERE id=?",
+    )
+    .bind(id)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE series_metadata_cache SET cached_at='2000-01-01 00:00:00',detail_json=json_set(detail_json,'$.title_english','Old title','$.episodes',8) WHERE series_id=?")
+        .bind(id).execute(&db).await.unwrap();
+    sqlx::query("UPDATE provider_metadata_cache SET cached_at='2000-01-01 00:00:00',detail_json=json_set(detail_json,'$.title_english','Old title','$.episodes',8) WHERE provider_id=980")
+        .execute(&db).await.unwrap();
+    ryokan::models::monitoring::set_episode_monitored(&db, id, 2, false)
         .await
         .unwrap();
-    assert_eq!(cached[&1].title, "Prologue");
-    assert_eq!(cached[&3].title, "Last Regular");
+    sqlx::query("INSERT INTO episode_airings(series_id,episode,airing_at,duration_minutes) VALUES (?,2,1704067200,24)")
+        .bind(id).execute(&db).await.unwrap();
+
+    for (invalid, expected) in [
+        (
+            json!({
+                "mal:981": {"anilist:980": {"1-2": "2-3"}},
+                "mal:982": {"anilist:980": {"1": "2"}}
+            }),
+            "conflicting metadata sources",
+        ),
+        (
+            json!({
+                "mal:981": {"anilist:980": {"1-14": "2-8|2"}},
+                "mal:982": {"anilist:980": {"1": "1"}}
+            }),
+            "unsupported provider episode ranges",
+        ),
+        (
+            json!({"mal:981": {"anilist:979": {"1-2": "1-2"}}}),
+            "none for AniList 980",
+        ),
+    ] {
+        ryokan::services::anibridge::seed_mapping_data_for_tests(&invalid).await;
+        let report = metadata_sync::refresh_all_series_metadata(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            (report.refreshed, report.episode_mapping_held, report.failed),
+            (0, 1, 0)
+        );
+        assert_eq!(report.status(), "warn");
+        let hold = metadata_cache::get_mapping_hold(&db, id, 980)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!hold.is_stale);
+        assert!(hold.reason.contains(expected), "{}", hold.reason);
+        let title: String = sqlx::query_scalar("SELECT json_extract(title_json,'$.title_english') FROM series_metadata_mapping_holds WHERE series_id=?")
+            .bind(id).fetch_one(&db).await.unwrap();
+        assert_ne!(title, "Old title");
+        assert!(!title.is_empty());
+        for cached in [
+            metadata_cache::get_by_series_id(&db, id)
+                .await
+                .unwrap()
+                .unwrap(),
+            metadata_cache::get_by_provider_id(&db, 980)
+                .await
+                .unwrap()
+                .unwrap(),
+        ] {
+            assert!(cached.is_stale);
+            assert_eq!(cached.detail.title_english, "Old title");
+            assert_eq!(cached.detail.episodes, Some(8));
+        }
+        for episodes in [
+            local_metadata::get_episode_map_for_series(&db, id)
+                .await
+                .unwrap(),
+            local_metadata::get_episode_map_for_provider(&db, 980)
+                .await
+                .unwrap(),
+        ] {
+            assert_eq!(episodes.len(), 3);
+            assert_eq!(episodes[&1].title, "Prologue");
+            assert_eq!(episodes[&1].aired, "2024-01-01");
+            assert_eq!(episodes[&3].title, "Last Regular");
+        }
+        let tracked = series::get_by_id(&db, id).await.unwrap().unwrap();
+        assert_eq!(tracked.episodes, Some(8));
+        assert_eq!(tracked.cumulative_prior_episodes, 19);
+    }
+    let monitored: bool = sqlx::query_scalar(
+        "SELECT monitored FROM episode_monitor_state WHERE series_id=? AND episode_number=2",
+    )
+    .bind(id)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert!(!monitored);
+    let airing_at: i64 =
+        sqlx::query_scalar("SELECT airing_at FROM episode_airings WHERE series_id=? AND episode=2")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(airing_at, 1704067200);
+
+    let rebuild = metadata_sync::rebuild_cached_metadata_for_all(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            rebuild.refreshed,
+            rebuild.episode_mapping_held,
+            rebuild.failed
+        ),
+        (0, 1, 0)
+    );
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&maps).await;
+    let report = metadata_sync::refresh_all_series_metadata(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        (report.refreshed, report.episode_mapping_held, report.failed),
+        (1, 0, 0)
+    );
+    assert!(
+        metadata_cache::get_mapping_hold(&db, id, 980)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        metadata_cache::get_by_series_id(&db, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_fresh
+    );
     unsafe {
         std::env::remove_var("RYOKAN_ANILIST_API_BASE");
         std::env::remove_var("JIKAN_API_BASE");
@@ -955,8 +1076,7 @@ async fn refresh_all_series_metadata_skips_when_anilist_is_unreachable() {
     // Drives `run_metadata_sweep` end-to-end with one tracked series
     // whose AL fetch fails. `run_metadata_sweep` MUST NOT panic on a
     // failing series; it counts the failure and continues. The
-    // sweep's (refreshed, failed) tuple is part of the
-    // `system::api_metadata_refresh` handler contract.
+    // sweep's report distinguishes provider failures and mapping holds.
     let _gate = ENV_LOCK.lock().await;
     ryokan::services::anibridge::seed_mapping_data_for_tests(&json!({})).await;
     anilist::reset_state_for_tests();
@@ -974,11 +1094,12 @@ async fn refresh_all_series_metadata_skips_when_anilist_is_unreachable() {
     let db = in_memory_pool().await;
     seed_minimal_series(&db, 9999).await;
 
-    let (refreshed, failed) = metadata_sync::refresh_all_series_metadata(&db)
+    let report = metadata_sync::refresh_all_series_metadata(&db)
         .await
         .expect("no other sweep holds the lock");
-    assert_eq!(refreshed, 0);
-    assert_eq!(failed, 1);
+    assert_eq!(report.refreshed, 0);
+    assert_eq!(report.episode_mapping_held, 0);
+    assert_eq!(report.failed, 1);
 
     unsafe {
         std::env::remove_var("RYOKAN_ANILIST_API_BASE");
@@ -1071,10 +1192,13 @@ async fn manual_rebuild_drops_the_jikan_negative_cache_and_refetches_titles() {
     let series_id = seed_minimal_series_tv(&db, 5556).await;
     seed_jikan_sentinel(&db, 88888).await;
 
-    let (rebuilt, skipped, failed) = metadata_sync::rebuild_cached_metadata_for_all(&db)
+    let report = metadata_sync::rebuild_cached_metadata_for_all(&db)
         .await
         .expect("no other sweep holds the lock");
-    assert_eq!((rebuilt, skipped, failed), (1, 0, 0));
+    assert_eq!(
+        (report.refreshed, report.episode_mapping_held, report.failed),
+        (1, 0, 0)
+    );
 
     assert_eq!(
         jikan_sentinel_rows(&db, 88888).await,
