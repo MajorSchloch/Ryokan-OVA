@@ -802,10 +802,25 @@ pub async fn series_detail(
     } else {
         Vec::new()
     };
+    let automatic_checks = if let Some(id) = db_id
+        && episodes
+            .iter()
+            .any(|ep| ep.monitored && !ep.unaired && !ep.downloaded && !ep.pending_grab)
+    {
+        crate::services::recent_episodes::last_checks(&state.db, &[id])
+            .await
+            .ok()
+    } else {
+        None
+    };
     let template = SeriesTemplate {
         files,
         requirements,
         activity,
+        automatic_checks,
+        automatic_recovery_off: cfg
+            .as_ref()
+            .is_some_and(|cfg| !crate::services::recent_episodes::enabled(cfg)),
         page: "library".to_string(),
         route_id: db_id.unwrap_or(provider_id),
         parent_franchise,

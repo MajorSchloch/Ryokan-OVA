@@ -172,6 +172,8 @@ struct SeriesTemplate {
     files: summary::FileSummary,
     requirements: Option<requirements::RequirementsView>,
     activity: Vec<crate::models::library_activity::Activity>,
+    automatic_checks: Option<std::collections::HashMap<(i64, i32), String>>,
+    automatic_recovery_off: bool,
     detail: anilist::AnimeDetail,
     is_tracked: bool,
     db_id: Option<i64>,
