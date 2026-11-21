@@ -51,6 +51,62 @@ fn empty_anime_detail(id: i64, title_english: &str, episodes: Option<i32>) -> an
 }
 
 #[tokio::test]
+async fn franchise_poster_shows_main_title_aliases_and_keeps_sequel_search() {
+    use crate::{
+        models::{library_layout, metadata_cache},
+        test_support::{build_test_app_state, in_memory_pool, seed_series},
+    };
+
+    let db = in_memory_pool().await;
+    let main = seed_series(&db, 501, "Main title").await;
+    let sequel = seed_series(&db, 502, "The sequel").await;
+    let mut detail = empty_anime_detail(501, "Main title", Some(12));
+    detail.synonyms = vec!["main title".into(), "Provider alias".into()];
+    metadata_cache::upsert_provider(&db, 501, None, &detail)
+        .await
+        .unwrap();
+    let wrong = empty_anime_detail(503, "Unrelated cache title", Some(12));
+    metadata_cache::upsert(&db, main, 501, None, &wrong)
+        .await
+        .unwrap();
+    let mut tx = db.begin().await.unwrap();
+    library_layout::record_move(&mut tx, main, "Main title/Main title")
+        .await
+        .unwrap();
+    library_layout::record_move(&mut tx, sequel, "Main title/The sequel")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    sqlx::query("UPDATE series SET alternate_titles=CASE id WHEN ?1 THEN 'Saved name' ELSE 'Sequel alias' END WHERE id IN(?1,?2)")
+        .bind(main).bind(sequel).execute(&db).await.unwrap();
+
+    let response = index(
+        State(build_test_app_state(db.clone(), None)),
+        Query(LibraryIndexQuery {
+            search: Some("Sequel alias".into()),
+            ..Default::default()
+        }),
+        axum::http::HeaderMap::new(),
+        axum_htmx::HxRequest(false),
+    )
+    .await;
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let document = scraper::Html::parse_document(std::str::from_utf8(&body).unwrap());
+    let poster =
+        scraper::Selector::parse(".franchise-card:not([style]) .franchise-card-aliases").unwrap();
+    let aliases = document
+        .select(&poster)
+        .next()
+        .unwrap()
+        .text()
+        .collect::<String>();
+    assert_eq!(aliases, "Saved name · Provider alias");
+}
+
+#[tokio::test]
 async fn series_page_explains_missing_episodes_with_recorded_automatic_checks() {
     use crate::models::{library_activity, metadata_cache};
     use crate::services::recent_episodes;

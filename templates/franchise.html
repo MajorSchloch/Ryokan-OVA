@@ -34,37 +34,37 @@
         <label class="form-group">Monitoring<select name="f_monitor"><option value="">All releases</option>{% for (key, label) in [("monitored", "Monitored"), ("unmonitored", "Unmonitored"), ("outside", "Outside library")] %}<option value="{{ key }}"{% if filters.f_monitor == *key %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
         <label class="form-group">Format<select name="f_type"><option value="">All formats</option>{% for (key, label) in [("tv", "TV / online series"), ("movie", "Movies"), ("ova", "OVAs"), ("other", "Other")] %}<option value="{{ key }}"{% if filters.f_type == *key %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
         <label class="form-group">Status<select name="f_status"><option value="">All states</option>{% for (key, label) in [("following", "Selected in follow"), ("available", "Has downloads"), ("downloading", "Downloading"), ("missing", "Missing"), ("upcoming", "Upcoming"), ("review", "Needs review"), ("attention", "Needs attention")] %}<option value="{{ key }}"{% if filters.f_status == *key %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+        <label class="form-group">Release order<select name="f_order"><option value="">Premiere date</option><option value="watch"{% if filters.f_order == "watch" %} selected{% endif %}>Watch order</option></select></label>
+        <label class="checkbox-row franchise-hide-unfollowed"><input type="checkbox" name="f_hide_unfollowed" value="1"{% if filters.f_hide_unfollowed == "1" %} checked{% endif %}> Hide releases with no monitoring or follow</label>
         <noscript><button type="submit" class="btn btn-secondary">Apply filters</button></noscript>
         <a href="?tab=releases" class="btn btn-secondary" data-franchise-reset hx-boost="false">Reset filters</a>
         <span data-franchise-count role="status">{{ visible_releases }} of {{ total_releases }} releases</span>
     </form>
+    <p class="form-hint" data-watch-order-hint{% if filters.f_order != "watch" %} hidden{% endif %}>{% if has_watch_order %}Watch order uses known prequel and sequel links. Premiere dates break ties.{% else %}Premiere order is shown because Ryokan has no consistent prequel and sequel order for this franchise.{% endif %}</p>
     {% if search_on_monitoring_change && tracked > 0 %}<p class="form-hint" id="franchise-monitoring-hint">Changing episode monitoring can start an automatic search for that release.</p>{% endif %}
-    {% for section in sections %}
-    {% if section.collapsible %}
-    <details class="franchise-release-section franchise-related" data-franchise-section{% if section.visible == 0 %} hidden{% endif %}{% if filters.active() && section.visible > 0 %} open{% endif %}>
-        <summary>{{ section.title }} <span class="section-count" data-franchise-section-count>{{ section.visible }}</span></summary>
-    {% else %}
-    <section class="franchise-release-section" data-franchise-section aria-label="{{ section.title }}"{% if section.visible == 0 %} hidden{% endif %}>
-        <h4>{{ section.title }} <span class="section-count" data-franchise-section-count>{{ section.visible }}</span></h4>
-    {% endif %}
-    <div class="franchise-release-grid">
-    {% for release in section.releases %}
-    <article class="franchise-release-card" data-franchise-release data-title="{{ release.title }}&#10;{{ release.aliases }}" data-format="{{ release.format_filter() }}" data-monitor="{{ release.monitor_filter() }}" data-states="{{ release.overview_states() }}"{% if !release.matches_filter %} hidden{% endif %}>
+    <ol class="franchise-release-list" data-franchise-list role="list" aria-label="Franchise releases">
+    {% for release in releases %}
+    <li class="franchise-release-row" data-franchise-release data-title="{{ release.title }}&#10;{{ release.aliases }}" data-format="{{ release.format_filter() }}" data-monitor="{{ release.monitor_filter() }}" data-states="{{ release.overview_states() }}" data-followed="{{ release.followed }}" data-premiere-rank="{{ release.premiere_rank }}" data-watch-rank="{{ release.watch_rank }}"{% if !release.matches_filter %} hidden{% endif %}>
         <a class="franchise-release-cover" href="{{ release.path }}" aria-label="Open {{ release.title }}">{% if !release.cover_url.is_empty() %}<img src="{{ release.cover_url }}" alt="" loading="lazy">{% else %}<span class="series-cover-placeholder">No Image</span>{% endif %}</a>
         <div class="franchise-release-info">
-            <h5><a href="{{ release.path }}">{{ release.title }}</a></h5>
+            <h4><a href="{{ release.path }}">{{ release.title }}</a></h4>
             <div class="series-meta"><span class="tag tag-res">{{ release.format }}</span><span>{{ release.date }}</span></div>
             <div class="release-monitoring-badges">
                 {% if release.in_library %}<span class="chip chip-dim">{{ release.monitoring_label }}</span>{% else %}<span class="chip chip-dim">Outside library</span>{% endif %}
                 {% if release.progress.following %}<span class="chip">Selected in follow</span>{% endif %}
+                {% if release.upcoming %}<span class="chip">Upcoming</span>{% endif %}
             </div>
-            {% if release.in_library %}
+            {% if !release.next_airing.is_empty() && release.next_airing.as_str() != "Finished" && release.next_airing.as_str() != "TBA" && !release.next_airing.starts_with("Premiere") %}<p class="card-date"><strong>Next episode</strong> {{ release.next_airing }}</p>{% endif %}
+        </div>
+        {% if release.in_library %}
+        <div class="franchise-release-progress">
             {% let availability = &release.progress %}
             {% include "partials/library/overview_counts.html" %}
             {% include "partials/library/availability_bar.html" %}
             {% let files = &release.progress.files %}{% include "partials/library/overview_file_details.html" %}
-            {% endif %}
-            {% if !release.next_airing.is_empty() && release.next_airing.as_str() != "Finished" && release.next_airing.as_str() != "TBA" %}<p class="card-date"><strong>Upcoming</strong> {{ release.next_airing }}</p>{% endif %}
+        </div>
+        {% endif %}
+        <div class="franchise-release-management">
             <div class="release-actions">
                 <a class="btn btn-secondary btn-sm" href="{{ release.path }}">{% if release.in_library %}Episodes &amp; search{% else %}View &amp; add{% endif %}</a>
                 {% if release.progress.downloading > 0 %}<a class="btn btn-ghost btn-sm" href="{{ release.path }}?tab=downloads">Downloads</a>{% endif %}
@@ -84,11 +84,9 @@
             </details>
             {% endif %}
         </div>
-    </article>
+    </li>
     {% endfor %}
-    </div>
-    {% if section.collapsible %}</details>{% else %}</section>{% endif %}
-    {% endfor %}
+    </ol>
     <p data-franchise-empty{% if visible_releases > 0 %} hidden{% endif %}>No releases match these filters.</p>
 </section>
 <section data-title-panel="downloads" class="management-panel"><h3>Downloads</h3><div data-scoped-downloads="/library/title-downloads?franchise_id={{ id }}"><p>Open this tab to load its downloads.</p></div></section>
