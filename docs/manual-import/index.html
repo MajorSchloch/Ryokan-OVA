@@ -1,0 +1,1529 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Self-hosted anime PVR; install, configure, troubleshoot.">
+      
+      
+      
+        <link rel="canonical" href="https://johnthreekay.github.io/Ryokan/docs/manual-import/">
+      
+      
+      
+        <link rel="prev" href="../wanted/">
+      
+      
+        <link rel="next" href="../download-clients/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.71">
+    
+    
+      
+        <title>Importing an existing library - Ryokan</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.e442bf79.min.css">
+      
+        
+          
+        
+        <link rel="stylesheet" href="../assets/stylesheets/modern/palette.b60ce83d.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+    
+    
+      <link rel="stylesheet" href="../stylesheets/ryokan.css">
+    
+      <link rel="stylesheet" href="../stylesheets/picker.css">
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="deep-purple">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-hidden="true"></label>
+    <div data-md-component="skip">
+      <a href="#__skip" class="md-skip">
+        Skip to content
+      </a>
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="Ryokan" class="md-header__button md-logo" aria-label="Ryokan" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 5v16M20.001 19A2 2 0 0 0 22 17V5a2 2 0 0 0-1.999-2L16 3.002A5 5 0 0 0 12 5a5 5 0 0 0-4-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 1.999 2H8a5 5 0 0 1 4 2 5 5 0 0 1 4-2z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Ryokan
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Importing an existing library
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="deep-purple"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="deep-purple" data-md-color-accent="deep-purple"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+        <a href="https://github.com/johnthreekay/Ryokan" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    johnthreekay/Ryokan
+  </div>
+</a>
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    
+      
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="./.." class="md-tabs__link">
+          
+  
+  Getting started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../install/" class="md-tabs__link">
+          
+  
+  Installation
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+      
+    
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../configuration/" class="md-tabs__link">
+          
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../troubleshooting/" class="md-tabs__link">
+        
+  
+  Troubleshooting
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../faq/" class="md-tabs__link">
+        
+  
+  FAQ
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="Ryokan" class="md-nav__button md-logo" aria-label="Ryokan" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 5v16M20.001 19A2 2 0 0 0 22 17V5a2 2 0 0 0-1.999-2L16 3.002A5 5 0 0 0 12 5a5 5 0 0 0-4-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 1.999 2H8a5 5 0 0 1 4 2 5 5 0 0 1 4-2z"/></svg>
+
+    </a>
+    Ryokan
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/johnthreekay/Ryokan" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    johnthreekay/Ryokan
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_1">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Getting started
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Welcome
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quick-start/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Quick start
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../stack-builder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Stack builder
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Installation
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_2">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Installation
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker (recommended)
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Build from source
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Guides
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+            <label class="md-nav__title" for="__nav_3">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Guides
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Configuration
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../system/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Configuration (cont.)
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../scoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How releases are scored
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../calendar/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Calendar
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../wanted/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Wanted
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Importing an existing library
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Importing an existing library
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#before-you-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Before you start
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#scanning" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Scanning
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reading-the-preview" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Reading the preview
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Reading the preview">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#how-ryokan-reads-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        How Ryokan reads names
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#seasons-by-id-not-by-name" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Seasons by id, not by name
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-file-table" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        The file table
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#badges-worth-a-look" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Badges worth a look
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#correcting-a-match" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Correcting a match
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#files-with-no-series-hint" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Files with no series hint
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#importing" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Importing
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Importing">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-report" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        The report
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#running-it-again" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Running it again
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#limits-and-notes" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Limits and notes
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../download-clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Download clients
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../external-accounts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  External accounts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Troubleshooting
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../faq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  FAQ
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#before-you-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Before you start
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#scanning" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Scanning
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reading-the-preview" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Reading the preview
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Reading the preview">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#how-ryokan-reads-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        How Ryokan reads names
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#seasons-by-id-not-by-name" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Seasons by id, not by name
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-file-table" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        The file table
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#badges-worth-a-look" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Badges worth a look
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#correcting-a-match" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Correcting a match
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#files-with-no-series-hint" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Files with no series hint
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#importing" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Importing
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Importing">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-report" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        The report
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#running-it-again" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Running it again
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#limits-and-notes" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Limits and notes
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                <a id="__skip" tabindex="-1"></a>
+                
+                  
+
+  
+  
+
+
+<h1 id="importing-an-existing-library">Importing an existing library<a class="headerlink" href="#importing-an-existing-library" title="Anchor link">&para;</a></h1>
+<p>If you already have anime on disk, you do not have to download it again. <strong>System → Import Library</strong> points Ryokan at a folder you already have, reads the filenames, matches each series against AniList (with MAL as the fallback, so a title AniList doesn't carry still resolves), shows you exactly what it would bring in, and then (once you have checked the matches) hardlinks, copies, or moves the files into your media root and tags every episode the way a finished download would be.</p>
+<h2 id="before-you-start">Before you start<a class="headerlink" href="#before-you-start" title="Anchor link">&para;</a></h2>
+<ul>
+<li>Set a media root under <strong>Settings → General</strong>. Imported files are placed under it, and the wizard will not start without one.</li>
+<li>Point the wizard at a folder <strong>outside</strong> the media root. Everything inside the media root is already Ryokan's, and the wizard refuses to scan it.</li>
+<li>In Docker, the folder has to be mounted into the container, and the path you type is the container path (for example <code>/library</code>, not <code>/srv/media/old-library</code>).</li>
+</ul>
+<h2 id="scanning">Scanning<a class="headerlink" href="#scanning" title="Anchor link">&para;</a></h2>
+<p>The start form takes:</p>
+<ul>
+<li><strong>Folder to scan</strong>: an absolute path. Ryokan walks it recursively, up to eight levels deep.</li>
+<li><strong>How files reach the media root</strong>: Hardlink (recommended), Copy, or Move. Hardlink keeps the original in place and uses no extra space when both folders are on the same filesystem. Copy doubles the disk use. Move frees the source folder. Hardlinks cannot cross filesystems, so if the source and the media root are on different ones the preview warns you that hardlink mode would copy.</li>
+<li><strong>Follow symlinks</strong>: off by default. Libraries that symlink into a downloads folder would otherwise import the same file twice.</li>
+<li><strong>Include hidden files and folders</strong>: off by default. NAS sidecar folders such as <code>@eaDir</code>, <code>.AppleDouble</code>, and <code>lost+found</code> are always skipped.</li>
+</ul>
+<p>Only video files count (<code>.mkv</code>, <code>.mp4</code>, <code>.avi</code>, <code>.wmv</code>, <code>.webm</code>, <code>.m4v</code>, <code>.ts</code>), plus <code>.strm</code> stream links (see the <a href="../faq/#can-a-strm-file-stand-in-for-an-episode">FAQ</a>). Ryokan's own media root and recycle bin are skipped even when they sit inside the folder you chose. Folders it cannot read are counted and skipped, not fatal.</p>
+<p>Matching each series is one AniList lookup, and AniList allows about thirty a minute, so a library with hundreds of shows takes a few minutes on the first scan. The page updates itself when the preview is ready. You can leave it and come back through <strong>System → Import Library</strong>, which lists recent scans, including any still running. A preview stays available for two hours after you last touched it.</p>
+<h2 id="reading-the-preview">Reading the preview<a class="headerlink" href="#reading-the-preview" title="Anchor link">&para;</a></h2>
+<p>The strip at the top counts series and files and how many are new, already in your library, unmatched, or skipped; the bar at the bottom says how many files the import would write. Between them, one card per series, colored by outcome:</p>
+<ul>
+<li><strong>New series</strong> (green): matched on AniList and not in your library. Importing would create it.</li>
+<li><strong>Already in library</strong> (blue): matched to a series you already track, by AniList id (or MAL id for series added through the MAL fallback), never by comparing titles. The card links to the existing series page.</li>
+<li><strong>No match</strong> (gray): AniList returned nothing for the name Ryokan read. Search again with a different title, or skip it.</li>
+<li><strong>Skipped</strong>: you excluded the whole series.</li>
+</ul>
+<h3 id="how-ryokan-reads-names">How Ryokan reads names<a class="headerlink" href="#how-ryokan-reads-names" title="Anchor link">&para;</a></h3>
+<p>The series name comes from the filename first (<code>[SubsPlease] Sousou no Frieren - 05 (1080p).mkv</code> reads as <em>Sousou no Frieren</em>). When a filename carries no name at all (<code>01.mkv</code>, <code>S01E05.mkv</code>, <code>Episode 07.mkv</code>), Ryokan uses the folder above it, skipping folders like <code>Season 01</code>, <code>Specials</code>, or <code>Extras</code> on the way up, so <code>Anime/Naruto/Season 01/01.mkv</code> reads as <em>Naruto</em>. A card whose series name was read from a folder says <strong>name from folder</strong> in its header.</p>
+<p>Episode numbers use the same parser as the rest of Ryokan, so the <code>E07</code> in the preview is the number the import would record. A file that holds several episodes (<code>Title - 05-06.mkv</code>, <code>S01E05-E06</code>) shows the range, <code>E05-E06</code>, and is recorded for each of them. Files that Ryokan cannot number (creditless openings and endings, bare specials, files with no digits) are listed but marked <strong>No episode number</strong> and would not be imported.</p>
+<p>Seasons are read from wherever the name carries them: <code>S02E01</code>, a <code>S2</code> / <code>Season 2</code> / <code>2nd Season</code> / <code>II</code> marker at the end of the title (<code>[SubsPlease] Sousou no Frieren S2 - 05</code> reads as <em>Sousou no Frieren</em>, season 2), a marker on the show's folder (<code>Overlord IV/Overlord - 03.mkv</code>), or a <code>Season 3</code> folder above the file. Files from a season past the first form their own series, because AniList lists each season as its own entry. Ryokan searches "title season 2" first and, if AniList returns nothing, falls back to the bare title and then to the title without its subtitle; the card shows whichever query matched. A year in a filename or folder name (<code>Hunter x Hunter (2011)</code>) is used to prefer the right remake.</p>
+<h3 id="seasons-by-id-not-by-name">Seasons by id, not by name<a class="headerlink" href="#seasons-by-id-not-by-name" title="Anchor link">&para;</a></h3>
+<p>Once the search has found a show, the season itself is resolved through the same TMDB mappings the Sonarr and Radarr integrations use (the anibridge dataset Ryokan already keeps). Those map every AniList entry to a TMDB show and season with episode ranges, which is the numbering a <code>Season 3</code> folder in a Jellyfin or Plex library follows. So "season 3 of Fire Force" is looked up by id rather than guessed from how AniList names the sequel. Two consequences worth knowing:</p>
+<ul>
+<li>Where AniList lists one TMDB season as two entries (split cours), the files split into two cards, one per entry, with the episode range each covers. Where one AniList entry spans two TMDB seasons, <code>S02E05</code> becomes that entry's <strong>E17</strong>; the episode column shows the new number with a <strong>was E05</strong> note. The import records the AniList number, which is what the rest of Ryokan uses.</li>
+<li>Files outside a known mapping, files with conflicting mappings, and combined files that cross AniList entries appear on a separate card with no automatic match. The card explains the problem. Ryokan checks every episode in a combined file before assigning it to an entry. A show with no mapping at all still uses the title matching above.</li>
+</ul>
+<p>A folder with <strong>no season and absolute numbering</strong> (<code>Jujutsu Kaisen - 55.mkv</code>) gets the same treatment through AniList's own sequel chain: the search lands on the first entry, and when file numbers run past its episode count Ryokan follows the TV sequels from it and routes each file to the entry whose cumulative range holds it, renumbered relative to that entry (<code>55</code> becomes <em>JUJUTSU KAISEN Season 3</em> <strong>E08</strong>, with a <strong>was E55</strong> note). Files past the end of a known chain, or combined files crossing its entries, appear on their own card with no automatic match. This is the same relation chain the grab path uses for absolute-numbered releases.</p>
+<p>Both resolvers only run on the automatic pass. A candidate you pick, or a title you type into <strong>Search again</strong>, is taken as given.</p>
+<p>The episode column never shows a season: each AniList season is its own series in Ryokan with its own E1, E2, ... numbering, and its files land in that series' season folder (<code>Season 01</code> unless you changed the season folder template). The card's season chip says which season the group is.</p>
+<h3 id="the-file-table">The file table<a class="headerlink" href="#the-file-table" title="Anchor link">&para;</a></h3>
+<p>Each row shows the file, its episode, the quality Ryokan reads from the filename, what the import would do with it, and where it would land (relative to the media root). The action column is one of:</p>
+<ul>
+<li><strong>Import</strong>: the episode is not in your library yet.</li>
+<li><strong>Replace</strong>: you have the episode at a lower quality and the import would upgrade it.</li>
+<li><strong>Already have</strong>: you have it at equal or better quality; the file is left alone.</li>
+<li><strong>Downloading</strong>: a grab for this episode is in flight.</li>
+<li><strong>Pinned</strong>: the existing episode has a manual quality override and is never touched.</li>
+<li><strong>No episode number</strong>: see above.</li>
+<li><strong>Excluded</strong>: you unticked it.</li>
+<li><strong>Already on disk</strong>: a different file already sits at the destination name and Ryokan has no tag for it (a file dropped in by hand, or a folder scanned twice); it is left alone rather than overwritten, since an overwrite would skip the recycle bin.</li>
+<li><strong>Duplicate name</strong>: another file in the same series lands on the same destination name; only the first is written.</li>
+<li><strong>Special</strong>: the name marks an OVA or special (<code>OVA 01</code>, <code>SP1</code>) and the match is a TV series, so the file is not one of its episodes. It is written into the series' <code>Specials</code> folder under its own name and gets no episode entry. For a series that is itself an OVA the marker is part of its name, and the file imports as an ordinary episode.</li>
+</ul>
+<p>Files land at <code>&lt;media root&gt;/&lt;series folder&gt;/&lt;season folder&gt;/&lt;original filename&gt;</code>. Filenames are kept as they are; renaming into Ryokan's own naming scheme is a separate feature. For a new series the folder name comes from the series folder template in Settings → General → File naming, rendered from the AniList title (the destination column shows it), and if a folder of that name already exists under the media root without a series owning it, the import uses a suffixed name (<code>Show (2)</code>) instead. Titles everywhere in the wizard, the progress messages, and the report follow your <strong>Settings → General → Preferred Title Language</strong>.</p>
+<h3 id="badges-worth-a-look">Badges worth a look<a class="headerlink" href="#badges-worth-a-look" title="Anchor link">&para;</a></h3>
+<ul>
+<li><strong>Check this match</strong>: the AniList title shares little with the name Ryokan read. Look at the alternatives before trusting it.</li>
+<li><strong>Also matched by ...</strong>: two folders resolved to the same AniList series (a rename, a duplicate rip). Both would import into that one series.</li>
+</ul>
+<h2 id="correcting-a-match">Correcting a match<a class="headerlink" href="#correcting-a-match" title="Anchor link">&para;</a></h2>
+<p>Every card has the same controls, and each one updates just that card:</p>
+<ul>
+<li><strong>Change match</strong> opens the picker: the other candidates the search found, in the same rows as the Add Series dialog, each with a <strong>Use</strong> button. Type into its search box to look up any other title (AniList first, MAL as the fallback); results replace the list as you type. A card with no match opens with the picker already expanded. Picking by hand overrides anything the TMDB mapping or sequel chain decided for that card, so its files go back to their parsed episode numbers.</li>
+<li><strong>None of these</strong>: drop the match. The card becomes a no-match card until you pick something.</li>
+<li><strong>Skip</strong>: exclude the whole series. <strong>Include</strong> brings it back.</li>
+<li>The checkbox on each row excludes or includes that file; <strong>All</strong> and <strong>None</strong> in the header do the whole table.</li>
+</ul>
+<h2 id="files-with-no-series-hint">Files with no series hint<a class="headerlink" href="#files-with-no-series-hint" title="Anchor link">&para;</a></h2>
+<p>Files where neither the filename nor any folder above them names a series are listed at the bottom under <strong>Files with no series hint</strong>. Rename the file, or move it into a folder named after the show, and scan again.</p>
+<h2 id="importing">Importing<a class="headerlink" href="#importing" title="Anchor link">&para;</a></h2>
+<p>The bar at the bottom of the preview says how many files would be written and into how many series. <strong>Import</strong> asks you to confirm, then runs in the background; the page shows live progress ("Importing Frieren S01E05, 12 of 40 files") and updates itself when the run is done. You can leave the page and come back through <strong>System → Import Library</strong>.</p>
+<p>For each series with something to write, in order:</p>
+<ol>
+<li>A <strong>new series</strong> is created from the AniList match, exactly as <strong>Add series</strong> would create it, and its metadata (description, episode titles, artwork) is fetched. New series are monitored for <strong>future episodes only</strong>, so an import never kicks off a wave of downloads for the episodes you do not have. Change the monitoring mode on the series page whenever you like. A series that is <strong>already in your library</strong> keeps its monitoring and folder as they are.</li>
+<li>Each file lands at <code>&lt;media root&gt;/&lt;series folder&gt;/&lt;season folder&gt;/&lt;original filename&gt;</code> by hardlink, copy, or move, whichever you picked. Hardlinks that cannot cross a filesystem fall back to a copy. Where the preview said <strong>Replace</strong>, the old file (with its NFO, subtitles, and thumbnail) goes to the recycle bin first when one is configured, otherwise it is deleted; if the bin is configured but not writable, that file is skipped rather than overwritten.</li>
+<li>The series folder is classified the same way the library scan classifies files that appear on disk, so each episode gets its quality tag and grab history; then <code>tvshow.nfo</code>, <code>season.nfo</code>, per-episode NFOs, and the poster / banner / backdrop copies are written.</li>
+</ol>
+<p><strong>Cancel import</strong> stops after the file in progress. Everything already imported stays imported; the report tells you how far it got.</p>
+<h3 id="the-report">The report<a class="headerlink" href="#the-report" title="Anchor link">&para;</a></h3>
+<p>When the run finishes you get a per-series table: created or merged, how many files were imported, replaced, or skipped, and any errors (a permission problem, a refused recycle) inline under the row. <strong>Back to Library</strong> takes you to the new series; <strong>Import another folder</strong> starts a fresh scan.</p>
+<h3 id="running-it-again">Running it again<a class="headerlink" href="#running-it-again" title="Anchor link">&para;</a></h3>
+<p>Importing is safe to repeat. Scan the same folder again and every episode that landed shows as <strong>Already have</strong>; files that are still linked at the destination are skipped without copying. Only files you excluded the first time, or that were added since, count as new.</p>
+<h2 id="limits-and-notes">Limits and notes<a class="headerlink" href="#limits-and-notes" title="Anchor link">&para;</a></h2>
+<ul>
+<li>Only one import runs at a time. Confirming while another is running is refused with "already running".</li>
+<li>The quality shown in the preview is read from the filename only. The import runs the full classifier (ffprobe and all) the way post-processing does, so the tag on the series page can be more specific than the preview's label.</li>
+<li>Files without an episode number are never imported; rename them so the parser can see the number.</li>
+<li>Filenames are kept as they are. Renaming into Ryokan's own naming scheme is a separate feature.</li>
+<li>Folders named after something AniList does not know (<code>misc</code>, <code>To sort</code>) become no-match cards rather than being hidden. Skip them or search for the right title.</li>
+<li>The <strong>Discard preview</strong> button forgets a scan; so does leaving it untouched for two hours. A scan or import still running is never forgotten, however long it takes.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-circle-arrow-up" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m16 12-4-4-4 4M12 16V8"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog" role="status" aria-atomic="true">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      
+      
+        
+        
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":["navigation.tabs","navigation.sections","navigation.top","navigation.tracking","search.suggest","search.highlight","content.code.copy","content.code.annotate"],"redirect":null,"search":"../assets/javascripts/workers/search.c47bb847.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","clipboard.error":"Could not copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.a2388154.min.js"></script>
+      
+        <script src="../javascripts/picker.js"></script>
+      
+    
+  </body>
+</html>

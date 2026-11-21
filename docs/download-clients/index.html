@@ -1,0 +1,1460 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Self-hosted anime PVR; install, configure, troubleshoot.">
+      
+      
+      
+        <link rel="canonical" href="https://johnthreekay.github.io/Ryokan/docs/download-clients/">
+      
+      
+      
+        <link rel="prev" href="../manual-import/">
+      
+      
+        <link rel="next" href="../external-accounts/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.71">
+    
+    
+      
+        <title>Download clients - Ryokan</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.e442bf79.min.css">
+      
+        
+          
+        
+        <link rel="stylesheet" href="../assets/stylesheets/modern/palette.b60ce83d.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+    
+    
+      <link rel="stylesheet" href="../stylesheets/ryokan.css">
+    
+      <link rel="stylesheet" href="../stylesheets/picker.css">
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="deep-purple">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-hidden="true"></label>
+    <div data-md-component="skip">
+      <a href="#__skip" class="md-skip">
+        Skip to content
+      </a>
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="Ryokan" class="md-header__button md-logo" aria-label="Ryokan" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 5v16M20.001 19A2 2 0 0 0 22 17V5a2 2 0 0 0-1.999-2L16 3.002A5 5 0 0 0 12 5a5 5 0 0 0-4-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 1.999 2H8a5 5 0 0 1 4 2 5 5 0 0 1 4-2z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Ryokan
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Download clients
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="deep-purple"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="deep-purple" data-md-color-accent="deep-purple"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+        <a href="https://github.com/johnthreekay/Ryokan" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    johnthreekay/Ryokan
+  </div>
+</a>
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    
+      
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="./.." class="md-tabs__link">
+          
+  
+  Getting started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../install/" class="md-tabs__link">
+          
+  
+  Installation
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+      
+    
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../configuration/" class="md-tabs__link">
+          
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../troubleshooting/" class="md-tabs__link">
+        
+  
+  Troubleshooting
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../faq/" class="md-tabs__link">
+        
+  
+  FAQ
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="Ryokan" class="md-nav__button md-logo" aria-label="Ryokan" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 5v16M20.001 19A2 2 0 0 0 22 17V5a2 2 0 0 0-1.999-2L16 3.002A5 5 0 0 0 12 5a5 5 0 0 0-4-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 1.999 2H8a5 5 0 0 1 4 2 5 5 0 0 1 4-2z"/></svg>
+
+    </a>
+    Ryokan
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/johnthreekay/Ryokan" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    johnthreekay/Ryokan
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_1">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Getting started
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Welcome
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quick-start/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Quick start
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../stack-builder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Stack builder
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Installation
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_2">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Installation
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker (recommended)
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Build from source
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Guides
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+            <label class="md-nav__title" for="__nav_3">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Guides
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Configuration
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../system/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Configuration (cont.)
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../scoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How releases are scored
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../calendar/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Calendar
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../wanted/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Wanted
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../manual-import/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Importing an existing library
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Download clients
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Download clients
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#per-client-setup" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Per-client setup
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#accepted-only-seeding" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Accepted-only seeding
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Accepted-only seeding">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#automatic-source-removal" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Automatic source removal
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#seeding-rules-and-removal-after-import" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Seeding rules and removal after import
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#if-test-connection-fails" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        If "Test connection" fails
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#per-client-download-paths" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Per-client download paths
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#routing-which-client-gets-each-grab" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Routing: which client gets each grab
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../external-accounts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  External accounts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Troubleshooting
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../faq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  FAQ
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#per-client-setup" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Per-client setup
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#accepted-only-seeding" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Accepted-only seeding
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Accepted-only seeding">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#automatic-source-removal" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Automatic source removal
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#seeding-rules-and-removal-after-import" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Seeding rules and removal after import
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#if-test-connection-fails" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        If "Test connection" fails
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#per-client-download-paths" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Per-client download paths
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#routing-which-client-gets-each-grab" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Routing: which client gets each grab
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                <a id="__skip" tabindex="-1"></a>
+                
+                  
+
+  
+  
+
+
+<h1 id="download-clients">Download clients<a class="headerlink" href="#download-clients" title="Anchor link">&para;</a></h1>
+<p>Ryokan supports <strong>qBittorrent</strong>, <strong>Deluge</strong>, <strong>Transmission</strong>, <strong>rTorrent</strong>, <strong>SABnzbd</strong>, and <strong>NZBGet</strong>. You can run more than one at once and Ryokan routes per-grab; the bundled <a href="../quick-start/">quick start</a> walks through deploying one alongside Ryokan and Jellyfin in a single compose.</p>
+<p>This page is the deeper reference: per-client setup walkthroughs, the fields Ryokan needs, common gotchas, plus how Ryokan picks which client to send each grab to. Use it when you're connecting Ryokan to a client you already have running, or when you're trying to figure out why a connection isn't working.</p>
+<h2 id="per-client-setup">Per-client setup<a class="headerlink" href="#per-client-setup" title="Anchor link">&para;</a></h2>
+<p>Pick the tab for your client. Each one covers preparation steps inside the client itself, the fields to fill in under <strong>Settings → Download Clients → Add download client</strong> in Ryokan, and the gotchas worth knowing about.</p>
+<div class="tabbed-set tabbed-alternate" data-tabs="1:6"><input checked="checked" id="__tabbed_1_1" name="__tabbed_1" type="radio" /><input id="__tabbed_1_2" name="__tabbed_1" type="radio" /><input id="__tabbed_1_3" name="__tabbed_1" type="radio" /><input id="__tabbed_1_4" name="__tabbed_1" type="radio" /><input id="__tabbed_1_5" name="__tabbed_1" type="radio" /><input id="__tabbed_1_6" name="__tabbed_1" type="radio" /><div class="tabbed-labels"><label for="__tabbed_1_1">qBittorrent</label><label for="__tabbed_1_2">Deluge</label><label for="__tabbed_1_3">Transmission</label><label for="__tabbed_1_4">rTorrent</label><label for="__tabbed_1_5">SABnzbd</label><label for="__tabbed_1_6">NZBGet</label></div>
+<div class="tabbed-content">
+<div class="tabbed-block">
+<p><strong>Tested against</strong>: qBittorrent 4.x and 5.x. Ryokan auto-detects 5.x's renamed <code>stop</code>/<code>start</code> endpoints (was <code>pause</code>/<code>resume</code> in 4.x) by trying the new names first and falling back, so you don't have to tell Ryokan which version you're on.</p>
+<p><strong>Prepare qBit:</strong></p>
+<ol>
+<li>Open qBit's web UI (default port 8080) and create your admin password if it's still on the random first-run password.</li>
+<li>Nothing to change for qBit's host check. It's on by default, but its <strong>Server domains</strong> list (Tools → Options → Web UI) defaults to <code>*</code>, which accepts <code>qbittorrent:8080</code>. Only if you narrowed that list, add the name Ryokan calls qBit by; otherwise qBit answers 401 even for correct credentials, and Settings → Download Clients shows "qBittorrent Unauthorized" while the web UI works from your browser.</li>
+</ol>
+<p><strong>Add it to Ryokan</strong> (Settings → Download Clients):</p>
+<ul>
+<li><strong>Kind</strong>: qBittorrent</li>
+<li><strong>URL</strong>: <code>http://qbittorrent:8080</code> if Ryokan and qBit share a Docker compose, else your host's LAN IP and the host-mapped port.</li>
+<li><strong>Username</strong> / <strong>Password</strong>: what you log in to the web UI with. qBit re-auths on 403 via session cookie, so Ryokan won't pester you about expired tokens.</li>
+<li><strong>Category</strong>: a distinctive label like <code>ryokan-anime</code>. Ryokan only sees torrents in this category, which keeps it from accidentally touching torrents added by other tools.</li>
+</ul>
+<div class="admonition warning">
+<p class="admonition-title">Silent grab failures</p>
+<p>qBit's <code>POST /torrents/add</code> returns <code>Ok.</code> and fetches the <code>.torrent</code> URL <strong>server-side</strong>. A silent fetch failure (tracker timeout, indexer 404) looks identical to a successful add from Ryokan's perspective. If a grab "vanishes" without showing up in qBit, check qBit's own logs first; that's where the failure lives. <code>docker compose logs qbittorrent | tail -50</code> is usually enough.</p>
+</div>
+</div>
+<div class="tabbed-block">
+<p><strong>Prepare Deluge:</strong></p>
+<ol>
+<li>Open Deluge's web UI (default port 8112) and set a real password; the default is <code>deluge</code>.</li>
+<li>The <strong>Label plugin</strong> is bundled but disabled by default. Ryokan's Test connection enables it automatically on first connect. There's a known upstream Deluge bug where an enabled-but-not-restarted Label plugin leaves RPC methods unregistered for one session; if it doesn't take, click Test connection again.</li>
+</ol>
+<p><strong>Add it to Ryokan</strong> (Settings → Download Clients):</p>
+<ul>
+<li><strong>Kind</strong>: Deluge</li>
+<li><strong>URL</strong>: <code>http://deluge:8112</code> for in-compose, else LAN IP plus port.</li>
+<li><strong>Password</strong>: the web UI password you set above. Deluge has no per-user auth at the API layer; the password is the only credential.</li>
+<li><strong>Label</strong>: <code>ryokan-anime</code> (or your chosen tag). Ryokan adds and filters by this label.</li>
+</ul>
+<div class="admonition info">
+<p class="admonition-title">Two-step connect</p>
+<p><code>auth.login(password)</code> establishes a session, but the freshly-authenticated session isn't connected to any daemon. Every <code>core.*</code> call fails with <code>Unknown method</code> until <code>web.connect(host_id)</code> runs. Ryokan handles this in the connection-test path. If you see "Unknown method" errors after configuring Deluge, it usually means the daemon side restarted and the web process needs a re-connect; clicking Test connection again refreshes it.</p>
+</div>
+</div>
+<div class="tabbed-block">
+<p><strong>Prepare Transmission:</strong></p>
+<ol>
+<li>Open Transmission's web UI (default port 9091) and confirm it loads.</li>
+<li>Set credentials. The linuxserver/transmission image takes them from the <code>USER</code> and <code>PASS</code> environment variables; without them, Transmission accepts unauthenticated connections, which is fine on a localhost-only setup but a problem the moment you expose the web UI.</li>
+</ol>
+<p><strong>Add it to Ryokan</strong> (Settings → Download Clients):</p>
+<ul>
+<li><strong>Kind</strong>: Transmission</li>
+<li><strong>URL</strong>: <code>http://transmission:9091</code> for in-compose, else LAN IP plus port.</li>
+<li><strong>Username</strong> / <strong>Password</strong>: matches the <code>USER</code> and <code>PASS</code> env vars (HTTP Basic auth, not RPC-level). Wrong credentials surface as 401, not as an RPC envelope error.</li>
+<li><strong>Label</strong>: <code>ryokan-anime</code>. Native labels work in Transmission 4.x; on 3.x and earlier Ryokan falls back to a save-path prefix to scope its torrents.</li>
+</ul>
+<div class="admonition info">
+<p class="admonition-title">Session-ID handshake</p>
+<p>Transmission requires a CSRF session ID on every RPC call. Ryokan handles this transparently. Daemon restart rotates the session ID; mid-stream 409s are retried once automatically.</p>
+</div>
+</div>
+<div class="tabbed-block">
+<p>The recommended Docker image is <code>crazymax/rtorrent-rutorrent</code> (linuxserver's rutorrent image was deprecated by its maintainers).</p>
+<p><strong>Prepare rTorrent:</strong></p>
+<ol>
+<li>Set up htpasswd files for the web UI and XML-RPC; the image enforces basic auth when the files exist and runs without auth when they don't. The <a href="../quick-start/#1-run-ryokan-jellyfin-and-your-download-client">quick start's rTorrent tab</a> shows the one-liner that generates both with the same credentials.</li>
+<li>Open ruTorrent's web UI (typically port 8082 host-side in the bundled compose) and confirm it loads with your htpasswd credentials.</li>
+</ol>
+<p><strong>Add it to Ryokan</strong> (Settings → Download Clients):</p>
+<ul>
+<li><strong>Kind</strong>: rTorrent</li>
+<li><strong>URL</strong>: <code>http://rutorrent:8000/RPC2</code> for in-compose. Port 8000 is the dedicated XML-RPC port inside the container; <code>/RPC2</code> is the path. Ryokan reaches it via Docker DNS so the XML-RPC port doesn't need a host-side mapping.</li>
+<li><strong>Username</strong> / <strong>Password</strong>: matches <code>/passwd/rpc.htpasswd</code>. Leave both blank if you skipped htpasswd setup.</li>
+<li><strong>Label</strong>: <code>ryokan-anime</code>. Stored in the <code>custom1</code> field per the ruTorrent label convention.</li>
+</ul>
+<div class="admonition warning">
+<p class="admonition-title"><code>d.erase</code> doesn't touch disk</p>
+<p>rTorrent's docs are explicit: removing a torrent leaves the data in place. Ryokan reads <code>content_path</code> first, calls <code>d.erase</code>, then recursively removes the filesystem path. There's a guard preventing a multi-file torrent dumped at the save root from nuking the entire download directory, but if you've configured rTorrent in an unusual way (no save-path subfolder, all torrents share <code>/downloads</code>) this is the bit to double-check.</p>
+</div>
+<div class="admonition info">
+<p class="admonition-title">Cold-DHT metadata fetches are slow</p>
+<p>rTorrent's metadata-fetch budget is 60s here vs. 10s for the BT clients with trackers; the longer budget is real, not a Ryokan-side throttle. If a magnet-only release without trackers takes a minute to start downloading, that's expected.</p>
+</div>
+</div>
+<div class="tabbed-block">
+<p><strong>Prepare SAB:</strong></p>
+<ol>
+<li>Open SAB's web UI (default port 8080 inside the container; in the bundled compose that's host port 8081). Walk through the first-run wizard.</li>
+<li><strong>Get the API key</strong>: SAB shows it on the wizard's final step, or from <strong>Config → General → Security → API Key</strong> later. Make sure it's the <strong>full</strong> API key, not the read-only <code>nzb_api_key</code>. The Test-connection probe in Ryokan catches a wrong/missing key at config time instead of at first grab.</li>
+<li><strong>Allow the name Ryokan uses</strong>: SAB checks the hostname it is called by. Add <code>sabnzbd</code> (or whatever name is in Ryokan's URL) under <strong>Config → Special → host_whitelist</strong>, Save, and restart SAB. Until then SAB answers Ryokan with "Access denied - Hostname verification failed", which Test connection shows as a 403.</li>
+</ol>
+<p><strong>Add it to Ryokan</strong> (Settings → Download Clients):</p>
+<ul>
+<li><strong>Kind</strong>: SABnzbd</li>
+<li><strong>URL</strong>: <code>http://sabnzbd:8080</code> for in-compose. Note this is the <strong>container</strong> port, not whatever host port you mapped SAB to. Ryokan reaches SAB through Docker's per-compose network where SAB still listens on its native 8080; the host mapping only matters for your browser.</li>
+<li><strong>API Key</strong>: paste the full key.</li>
+<li><strong>Category</strong>: <code>ryokan-anime</code>. SAB auto-creates this category on first connect if it doesn't exist (Ryokan's Test connection handles the create via <code>set_config</code>).</li>
+</ul>
+<div class="admonition info">
+<p class="admonition-title">No per-file selection on the wire</p>
+<p>NZBs are opaque blobs until SAB extracts them. Ryokan's interactive picker still works (it shows the file list for selection if SAB has parsed the headers), but the actual file selection is a no-op at the wire level. SAB downloads the whole NZB, then post-processing imports the files Ryokan wanted and skips the rest.</p>
+</div>
+<div class="admonition tip">
+<p class="admonition-title">Disappearing downloads</p>
+<p>If grabs "vanish" from Ryokan but you can see them downloading in SAB, the category Ryokan was configured to use probably doesn't exist in SAB. Click Test connection to auto-create it; the <a href="../troubleshooting/#sab-downloads-disappear-from-ryokan-but-still-download-in-sab">troubleshooting page</a> has the full diagnosis.</p>
+</div>
+</div>
+<div class="tabbed-block">
+<p>Create a category named <code>ryokan</code> in NZBGet. Give each download its own folder. Keep completed jobs in history until Ryokan imports them.</p>
+<p>In <strong>Settings → Download Clients</strong>, add <strong>NZBGet (Usenet)</strong>. For example, enter <code>http://nzbget:6789</code>, the username and password for a restricted or control account, and category <code>ryokan</code>. Select <strong>Test connection</strong> and save the client. An add-only account cannot read the queue or history.</p>
+<p>If the job ends in <code>/downloads/ryokan/Release</code> and Ryokan sees <code>/mnt/completed/Release</code>, enter <code>/mnt/completed</code> as the download path. Leave the field empty when both programs use the same paths. Ryokan imports from the job folder reported in history. Keep the job name as the folder name if you use a post-processing script.</p>
+<p>Select NZBGet on a <strong>Newznab</strong> indexer to route its NZBs there. You can keep SABnzbd as the Usenet default. Ryokan checks the category and its own job key before it acts. The client’s <strong>Remove completed downloads</strong> and <strong>Remove failed downloads</strong> switches control automatic removal.</p>
+<p>The client uses HTTP Basic authentication and JSON-RPC. <a href="https://nzbget.com/documentation/api/">Official NZBGet API reference</a></p>
+</div>
+</div>
+</div>
+<h2 id="accepted-only-seeding">Accepted-only seeding<a class="headerlink" href="#accepted-only-seeding" title="Anchor link">&para;</a></h2>
+<p>Open <strong>Downloads → Seeding review</strong> to check original torrent files. The policy is off by default. With it off, <strong>Check original source files</strong> records a preview without client control actions. Enable <strong>Stop completed rejected or unverified torrents</strong> to enforce the results after post-processing, about once a minute.</p>
+<p>Acceptance requires a complete native source manifest, saved source-file ownership, actual import coverage, current probe facts, and the effective minimum requirements for every available video. The check uses app defaults, franchise settings, and release overrides. The upgrade target does not control seeding: an acceptable 720p file can seed while Ryokan seeks a 1080p upgrade. A library copy, a Tdarr conversion, a release name, or an old Imported label cannot certify the source.</p>
+<p>Rejected and unverified completed torrents are stopped with their files retained. A partial selection must account for other downloaded media too: file priorities do not prevent uploads. Missing legacy coverage, ambiguous mappings, changed source files, unavailable mounts, and unresolved owners require review. The explicit source check can populate missing probe facts; it cannot invent missing ownership or numbering evidence. Routine checks use the cache and do not launch probes.</p>
+<p>This policy never resumes stopped jobs, changes file priorities, or changes native seed limits. An accepted job that is already paused stays paused. Rejected sources are also retained when automatic failure or misgrab cleanup would remove them; blocklisting and replacement-search rules still apply. Completed-download cleanup can remove only a source that passes a fresh acceptance check. Usenet jobs are unaffected. The client must keep source files itself; Ryokan cannot prevent a native client rule from deleting them.</p>
+<p>BitTorrent can upload pieces during download and before the next check. This feature controls continued seeding after completion. It does not guarantee zero uploads before verification.</p>
+<h3 id="automatic-source-removal">Automatic source removal<a class="headerlink" href="#automatic-source-removal" title="Anchor link">&para;</a></h3>
+<p>Enable <strong>Automatically remove and block rejected or unverifiable sources; keep their files</strong> to reduce routine review. Both policy switches must be on. Ryokan checks missing probe facts in one background operation. Stable rejected or unverifiable completions can then be removed from the client and blocked by exact hash. This does not block a title or franchise. The operation retains source payloads, library files, recovery files, and historical import results. It does not start replacement searches or resume accepted jobs.</p>
+<p>Unavailable mounts or clients, failed probes, changing files or manifests, invalid settings, shared owners, moved imports, and open file selections remain holds. They do not become permanent exclusions. Removal failures retain their block and retry. After native removal, catalog bookkeeping and the recorded activity reason finish together. Source payload cleanup requires a separate operation; native <strong>delete files</strong> is not used.</p>
+<p>Removed sources are under <strong>Removed or blocked sources</strong>. <strong>Reconsider</strong> clears only that policy exclusion. It does not acquire or resume anything, and it does not clear older failed-download blocks. Policy exclusions remain active if automatic removal is later disabled. Source blocks also apply to direct grabs, file-picker completion, and resume actions.</p>
+<p>When exclusions exist, public HTTP torrents are read once and sent as an exact magnet with their announce trackers. Private or webseed-dependent HTTP sources stay on hold because this conversion cannot preserve their transport metadata. Native HTTP compatibility remains when no policy exclusions exist. Conflicting magnet identities require review.</p>
+<h2 id="seeding-rules-and-removal-after-import">Seeding rules and removal after import<a class="headerlink" href="#seeding-rules-and-removal-after-import" title="Anchor link">&para;</a></h2>
+<p>An indexer row can carry a <strong>Seed Ratio</strong> and a <strong>Seed Time</strong> (minutes). Ryokan passes them to the download client when it adds a grab from that indexer, and its own delete actions (deleting an episode, replacing it with an upgrade) leave such a torrent in the client so the client's rules decide when seeding ends. The one exception is a torrent imported in Move mode, which cannot seed once its file has moved. What the client does with the rules, and what "finished seeding" means to it, differs per client:</p>
+<ul>
+<li><strong>qBittorrent</strong>: both rules become per-torrent share limits. A rule you leave empty keeps qBittorrent's global limit for that dimension (before 1.9.3 it switched the limit off for the torrent). Finished means qBittorrent stopped the torrent at its ratio, seeding-time, or inactivity limit. If qBittorrent is set to remove torrents itself when a limit is reached, that works too.</li>
+<li><strong>Transmission</strong>: the ratio becomes a per-torrent ratio limit. Transmission has no total seeding-time limit, so Seed Time becomes its idle limit: the torrent stops after that many minutes without upload activity, which is never earlier than the same number of minutes of seeding and can be later while peers are still pulling. Finished means Transmission stopped the torrent at its ratio or idle limit.</li>
+<li><strong>Deluge</strong>: the ratio becomes a per-torrent stop ratio. Deluge has no seeding-time limit, so Seed Time is ignored. Finished means Deluge paused the torrent at its stop ratio.</li>
+<li><strong>rTorrent</strong>: has no per-torrent limits at all, so neither rule is applied and Ryokan logs a warning for each such grab. Configure a ratio group in <code>.rtorrent.rc</code> instead; the group's rules apply to every item in it. Finished means the ratio group closed the item. A torrent you stopped in ruTorrent stays open and is left alone.</li>
+<li><strong>SABnzbd and NZBGet</strong> do not seed. Enable <strong>Remove completed downloads</strong> to remove an imported job from history.</li>
+</ul>
+<p>Each client row has a <strong>Remove completed downloads</strong> box, on by default. With it on, a torrent is removed from that client, files included, once it has been imported and the client reports it finished; usenet jobs and Move-mode torrents go right after import. Ryokan checks every five minutes. The library keeps its own copy in every mode. Partial and failed imports, and torrents you paused by hand, stay.</p>
+<p>Each row also has a <strong>Remove failed downloads</strong> box, on by default. When the client itself reports a download as failed (SABnzbd's Failed, qBittorrent's error state), Ryokan removes it from the client, files included, before it searches for a replacement. With the box off the failed download stays in the client so you can look at it; the release is blocklisted and the search runs either way.</p>
+<p>For this to work the client has to keep finished downloads long enough for Ryokan to import them, the same requirement Sonarr and Radarr have: SABnzbd should keep completed jobs in its history (its History Retention setting), and a torrent client should pause or stop a torrent when its limit is reached rather than delete it. Ryokan does the deleting once the import is done. If the client removes a download first, Ryokan never sees it finish.</p>
+<h2 id="if-test-connection-fails">If "Test connection" fails<a class="headerlink" href="#if-test-connection-fails" title="Anchor link">&para;</a></h2>
+<p>The most common causes:</p>
+<ul>
+<li><strong>Wrong URL host</strong>: container-name URLs like <code>http://qbittorrent:8080</code> rely on Docker's per-compose DNS. If Ryokan and the client are in separate compose files, run on different hosts, or you have a network plugin that interferes with Docker DNS, swap the container name for your host's LAN IP and the host-mapped port.</li>
+<li><strong>Wrong port</strong>: container port vs. host port matters. The URLs above use container ports (because Ryokan reaches the client over Docker's internal network); the host-mapped port is only for your browser.</li>
+<li><strong>Stuck-on credentials</strong>: qBit's "Unauthorized" with right credentials means its Server domains list leaves out the name Ryokan uses (see the qBittorrent tab above). SAB's "Unauthorized" usually means the read-only <code>nzb_api_key</code> was pasted instead of the full key, and its 403 means the name Ryokan uses isn't in <code>host_whitelist</code> (see the SABnzbd tab).</li>
+</ul>
+<h2 id="per-client-download-paths">Per-client download paths<a class="headerlink" href="#per-client-download-paths" title="Anchor link">&para;</a></h2>
+<p>Each client gets its own <code>download_path</code> config field for cases where Ryokan and the client see the filesystem differently. Common reasons:</p>
+<ul>
+<li>Docker volumes mounted at different host paths.</li>
+<li>Seedboxes accessed over SSHFS where the local mount point doesn't match the seedbox's internal path.</li>
+<li>Existing setups where the client was using <code>/data/torrents</code> and Ryokan's compose mounts at <code>/downloads</code>.</li>
+</ul>
+<p>The translation works as a prefix substitution: when the client reports a path, Ryokan replaces the client's <code>save_path</code> prefix with the configured <code>download_path</code> to get a path Ryokan itself can read. If the client-reported path doesn't start with the expected prefix, Ryokan returns the path unchanged rather than silently rewriting; silent rewrite would mask misconfiguration as a "file not found" error later.</p>
+<p>In the bundled compose (<a href="../quick-start/">quick start</a>), Ryokan and the download client both bind-mount the same host folder at <code>/downloads</code>, so the path is identical on both sides and <code>download_path</code> stays empty.</p>
+<h2 id="routing-which-client-gets-each-grab">Routing: which client gets each grab<a class="headerlink" href="#routing-which-client-gets-each-grab" title="Anchor link">&para;</a></h2>
+<p>When you have multiple download clients configured, Ryokan picks one per-grab based on this chain:</p>
+<ol>
+<li><strong>Per-indexer pin</strong>. A torznab or newznab indexer row has an optional <code>download_client_id</code>. Grabs from that indexer always go to the pinned client, overriding everything below.</li>
+<li><strong>Per-protocol default</strong>. Without a pin, torznab grabs (torrent metadata) go to the torrent default; newznab grabs (NZB metadata) go to the usenet default. Both defaults can coexist (one row per protocol marked <code>is_default</code>).</li>
+<li><strong>Nyaa</strong>. Has its own <code>nyaa_download_client_id</code> config field. Always falls back to the torrent default if unset; Nyaa items are magnets or <code>.torrent</code> URLs, so routing them to a usenet client would just trip the protocol guard at add-time.</li>
+</ol>
+<p>At grab time the chosen client ID is stamped on the <code>grabbed_torrents</code> row, so post-processing routes back through the same client even if you change defaults later.</p>
+<hr />
+<p><em>Last updated: 2026-09-06.</em></p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-circle-arrow-up" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m16 12-4-4-4 4M12 16V8"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog" role="status" aria-atomic="true">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      
+      
+        
+        
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":["navigation.tabs","navigation.sections","navigation.top","navigation.tracking","search.suggest","search.highlight","content.code.copy","content.code.annotate"],"redirect":null,"search":"../assets/javascripts/workers/search.c47bb847.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","clipboard.error":"Could not copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.a2388154.min.js"></script>
+      
+        <script src="../javascripts/picker.js"></script>
+      
+    
+  </body>
+</html>
