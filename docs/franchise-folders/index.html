@@ -1,0 +1,1404 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Install and configure Ryokan OVA to manage your anime library.">
+      
+      
+      
+        <link rel="canonical" href="https://majorschloch.github.io/Ryokan-OVA/docs/franchise-folders/">
+      
+      
+      
+        <link rel="prev" href="../manual-import/">
+      
+      
+        <link rel="next" href="../download-clients/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.71">
+    
+    
+      
+        <title>Franchise folders - Ryokan OVA</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.e442bf79.min.css">
+      
+        
+          
+        
+        <link rel="stylesheet" href="../assets/stylesheets/modern/palette.b60ce83d.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+    
+    
+      <link rel="stylesheet" href="../stylesheets/ryokan.css">
+    
+      <link rel="stylesheet" href="../stylesheets/picker.css">
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="deep-purple">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-hidden="true"></label>
+    <div data-md-component="skip">
+      <a href="#__skip" class="md-skip">
+        Skip to content
+      </a>
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="Ryokan OVA" class="md-header__button md-logo" aria-label="Ryokan OVA" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 5v16M20.001 19A2 2 0 0 0 22 17V5a2 2 0 0 0-1.999-2L16 3.002A5 5 0 0 0 12 5a5 5 0 0 0-4-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 1.999 2H8a5 5 0 0 1 4 2 5 5 0 0 1 4-2z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Ryokan OVA
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Franchise folders
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="deep-purple"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="deep-purple" data-md-color-accent="deep-purple"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+        <a href="https://github.com/MajorSchloch/Ryokan-OVA" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    MajorSchloch/Ryokan-OVA
+  </div>
+</a>
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    
+      
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="./.." class="md-tabs__link">
+          
+  
+  Getting started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../install/" class="md-tabs__link">
+          
+  
+  Installation
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+      
+    
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../configuration/" class="md-tabs__link">
+          
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../troubleshooting/" class="md-tabs__link">
+        
+  
+  Troubleshooting
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../faq/" class="md-tabs__link">
+        
+  
+  FAQ
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="Ryokan OVA" class="md-nav__button md-logo" aria-label="Ryokan OVA" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 5v16M20.001 19A2 2 0 0 0 22 17V5a2 2 0 0 0-1.999-2L16 3.002A5 5 0 0 0 12 5a5 5 0 0 0-4-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 1.999 2H8a5 5 0 0 1 4 2 5 5 0 0 1 4-2z"/></svg>
+
+    </a>
+    Ryokan OVA
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/MajorSchloch/Ryokan-OVA" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    MajorSchloch/Ryokan-OVA
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_1">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Getting started
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Welcome
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quick-start/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Quick start
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../stack-builder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Stack builder
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Installation
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_2">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Installation
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker (recommended)
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker reference
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Build from source
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Guides
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+            <label class="md-nav__title" for="__nav_3">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Guides
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Configuration
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../system/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Configuration (cont.)
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../scoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How releases are scored
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../calendar/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Calendar
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../wanted/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Wanted
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../manual-import/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Importing an existing library
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Franchise folders
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Franchise folders
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#browse-and-manage-franchises" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Browse and manage franchises
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#default-paths-and-existing-libraries" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Default paths and existing libraries
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#browse-releases-before-adding-them" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Browse releases before adding them
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#jellyfin-compatibility-view" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Jellyfin compatibility view
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#review-and-move-a-release" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Review and move a release
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cutover-checks-and-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Cutover checks and recovery
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#verification" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Verification
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../download-clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Download clients
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../external-accounts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  External accounts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Troubleshooting
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../faq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  FAQ
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#browse-and-manage-franchises" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Browse and manage franchises
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#default-paths-and-existing-libraries" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Default paths and existing libraries
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#browse-releases-before-adding-them" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Browse releases before adding them
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#jellyfin-compatibility-view" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Jellyfin compatibility view
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#review-and-move-a-release" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Review and move a release
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cutover-checks-and-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Cutover checks and recovery
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#verification" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Verification
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                <a id="__skip" tabindex="-1"></a>
+                
+                  
+
+  
+  
+
+
+<h1 id="franchise-folders-and-jellyfin-paths">Franchise folders and Jellyfin paths<a class="headerlink" href="#franchise-folders-and-jellyfin-paths" title="Anchor link">&para;</a></h1>
+<p>The library uses a general franchise model. A franchise can contain one release or many releases. Its selected releases retain their AniList IDs, episode numbers, monitoring settings, and individual metadata.</p>
+<p>The physical layout is <code>&lt;media root&gt;/&lt;franchise&gt;/&lt;release&gt;/...</code>. Existing flat release folders remain supported. The franchise page uses release metadata to order its rows.</p>
+<h2 id="browse-and-manage-franchises">Browse and manage franchises<a class="headerlink" href="#browse-and-manage-franchises" title="Anchor link">&para;</a></h2>
+<p>The library opens with one poster per franchise, including one-off titles. Select <strong>Show individual releases</strong> to see separate release cards and use release bulk actions. This preference survives reloads and visits to the table view.</p>
+<p>Franchise posters show up to two alternate names for the main release when available. Library search finds a franchise by any known member title, including English, Romaji, and native names. A custom-list filter includes a franchise when one of its tracked releases belongs to the list. Sorting uses the franchise title, its latest addition, or the main title's personal score.</p>
+<p>Open a franchise poster to see release rows with covers, formats, dates, monitoring and follow settings. The default order is <strong>Premiere date</strong>. <strong>Watch order</strong> uses known prequel and sequel links within the franchise and falls back to premiere order if the links conflict or are unavailable. Releases with no episode monitoring or follow selection appear dimmed. Use <strong>Hide releases with no monitoring or follow</strong> to hide those rows.</p>
+<p>Parent and release bars distinguish available, downloading, missing, future, unmonitored and unknown episodes. Only aired, monitored episodes absent from disk and active downloads count as missing. Unreleased and unmonitored episodes stay neutral. Partial premiere dates retain their precision.</p>
+<p><strong>Choose releases &amp; follow</strong> separates current release choices from future formats. Existing library entries keep their monitoring and files. Selected outside entries are added with episodes monitored. One follow covers the franchise. Main-title, folder and file-preview details are under <strong>Advanced organization</strong>. <strong>Save selection and follow</strong> saves the choices; <strong>Back to franchise</strong> and <strong>Cancel</strong> leave without saving.</p>
+<p>A release detail page links back with <strong>Part of [franchise]</strong>. Releases with no saved parent still offer <strong>Explore franchise</strong>.</p>
+<p>Saved franchises have local page addresses independent of their folder names and provider IDs. Metadata refreshes and identity promotion preserve them. Supported moves preserve the remaining parent's address; moving every member into a new parent keeps previous addresses usable through aliases. Browsing and view changes do not move files or change selections.</p>
+<p>Saved storage membership defines the grouping boundary. Cached provider relations can suggest outside releases, but cannot merge two saved parents. An outside release linked to more than one saved parent is not assigned to either automatically.</p>
+<h2 id="default-paths-and-existing-libraries">Default paths and existing libraries<a class="headerlink" href="#default-paths-and-existing-libraries" title="Anchor link">&para;</a></h2>
+<p>Fresh installations assign a franchise parent to every new release. A one-off uses <code>Title/Title</code>. Names contain no generated date, format, or provider ID. A collision can add a year or numeric suffix. Custom release-folder templates still apply to the release name.</p>
+<p>Storage membership is separate from download follows and selections. A folder move does not create a follow or start a download. Stored membership keeps the library group intact when relation caches expire.</p>
+<p>The path planner uses provider IDs, cached anime relations, and explicit storage choices. It can reuse a known franchise through an untracked intermediate release. Main releases take priority over promotional specials, music, and identified side stories when a new parent needs a name. It does not compare similar title text. An ambiguous link between two saved franchise folders requires review. A later metadata refresh never renames a stored path.</p>
+<p>Existing installations retain their path policy on upgrade. After a preview and backup, stop Ryokan and enable the new default with the existing data and media mounts:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>/app/ryokan --enable-franchise-folders
+</span></code></pre></div>
+<p>This command records existing nested paths and changes future assignments. It moves no files and changes no download selections. It replaces the old default <code>{series.title} ({series.year})</code> template with <code>{series.title}</code>. It preserves custom templates. The command is safe to repeat.</p>
+<p>Add Series, automatic tracking, manual-import previews, and external request lookups use the same planner. A new folder assignment must use <code>Franchise/Release</code> after adoption. Existing flat paths remain valid until an explicit migration.</p>
+<p>The eventual Jellyfin view should show one franchise entry with its releases and watch order inside. Ryokan supplies storage and compatibility support for that view. Its franchise pages do not change Jellyfin’s presentation.</p>
+<h2 id="browse-releases-before-adding-them">Browse releases before adding them<a class="headerlink" href="#browse-releases-before-adding-them" title="Anchor link">&para;</a></h2>
+<p>Release detail pages use provider identities: <code>/anime/anilist/130003</code> for an AniList release, or <code>/anime/mal/5680</code> for a MAL release. The same URL works before and after the release enters the library. Browsing can cache metadata, but does not create a library entry, follow, media folder, or download.</p>
+<p>Search result covers and titles open these Ryokan pages. Provider links remain available separately. Relation cards, franchise pages, and franchise previews also link to release details. A tracked release shows its library controls; an untracked release offers <strong>Add to Library</strong>. Releases with a saved parent link to its franchise page. Other releases offer <strong>Explore franchise</strong>.</p>
+<p>The release <strong>Episodes</strong> tab shows effective audio, subtitle and quality requirements with their source: app, franchise or release. <strong>Edit requirements</strong> opens Settings. Monitoring and upgrade controls apply to that release. <strong>Search monitored episodes</strong> can download matching files; <strong>Choose a batch</strong> opens release selection. Removal keeps its existing confirmation.</p>
+<p><strong>Original language hint</strong> uses AniList's country of origin and is marked as inferred. It does not confirm audio or change requirements. Old caches show <strong>Unknown</strong> until the normal metadata refresh includes country data. Explicit language exceptions remain in effect.</p>
+<p>Legacy <code>/series/&lt;library row id&gt;</code> bookmarks redirect to the provider page. The existing <code>?by=anilist</code> links still identify provider IDs explicitly. Mutation and playback APIs retain their library row IDs. An AniList ID that equals another release's library row ID cannot select that release.</p>
+<p>A franchise remains a Ryokan group of releases. Its follow owner is a release, not a provider identity for the whole franchise. Browsing a release or its franchise preview does not save a follow or move files.</p>
+<h2 id="jellyfin-compatibility-view">Jellyfin compatibility view<a class="headerlink" href="#jellyfin-compatibility-view" title="Anchor link">&para;</a></h2>
+<p>Jellyfin's TV library can interpret a franchise folder as a series and its release folders as seasons. A private Jellyfin 12.4.0 rehearsal confirmed that this loses the releases' separate provider identities.</p>
+<p>The optional compatibility view gives Jellyfin its original flat paths through managed directory links. Ryokan retains the physical franchise paths. The view copies no media. A persisted alias keeps a release's Jellyfin path stable after its physical folder moves.</p>
+<p>Set both variables in Ryokan:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>RYOKAN_JELLYFIN_VIEW_ROOT=/data/anime-jellyfin
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>RYOKAN_JELLYFIN_VIEW_SOURCE=/data/ryokan-anime
+</span></code></pre></div>
+<p>The first path must be writable inside Ryokan. The second names the real-media mount inside Jellyfin. It can differ from the real-media mount inside Ryokan.</p>
+<p>For a media root at <code>/srv/media/anime</code> on the host, the required mounts are:</p>
+<table>
+<thead>
+<tr>
+<th>Consumer</th>
+<th>Host directory</th>
+<th>Container path</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Ryokan</td>
+<td><code>/srv/media/anime</code></td>
+<td><code>/data/anime</code></td>
+</tr>
+<tr>
+<td>Ryokan</td>
+<td><code>/srv/media/anime-jellyfin</code></td>
+<td><code>/data/anime-jellyfin</code></td>
+</tr>
+<tr>
+<td>Jellyfin</td>
+<td><code>/srv/media/anime-jellyfin</code></td>
+<td><code>/data/anime</code></td>
+</tr>
+<tr>
+<td>Jellyfin</td>
+<td><code>/srv/media/anime</code></td>
+<td><code>/data/ryokan-anime</code></td>
+</tr>
+</tbody>
+</table>
+<p>Keep Jellyfin's configured library path at <code>/data/anime</code>. Keep Tdarr on the real media root. Preserve each consumer's existing access permissions.</p>
+<p>Ryokan builds the view at startup, before and after automatic imports, after manual imports, and during file removal. Periodic post-processing also reconciles the view. It retains untracked files and releases removed from Ryokan with their files kept. It removes links whose media folders disappear.</p>
+<p>The view refuses foreign files, changed links, overlapping owners, and another root's state file. Its pending state supports interrupted link updates. Keep <code>.ryokan-library-view.json</code> and the <code>series_library_aliases</code> database table with the recovery material.</p>
+<h2 id="review-and-move-a-release">Review and move a release<a class="headerlink" href="#review-and-move-a-release" title="Anchor link">&para;</a></h2>
+<p>The commands below use placeholders. Replace them with IDs and paths from the reviewed franchise preview.</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>/app/ryokan --preview-library-folder SERIES_ID 'Franchise/Release'
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>/app/ryokan --move-library-folder SERIES_ID 'Franchise/Release'
+</span></code></pre></div>
+<p>The preview is read-only. The move requires Ryokan to be stopped because it takes the application's library lease. Stop other writers and consumer scans for the cutover. Keep torrents seeding. Preserve any existing Tdarr pause.</p>
+<p>Back up both applications' metadata and Compose files before the cutover. Record every old and new path. Initialize and verify the compatibility view before changing Jellyfin's mount. Check current file observations again before applying the reviewed moves.</p>
+<p>The move renames the whole release directory on the same filesystem. It preserves media, subtitles, artwork, NFO bytes, and directory identity. Linked paths, mount changes, occupied destinations, and overlapping owners require review. Resolve affected recycle-bin entries first.</p>
+<p>An interrupted filesystem move leaves a durable recovery marker beside the database. Normal startup refuses that marker. Repeat the same command to finish the move and database update. The marker binds recovery to the original directory inode. The same completed command makes no further change.</p>
+<p>One-off titles can move below their own name, such as <code>Title</code> to <code>Title/Title</code>. The journal protects the intermediate staging step. The reverse command can restore the original flat layout. It refuses to remove a franchise parent that contains other files.</p>
+<p>A tracked release without a current directory receives only its future import path. No empty release directory is created.</p>
+<p>For a saved download follow, after every selected release uses its destination, save that follow's future path:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>/app/ryokan --set-franchise-library-folder OWNER_ANILIST_ID 'Franchise'
+</span></code></pre></div>
+<p>New selected releases then receive paths below that franchise. Existing release paths stay fixed. Selected releases must have a verified AniList identity. Saving the same franchise path again is a no-op. A storage-only migration does not need a download follow. The move command records its franchise membership directly.</p>
+<h2 id="cutover-checks-and-recovery">Cutover checks and recovery<a class="headerlink" href="#cutover-checks-and-recovery" title="Anchor link">&para;</a></h2>
+<p>Start Ryokan first and verify its compatibility view. Then start Jellyfin with the reviewed mounts. Verify the existing item IDs, AniList IDs, artwork search, playback, and watch history for every profile. Check WatchGuard references and Tdarr's cached paths before ending maintenance.</p>
+<p>The private compatibility rehearsal kept two releases, two seasons, and three episodes separate. All seven Jellyfin item IDs survived the simulated physical move and a server restart. A custom overview and premiere date survived too.</p>
+<p>To reverse a move, stop the writers and use the same move command with the original path. Move all selected releases back before clearing a franchise's saved folder with an empty string. Keep the new binary available for recovery. Restore flat paths before returning to an older Ryokan binary that cannot read nested paths.</p>
+<h2 id="verification">Verification<a class="headerlink" href="#verification" title="Anchor link">&para;</a></h2>
+<div class="language-sh highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>cargo<span class="w"> </span>nextest<span class="w"> </span>run<span class="w"> </span>--features<span class="w"> </span>test-support<span class="w"> </span>--lib<span class="w"> </span>-E<span class="w"> </span><span class="s1">'test(library_layout) or test(library_move) or test(jellyfin_view) or test(library_paths_tests) or test(franchise_preview)'</span>
+</span></code></pre></div>
+<p>Coverage includes legacy paths, nested scans, subsequent imports, sibling-safe deletion, future follows, stable aliases, kept files, conflict refusal, interrupted moves, one-off staging, repeat runs, and reverse moves.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-circle-arrow-up" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m16 12-4-4-4 4M12 16V8"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog" role="status" aria-atomic="true">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      
+      
+        
+        
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":["navigation.tabs","navigation.sections","navigation.top","navigation.tracking","search.suggest","search.highlight","content.code.copy","content.code.annotate"],"redirect":null,"search":"../assets/javascripts/workers/search.c47bb847.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","clipboard.error":"Could not copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.a2388154.min.js"></script>
+      
+        <script src="../javascripts/picker.js"></script>
+      
+    
+  </body>
+</html>

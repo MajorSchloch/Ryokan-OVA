@@ -1,0 +1,1538 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Install and configure Ryokan OVA to manage your anime library.">
+      
+      
+      
+        <link rel="canonical" href="https://majorschloch.github.io/Ryokan-OVA/docs/docker/">
+      
+      
+      
+        <link rel="prev" href="../install/">
+      
+      
+        <link rel="next" href="../from-source/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="zensical-0.0.71">
+    
+    
+      
+        <title>Docker reference - Ryokan OVA</title>
+      
+    
+    
+      
+        
+      
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.e442bf79.min.css">
+      
+        
+          
+        
+        <link rel="stylesheet" href="../assets/stylesheets/modern/palette.b60ce83d.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+    
+    
+      <link rel="stylesheet" href="../stylesheets/ryokan.css">
+    
+      <link rel="stylesheet" href="../stylesheets/picker.css">
+    
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="deep-purple">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer" aria-hidden="true"></label>
+    <div data-md-component="skip">
+      <a href="#__skip" class="md-skip">
+        Skip to content
+      </a>
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="./.." title="Ryokan OVA" class="md-header__button md-logo" aria-label="Ryokan OVA" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 5v16M20.001 19A2 2 0 0 0 22 17V5a2 2 0 0 0-1.999-2L16 3.002A5 5 0 0 0 12 5a5 5 0 0 0-4-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 1.999 2H8a5 5 0 0 1 4 2 5 5 0 0 1 4-2z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-menu" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Ryokan OVA
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Docker reference
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="deep-purple"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="deep-purple" data-md-color-accent="deep-purple"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search" aria-label="Search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog" aria-label="Search">
+  <button type="button" class="md-search__button">
+    Search
+  </button>
+</div>
+      
+    
+    <div class="md-header__source">
+      
+        <a href="https://github.com/MajorSchloch/Ryokan-OVA" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    MajorSchloch/Ryokan-OVA
+  </div>
+</a>
+      
+    </div>
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    
+      
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="./.." class="md-tabs__link">
+          
+  
+  Getting started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+      
+    
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../install/" class="md-tabs__link">
+          
+  
+  Installation
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+      
+    
+    
+    
+      <li class="md-tabs__item">
+        <a href="../configuration/" class="md-tabs__link">
+          
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../troubleshooting/" class="md-tabs__link">
+        
+  
+  Troubleshooting
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../faq/" class="md-tabs__link">
+        
+  
+  FAQ
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="./.." title="Ryokan OVA" class="md-nav__button md-logo" aria-label="Ryokan OVA" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 5v16M20.001 19A2 2 0 0 0 22 17V5a2 2 0 0 0-1.999-2L16 3.002A5 5 0 0 0 12 5a5 5 0 0 0-4-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 1.999 2H8a5 5 0 0 1 4 2 5 5 0 0 1 4-2z"/></svg>
+
+    </a>
+    Ryokan OVA
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/MajorSchloch/Ryokan-OVA" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.3.1 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2026 Fonticons, Inc.--><path fill="currentColor" d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    MajorSchloch/Ryokan-OVA
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_1">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Getting started
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="./.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Welcome
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quick-start/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Quick start
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../stack-builder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Stack builder
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Installation
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
+            <label class="md-nav__title" for="__nav_2">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Installation
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker (recommended)
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker reference
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="././" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker reference
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#environment-variables" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Environment variables
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#volume-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Volume layout
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Volume layout">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#moving-ryokans-data-folder" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Moving Ryokan's data folder
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#healthcheck" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Healthcheck
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#updating" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Updating
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#branch-and-pull-request-images" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Branch and pull request images
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reset-auth" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Reset auth
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#host-check" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Host check
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#running-behind-a-reverse-proxy" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Running behind a reverse proxy
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Build from source
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Guides
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        
+          <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+            <label class="md-nav__title" for="__nav_3">
+              <span class="md-nav__icon md-icon"></span>
+              
+  
+  Guides
+
+            </label>
+            <ul class="md-nav__list" data-md-scrollfix>
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Configuration
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../system/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Configuration (cont.)
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../scoring/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  How releases are scored
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../calendar/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Calendar
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../wanted/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Wanted
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../manual-import/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Importing an existing library
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../franchise-folders/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Franchise folders
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../download-clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Download clients
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+                
+                  
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../external-accounts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  External accounts
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+                
+              
+            </ul>
+          </nav>
+        
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Troubleshooting
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../faq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  FAQ
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  
+                    
+                    
+                    
+                      
+                    
+                    
+                      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+                      <div class="md-sidebar-button__wrapper">
+                        <label class="md-sidebar-button" for="__toc"></label>
+                      </div>
+                    
+                  
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="On this page">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      On this page
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#environment-variables" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Environment variables
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#volume-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Volume layout
+      </span>
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Volume layout">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#moving-ryokans-data-folder" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Moving Ryokan's data folder
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#healthcheck" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Healthcheck
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#updating" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Updating
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#branch-and-pull-request-images" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Branch and pull request images
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reset-auth" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Reset auth
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#host-check" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Host check
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#running-behind-a-reverse-proxy" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Running behind a reverse proxy
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                <a id="__skip" tabindex="-1"></a>
+                
+                  
+
+  
+  
+
+
+<h1 id="docker-reference">Docker reference<a class="headerlink" href="#docker-reference" title="Anchor link">&para;</a></h1>
+<p>Reference for environment variables, healthcheck behavior, volume layout, and update semantics. For step-by-step install, see <a href="../install/">Installation</a>.</p>
+<h2 id="environment-variables">Environment variables<a class="headerlink" href="#environment-variables" title="Anchor link">&para;</a></h2>
+<p>Most users only need <code>PUID</code>, <code>PGID</code>, and <code>TZ</code>. The rest are for fine-tuning.</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>LISTEN_ADDR</code></td>
+<td><code>0.0.0.0:8978</code></td>
+<td>TCP bind. Change the port if 8978 conflicts with something else.</td>
+</tr>
+<tr>
+<td><code>PUID</code> / <code>PGID</code></td>
+<td><code>1000</code> / <code>1000</code></td>
+<td>Runtime UID/GID. Match your host's media-owning user. See <a href="../install/#puid-and-pgid">Installation → PUID and PGID</a>.</td>
+</tr>
+<tr>
+<td><code>TZ</code></td>
+<td>unset (UTC)</td>
+<td>Container timezone. Determines what timestamps look like in the UI and logs. Standard tzdata names like <code>America/Chicago</code> or <code>Europe/London</code>.</td>
+</tr>
+<tr>
+<td><code>RUST_LOG</code></td>
+<td><code>ryokan=info</code> (image)</td>
+<td>Console log filter. Set to <code>ryokan=debug</code> for verbose output while debugging.</td>
+</tr>
+<tr>
+<td><code>RYOKAN_TRUSTED_PROXY</code></td>
+<td>unset (off)</td>
+<td>Trust <code>X-Forwarded-For</code> and <code>X-Real-IP</code> for client IP. Off by default. Flip on only behind a reverse proxy that overwrites these headers on ingress; otherwise an attacker can spoof a fresh IP per attempt and bypass the per-IP login throttle.</td>
+</tr>
+<tr>
+<td><code>RYOKAN_COOKIE_SECURE</code></td>
+<td>unset (off)</td>
+<td>Force the <code>Secure</code> flag onto the login cookie. Usually unnecessary: with <code>RYOKAN_TRUSTED_PROXY=1</code>, Ryokan sets the flag on its own whenever the proxy reports HTTPS. Set this only for an HTTPS proxy that doesn't send <code>X-Forwarded-Proto</code>. Leave it off for plain HTTP or you won't be able to stay logged in.</td>
+</tr>
+<tr>
+<td><code>RYOKAN_FRAME_ANCESTORS</code></td>
+<td>unset (any site may embed Ryokan)</td>
+<td>Limit which pages may show Ryokan inside a frame. <code>self</code> allows only Ryokan itself, <code>none</code> allows nothing, and an origin like <code>https://dash.example.com</code> allows that page; separate several with spaces or commas. If you embed Ryokan in a dashboard such as Organizr or Homarr, leave this unset or list the dashboard's origin. Entries Ryokan can't read are skipped with a warning in the log, and if none are left only Ryokan itself may frame it.</td>
+</tr>
+<tr>
+<td><code>RYOKAN_HOST_CHECK</code></td>
+<td>unset (off)</td>
+<td>Turn on the host check: the web UI answers only when you open it by an IP address, <code>localhost</code>, or a name in <code>RYOKAN_ALLOWED_HOSTS</code>. Other names get an error page, including your server's own name until you list it. Any value except <code>0</code>, <code>false</code>, <code>no</code> or <code>off</code> turns it on. See <a href="#host-check">Host check</a>.</td>
+</tr>
+<tr>
+<td><code>RYOKAN_ALLOWED_HOSTS</code></td>
+<td>unset</td>
+<td>Extra names the host check accepts, separated by spaces or commas: <code>ryokan.lan</code>, <code>*.example.com</code> (any name ending in <code>.example.com</code>). Setting it turns the host check on by itself.</td>
+</tr>
+<tr>
+<td><code>RYOKAN_DATA_DIR</code></td>
+<td><code>/data</code> (image)</td>
+<td>The folder for Ryokan's own files: the database, the encryption key, the artwork and anibridge caches, and the default <code>backups/</code> folder. Change it when <code>/data</code> is already your shared media or downloads mount. See <a href="#moving-ryokans-data-folder">Moving Ryokan's data folder</a>.</td>
+</tr>
+<tr>
+<td><code>RYOKAN_RESET_AUTH</code></td>
+<td>unset</td>
+<td>Set to <code>1</code> <em>and</em> create a <code>.reset-auth</code> file next to <code>ryokan.db</code> to wipe users and sessions on next boot. Both required so a stuck-on env var can't silently wipe auth on every boot. See <a href="#reset-auth">Reset auth</a>.</td>
+</tr>
+<tr>
+<td><code>RYOKAN_DB_LOG_LEVEL</code></td>
+<td><code>info</code></td>
+<td>Write-side floor for the DB-backed logs table (separate from <code>RUST_LOG</code>). One of <code>trace</code>, <code>debug</code>, <code>info</code>, <code>warn</code>, <code>error</code>. Read-side filtering on the System → Logs page is independent.</td>
+</tr>
+<tr>
+<td><code>RYOKAN_ENCRYPTION_KEY</code></td>
+<td>unset (file fallback)</td>
+<td>Base64-encoded 32-byte AEAD key for encrypting OAuth tokens. Loading priority: env var, then key file, then auto-generated on first run. <strong>Key rotation isn't supported</strong>; changing it invalidates all stored OAuth tokens and you'll need to re-link external accounts.</td>
+</tr>
+<tr>
+<td><code>DATABASE_URL</code></td>
+<td>unset (<code>&lt;data folder&gt;/ryokan.db</code>)</td>
+<td>SQLite connection string. Overrides the database location only. Most installs leave it unset.</td>
+</tr>
+<tr>
+<td><code>RYOKAN_KEY_FILE_PATH</code></td>
+<td>unset (<code>&lt;data folder&gt;/.ryokan-key</code>)</td>
+<td>Where the auto-generated encryption key lives. Overrides this one path. Don't set it unless you have a specific reason.</td>
+</tr>
+<tr>
+<td><code>RYOKAN_ANIBRIDGE_CACHE_DIR</code></td>
+<td>unset (<code>&lt;data folder&gt;/cache/anibridge</code>)</td>
+<td>Where the TMDB-to-AniList mappings cache lives. Overrides this one path.</td>
+</tr>
+<tr>
+<td><code>RYOKAN_MEDIA_CACHE_DIR</code></td>
+<td>unset (<code>&lt;data folder&gt;/cache/artwork</code>)</td>
+<td>Artwork blob cache root. Overrides this one path. Content-addressed, so duplicate cover art doesn't re-store.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="volume-layout">Volume layout<a class="headerlink" href="#volume-layout" title="Anchor link">&para;</a></h2>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nt">volumes</span><span class="p">:</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ryokan-data:/data</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/srv/downloads:/downloads</span><span class="w">          </span><span class="c1"># optional but required for post-processing</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/srv/media/anime:/media/anime</span><span class="w">      </span><span class="c1"># optional but required for post-processing</span>
+</span></code></pre></div>
+<p><strong><code>/data</code> (required)</strong> holds the SQLite database, the artwork blob cache, the encryption key, the anibridge mappings cache, the default <code>backups/</code> folder, and any sentinel files. Loss of <code>/data</code> means losing your library state, queued grabs, scoring history, and OAuth tokens. The named-volume default (<code>ryokan-data</code>) keeps it inside Docker. Bind-mount it to a host path if you want the database visible from the host filesystem.</p>
+<p><strong><code>/downloads</code> and <code>/media/...</code></strong> are post-processing's source and destination. They're optional in the sense that Ryokan boots without them, but post-processing requires both to be visible inside the container at the same paths your download client uses for "complete" files and the path you set in Settings → General → Media Root Path.</p>
+<h3 id="moving-ryokans-data-folder">Moving Ryokan's data folder<a class="headerlink" href="#moving-ryokans-data-folder" title="Anchor link">&para;</a></h3>
+<p>Many *arr setups mount one shared filesystem at <code>/data</code> so the download client and every app see the same paths and can hardlink. Ryokan's own files can live somewhere else so that <code>/data</code> stays free for that mount. Set <code>RYOKAN_DATA_DIR</code> and mount a volume at the same path:</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="nt">volumes</span><span class="p">:</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ryokan-config:/config</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/srv/data:/data</span><span class="w">                    </span><span class="c1"># your shared downloads and media</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="nt">environment</span><span class="p">:</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">RYOKAN_DATA_DIR=/config</span>
+</span></code></pre></div>
+<p>On start, the container takes ownership of the folder <code>RYOKAN_DATA_DIR</code> names and nothing else. Your shared <code>/data</code> mount keeps its owner. Setting <code>RYOKAN_DATA_DIR</code> is what moves the state. Pointing only the single-path variables (<code>DATABASE_URL</code> and the rest) at another folder still leaves <code>/data</code> as the folder the container takes ownership of, and the container log warns about it on every start.</p>
+<p>To move an existing install:</p>
+<ol>
+<li>Stop Ryokan.</li>
+<li>Copy everything from the old data volume into the new one, including the hidden <code>.ryokan-key</code> file. Without that file, linked AniList and MyAnimeList accounts have to be linked again.</li>
+<li>Remove <code>DATABASE_URL</code>, <code>RYOKAN_KEY_FILE_PATH</code>, <code>RYOKAN_MEDIA_CACHE_DIR</code>, and <code>RYOKAN_ANIBRIDGE_CACHE_DIR</code> from your compose file if you set them. Each one pins its own path and would keep it on the old volume.</li>
+<li>Set <code>RYOKAN_DATA_DIR</code>, update the volume line, and start Ryokan.</li>
+<li>If Settings → General → Backup folder is set to a path under the old data folder, such as <code>/data/backups</code>, clear it. Backups then go to <code>backups</code> in the new data folder.</li>
+</ol>
+<p>Cover art keeps working from the moved cache. A backup made in System → Backup restores into the new layout too.</p>
+<h2 id="healthcheck">Healthcheck<a class="headerlink" href="#healthcheck" title="Anchor link">&para;</a></h2>
+<p>The image ships with:</p>
+<div class="language-dockerfile highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">HEALTHCHECK</span><span class="w"> </span>--interval<span class="o">=</span>30s<span class="w"> </span>--timeout<span class="o">=</span>5s<span class="w"> </span>--start-period<span class="o">=</span>30s<span class="w"> </span>--retries<span class="o">=</span><span class="m">3</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">    </span>CMD<span class="w"> </span>curl<span class="w"> </span>-fsS<span class="w"> </span>http://localhost:8978/login<span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">exit</span><span class="w"> </span><span class="m">1</span>
+</span></code></pre></div>
+<p>The probe targets <code>/login</code> because that's the canonical "is Ryokan up" endpoint. There is no <code>/healthz</code>. <code>/login</code> returns 200 once the auth UI is live, or 303 redirecting to <code>/setup</code> on a fresh container with no users yet. Both are valid "up" signals.</p>
+<p><code>start-period=30s</code> covers cold-boot work: idempotent migrations, password-hash warmup, the multi-client cache rebuild, and optional Jellyfin client init. ARM64 first-runs occasionally bumped against an earlier 10-second budget; 30 seconds matches the CI smoke-test poll window.</p>
+<h2 id="updating">Updating<a class="headerlink" href="#updating" title="Anchor link">&para;</a></h2>
+<div class="language-sh highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>docker<span class="w"> </span>compose<span class="w"> </span>pull
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>docker<span class="w"> </span>compose<span class="w"> </span>up<span class="w"> </span>-d
+</span></code></pre></div>
+<p>The named volume preserves your data. The image's binary is replaced. Migrations run automatically on next boot and are idempotent: applying twice is a no-op.</p>
+<div class="admonition danger">
+<p class="admonition-title">Don't <code>docker compose down -v</code></p>
+<p>The <code>-v</code> flag removes named volumes. With the documented setup, that means deleting your DB, encryption key, OAuth tokens, and library state. There's no undo. <code>down</code> without <code>-v</code> is safe.</p>
+</div>
+<h2 id="branch-and-pull-request-images">Branch and pull request images<a class="headerlink" href="#branch-and-pull-request-images" title="Anchor link">&para;</a></h2>
+<p>Every branch pushed to the repository publishes a multi-arch image tagged with the branch name, with <code>/</code> replaced by <code>-</code>. A branch called <code>feat/misgrab-guardrails</code> is pullable as:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>docker<span class="w"> </span>pull<span class="w"> </span>ghcr.io/majorschloch/ryokan-ova:feat-misgrab-guardrails
+</span></code></pre></div>
+<p>Builds of <code>main</code> publish <code>:main</code>, <code>:ova</code>, and <code>:latest</code>. Existing Compose files that use <code>:ova</code> keep receiving builds from <code>main</code>. Stable version tags also publish <code>:latest</code>.</p>
+<p>A pull request from a fork cannot publish to the registry, so its build lands as a workflow artifact instead. Open the pull request's <strong>Publish Docker image</strong> run under Actions, download <code>ryokan-pr-&lt;number&gt;-linux-amd64</code> (or <code>-linux-arm64</code>), and load it:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>docker<span class="w"> </span>load<span class="w"> </span>-i<span class="w"> </span>ryokan-pr-123-linux-amd64.tar
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>docker<span class="w"> </span>run<span class="w"> </span>-p<span class="w"> </span><span class="m">8978</span>:8978<span class="w"> </span>-v<span class="w"> </span>./data:/data<span class="w"> </span>ghcr.io/majorschloch/ryokan-ova:pr-123
+</span></code></pre></div>
+<p>The artifact is kept for 14 days after the run.</p>
+<h2 id="reset-auth">Reset auth<a class="headerlink" href="#reset-auth" title="Anchor link">&para;</a></h2>
+<p>If you forget your admin password and have no other recovery path, you can wipe the users and sessions tables and create a new admin account on next boot. Two steps are required so a stuck-on env var can't silently wipe auth on every restart:</p>
+<ol>
+<li>Add <code>RYOKAN_RESET_AUTH=1</code> to your compose file's environment block.</li>
+<li>Create the sentinel file next to <code>ryokan.db</code>, which is in the data folder unless you set <code>DATABASE_URL</code>: <code>touch /path/to/your/data-volume/.reset-auth</code> on the host, or <code>docker exec ryokan touch /data/.reset-auth</code> (use your <code>RYOKAN_DATA_DIR</code> in place of <code>/data</code> if you changed it).</li>
+</ol>
+<p>Restart the container. On boot, Ryokan deletes both tables, removes the sentinel, and <code>/setup</code> opens for a fresh admin account. Remove <code>RYOKAN_RESET_AUTH</code> from your compose file afterwards.</p>
+<p>OAuth tokens, library state, scoring history, and Custom Formats are preserved. Only authentication state is wiped.</p>
+<h2 id="host-check">Host check<a class="headerlink" href="#host-check" title="Anchor link">&para;</a></h2>
+<p>A web page on another site can point its own name at your Ryokan's address and then use Ryokan as if it were that site. Before the first account exists, that is enough to create the admin account. The host check (off by default, like Transmission's host whitelist) stops it: with <code>RYOKAN_HOST_CHECK=1</code>, the web UI answers only when you open it by an IP address (<code>http://192.168.1.20:8978</code>), <code>localhost</code>, or a name you list in <code>RYOKAN_ALLOWED_HOSTS</code>. Anything else gets a "421" page naming the setting.</p>
+<ul>
+<li>If you open Ryokan by a name, such as your server's name (<code>http://nas:8978</code>), <code>ryokan.lan</code> or a domain on your reverse proxy, add that name to <code>RYOKAN_ALLOWED_HOSTS</code>. Ryokan also accepts the name of the machine it runs on, but inside Docker that is the container's own name. Docker makes it a random ID unless the compose file sets <code>hostname:</code>, so your server's name still has to be listed.</li>
+<li>Behind a reverse proxy with <code>RYOKAN_TRUSTED_PROXY=1</code>, the name in <code>X-Forwarded-Host</code> has to pass too, and so does the name the proxy uses to reach Ryokan, unless the proxy passes the original one through (nginx: <code>proxy_set_header Host $host;</code>).</li>
+<li>Seerr, autobrr and calendar apps are not affected: the Sonarr / Radarr API, the autobrr webhook and the iCal feed check their API key instead, so other containers can keep calling Ryokan by its service name.</li>
+</ul>
+<h2 id="running-behind-a-reverse-proxy">Running behind a reverse proxy<a class="headerlink" href="#running-behind-a-reverse-proxy" title="Anchor link">&para;</a></h2>
+<p>If you put Ryokan behind nginx, Caddy, Traefik, or similar, set <code>RYOKAN_TRUSTED_PROXY=1</code> so the per-IP login throttle reads <code>X-Forwarded-For</code> from the proxy instead of the proxy's own IP. The proxy must overwrite these headers on ingress (don't pass through whatever the client sent), or you've just added a header-spoofing bypass.</p>
+<p>With that set, the login cookie is marked <code>Secure</code> automatically whenever the proxy reports HTTPS (<code>X-Forwarded-Proto: https</code>), the same way Sonarr does it. <code>RYOKAN_COOKIE_SECURE=1</code> forces the flag for a proxy that doesn't send that header.</p>
+<p>The <a href="../stack-builder/">Stack builder</a> generates Caddy / Traefik / nginx config with the right header rewrites and env-var combinations.</p>
+<hr />
+<p><em>Last updated: 2026-10-04.</em></p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-circle-arrow-up" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m16 12-4-4-4 4M12 16V8"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog" role="status" aria-atomic="true">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      
+      
+        
+        
+      <script id="__config" type="application/json">{"annotate":null,"base":"..","features":["navigation.tabs","navigation.sections","navigation.top","navigation.tracking","search.suggest","search.highlight","content.code.copy","content.code.annotate"],"redirect":null,"search":"../assets/javascripts/workers/search.c47bb847.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","clipboard.error":"Could not copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.a2388154.min.js"></script>
+      
+        <script src="../javascripts/picker.js"></script>
+      
+    
+  </body>
+</html>
