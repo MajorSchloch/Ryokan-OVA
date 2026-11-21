@@ -524,6 +524,28 @@
     color: var(--text-dim);
 }
 
+.episode-auto-check {
+    display: none;
+    color: var(--text-dim);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+}
+
+.ep-row-missing[data-monitored="true"][data-unaired="false"][data-grab-pending="false"] .episode-auto-check {
+    display: block;
+}
+
+.episode-auto-check summary {
+    width: fit-content;
+    padding: 4px 0;
+    cursor: pointer;
+    color: var(--accent);
+}
+
+.episode-auto-check p {
+    margin: 4px 0;
+}
+
 .ep-missing-label {
     font-size: 11px;
     color: var(--red);
