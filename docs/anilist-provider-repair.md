@@ -12,7 +12,7 @@ Run the tool on the machine that can access the media and Jellyfin API. Set `JEL
 
 ```sh
 python3 scripts/repair_anilist_provider_ids.py \
-  --root /root/data/anime \
+  --root /srv/media/anime \
   --jellyfin-url http://127.0.0.1:8096 \
   --jellyfin-root /data/anime \
   --output anilist-preview.json
@@ -28,7 +28,7 @@ Use the exact direct folder name from the preview. Keep backups outside the medi
 python3 scripts/repair_anilist_provider_ids.py \
   --apply --plan anilist-preview.json \
   --folder '86 EIGHTY-SIX (2021)' \
-  --backup-dir /root/docker/servarr/anilist-repair-backup \
+  --backup-dir /srv/backups/anilist-repair \
   --jellyfin-url http://127.0.0.1:8096
 ```
 
@@ -61,11 +61,11 @@ POST /Items/{itemId}/Refresh
 
 Query the item and `GET /Items/{itemId}/RemoteImages?Type=Primary&ProviderName=AniList&IncludeAllLanguages=true` again after the refresh. This checks discovery without selecting or replacing a poster. Validation can skip an unchanged NFO; it does not force a provider reload.
 
-The vm622 pilot used Jellyfin 12.4.0 and AniList 15.0.0.0. The repair changed `86 EIGHTY-SIX` from `anilist=116589` to `AniList=116589`. AniList poster search changed from zero results to one. A second repair run made no changes.
+The pilot used Jellyfin 12.4.0 and AniList 15.0.0.0. The repair changed `86 EIGHTY-SIX` from `anilist=116589` to `AniList=116589`. AniList poster search changed from zero results to one. A second repair run made no changes.
 
 The pilot also completed a forced `MetadataRefreshMode=FullRefresh` with the other flags above. Jellyfin's `DateLastRefreshed` advanced, and the canonical ID and artwork result survived. This refresh changed the language and country preferences; the pilot restored both from the saved item. Final verification covered the original editable metadata, 32 file observations, and watch data for all seven profiles. The repair uses the item update to retain existing field values. A forced provider refresh is unnecessary for the bulk repair.
 
-The vm622 bulk repair corrected 180 NFO files and 180 Jellyfin entries. Verification found no remaining casing fixes and no changes on the second run. It covered 4,047 file observations and seven profiles. The metadata audit found one season premiere date changed by an automatic NFO reread; the original date was restored through the item-update API.
+The bulk repair corrected 180 NFO files and 180 Jellyfin entries. Verification found no remaining casing fixes and no changes on the second run. It covered 4,047 file observations and seven profiles. An automatic NFO reread changed one season premiere date. The item-update API restored the original date.
 
 ## Remaining titles
 
