@@ -78,37 +78,32 @@
             }
             if (active === 'downloads') { refreshDownloads(); timer = setInterval(refreshDownloads, 15000); }
             const filters = titlePage?.querySelector('[data-franchise-filters]');
-            const filterNames = ['f_q', 'f_monitor', 'f_type', 'f_status'];
-            const sections = titlePage ? [...titlePage.querySelectorAll('[data-franchise-section]')] : [];
-            const related = sections.find(section => section.tagName === 'DETAILS');
-            const relatedKey = location.pathname;
-            let otherOpen = read('ryokan.franchiseOtherOpen', {})[relatedKey] === true;
-            let filtersActive = false;
+            const filterNames = ['f_q', 'f_monitor', 'f_type', 'f_status', 'f_order', 'f_hide_unfollowed'];
+            const releaseList = titlePage?.querySelector('[data-franchise-list]');
+            const rows = releaseList ? [...releaseList.querySelectorAll('[data-franchise-release]')] : [];
+            let releaseOrder = filters?.elements.f_order.value;
             function filterReleases(update) {
-                if (!filters) return;
                 const values = Object.fromEntries(new FormData(filters));
                 values.f_q = values.f_q.trim();
                 const term = values.f_q.toLowerCase();
-                filtersActive = filterNames.some(name => values[name]);
-                let shown = 0, total = 0;
-                sections.forEach(section => {
-                    const rows = section.querySelectorAll('[data-franchise-release]');
-                    let sectionShown = 0;
-                    rows.forEach(row => {
-                        const matches = (!term || row.dataset.title.toLowerCase().includes(term))
-                            && (!values.f_monitor || row.dataset.monitor === values.f_monitor)
-                            && (!values.f_type || row.dataset.format === values.f_type)
-                            && (!values.f_status || row.dataset.states.split(/\s+/).includes(values.f_status));
-                        row.hidden = !matches;
-                        if (matches) sectionShown++;
-                    });
-                    total += rows.length;
-                    shown += sectionShown;
-                    section.hidden = sectionShown === 0;
-                    section.querySelector('[data-franchise-section-count]').textContent = sectionShown;
-                    if (section === related) section.open = sectionShown > 0 && (filtersActive || otherOpen);
+                if (values.f_order !== releaseOrder) {
+                    releaseOrder = values.f_order;
+                    const rank = releaseOrder === 'watch' ? 'watchRank' : 'premiereRank';
+                    rows.sort((a, b) => Number(a.dataset[rank]) - Number(b.dataset[rank]));
+                    releaseList.append(...rows);
+                }
+                titlePage.querySelector('[data-watch-order-hint]').hidden = releaseOrder !== 'watch';
+                let shown = 0;
+                rows.forEach(row => {
+                    const matches = (!term || row.dataset.title.toLowerCase().includes(term))
+                        && (!values.f_monitor || row.dataset.monitor === values.f_monitor)
+                        && (!values.f_type || row.dataset.format === values.f_type)
+                        && (!values.f_status || row.dataset.states.split(/\s+/).includes(values.f_status))
+                        && (!values.f_hide_unfollowed || row.dataset.followed === 'true');
+                    row.hidden = !matches;
+                    if (matches) shown++;
                 });
-                filters.querySelector('[data-franchise-count]').textContent = `${shown} of ${total} releases`;
+                filters.querySelector('[data-franchise-count]').textContent = `${shown} of ${rows.length} releases`;
                 titlePage.querySelector('[data-franchise-empty]').hidden = shown > 0;
                 if (update) {
                     const u = new URL(location.href);
@@ -117,20 +112,17 @@
                     tabs.forEach(a => { const destination = new URL(u); destination.searchParams.set('tab', a.dataset.titleTab); a.href = destination.pathname + destination.search; });
                 }
             }
-            if (filters) {
+            if (filters && releaseList) {
                 filters.addEventListener('input', () => filterReleases(true));
                 filters.addEventListener('submit', e => { e.preventDefault(); filterReleases(true); });
                 filters.querySelector('[data-franchise-reset]').addEventListener('click', event => {
                     event.preventDefault();
-                    filterNames.forEach(name => { filters.elements[name].value = ''; });
+                    filterNames.forEach(name => {
+                        const control = filters.elements[name];
+                        if (control.type === 'checkbox') control.checked = false;
+                        else control.value = '';
+                    });
                     filterReleases(true);
-                });
-                related?.addEventListener('toggle', () => {
-                    if (filtersActive) return;
-                    otherOpen = related.open;
-                    const saved = read('ryokan.franchiseOtherOpen', {});
-                    saved[relatedKey] = otherOpen;
-                    write('ryokan.franchiseOtherOpen', Object.fromEntries(Object.entries(saved).slice(-80)));
                 });
                 filterReleases(false);
             }
