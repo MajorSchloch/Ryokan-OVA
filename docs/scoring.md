@@ -51,7 +51,7 @@ Releases on the blocklist (Downloads → Blocklist) are skipped before any of th
 
 ## Replacing a file you already have
 
-With **Minimum + good enough**, actual resolution and selectable subtitle languages determine whether an automatic upgrade is needed. Once the target is met, a newer revision, remux or higher score does not replace the file. A file below target can improve only without losing known resolution or required selectable subtitles. Import checks the actual replacement before retiring the old file. See [Quality & Releases](configuration.md#quality--releases).
+With **Minimum + good enough**, actual resolution and selectable subtitle languages determine whether an automatic upgrade is needed. Once the target is met, a newer revision, remux or higher score does not replace the file. A file below target can improve only without losing known resolution or required selectable subtitles. Import checks the actual replacement before retiring the old file. See [Quality & Releases](configuration.md#quality-releases).
 
 With **Advanced source and score cutoffs**, an episode on disk is replaced when a release is better in one of three ways, checked in this order:
 
