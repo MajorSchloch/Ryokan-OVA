@@ -774,19 +774,12 @@ pub async fn api_rebuild_cached_metadata(
             let inner = tokio::spawn(async move {
                 metadata_sync::rebuild_cached_metadata_for_all(&rebuild_db).await
             });
-            inner.await // Result<Result<(usize, usize, usize), String>, JoinError>
+            inner.await
         });
 
-        type Outcome = Result<(usize, usize, usize), String>;
+        type Outcome = Result<metadata_sync::MetadataSweepReport, String>;
         let (status, detail, payload): (&str, String, Option<Outcome>) = match middle.await {
-            Ok(Ok(Ok((rebuilt, skipped, failed)))) => {
-                let st = if failed > 0 { "warn" } else { "ok" };
-                (
-                    st,
-                    format!("rebuilt={rebuilt}, skipped={skipped}, failed={failed}"),
-                    Some(Ok((rebuilt, skipped, failed))),
-                )
-            }
+            Ok(Ok(Ok(report))) => (report.status(), report.detail(true), Some(Ok(report))),
             // Lost the lock race to a sweep that started between the
             // probe above and the spawn: nothing was rebuilt.
             Ok(Ok(Err(busy))) => ("warn", busy.clone(), Some(Err(busy))),
@@ -839,8 +832,8 @@ pub async fn api_rebuild_cached_metadata(
             "Rebuild task panicked; see scheduled tasks for details.".to_string(),
         ));
     };
-    let (rebuilt, skipped, failed) = match outcome {
-        Ok(counts) => counts,
+    let report = match outcome {
+        Ok(report) => report,
         Err(busy) => {
             return Ok(Json(serde_json::json!({
                 "ok": false,
@@ -850,15 +843,16 @@ pub async fn api_rebuild_cached_metadata(
     };
 
     let message = format!(
-        "Metadata cache rebuild complete. Rebuilt: {}. Skipped: {}. Failed: {}.",
-        rebuilt, skipped, failed
+        "Metadata cache rebuild complete. Rebuilt: {}. Held {} episode mappings. Failed: {}.",
+        report.refreshed, report.episode_mapping_held, report.failed
     );
 
     Ok(Json(serde_json::json!({
-        "ok": failed == 0,
-        "rebuilt": rebuilt,
-        "skipped": skipped,
-        "failed": failed,
+        "ok": report.status() == "ok",
+        "rebuilt": report.refreshed,
+        "skipped": 0,
+        "episode_mapping_held": report.episode_mapping_held,
+        "failed": report.failed,
         "message": message,
     })))
 }
@@ -1250,9 +1244,9 @@ pub async fn api_force_metadata_refresh(
             "Manual metadata refresh started",
         )
         .await;
-        let (refreshed, failed) =
+        let report =
             match metadata_sync::refresh_all_series_metadata(&state.db).await {
-                Ok(counts) => counts,
+                Ok(report) => report,
                 Err(busy) => {
                     let _ = scheduled_tasks::mark_finished(
                         &state.db,
@@ -1267,13 +1261,14 @@ pub async fn api_force_metadata_refresh(
                     })));
                 }
             };
-        let status = if failed > 0 { "warn" } else { "ok" };
-        let detail = format!("refreshed={}, failed={}", refreshed, failed);
-        let _ =
-            scheduled_tasks::mark_finished(&state.db, "metadata_refresh", status, &detail).await;
+        let _ = scheduled_tasks::mark_finished(
+            &state.db, "metadata_refresh", report.status(), &report.detail(false)
+        ).await;
         Ok(Json(serde_json::json!({
-            "ok": failed == 0,
-            "message": format!("Metadata refresh complete. Refreshed: {}. Failed: {}.", refreshed, failed),
+            "ok": report.status() == "ok",
+            "episode_mapping_held": report.episode_mapping_held,
+            "failed": report.failed,
+            "message": format!("Metadata refresh complete. Refreshed: {}. Held {} episode mappings. Failed: {}.", report.refreshed, report.episode_mapping_held, report.failed),
         })))
     })
     .await?

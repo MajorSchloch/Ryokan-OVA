@@ -327,9 +327,10 @@ function forceRunTask(btn, taskKey) {
             // reads as a warning, not a success.
             const good = ok && !(data && data.ok === false);
             if (data && data.message) {
+                const mappingHeld = ok && data.episode_mapping_held > 0 && data.failed === 0;
                 window.ryokanQueueToast({
                     kind: good ? 'success' : (ok ? 'warn' : 'error'),
-                    title: good ? 'Task complete' : (ok ? 'Task not completed' : 'Task failed'),
+                    title: mappingHeld ? 'Episode mappings need review' : (good ? 'Task complete' : (ok ? 'Task not completed' : 'Task failed')),
                     body: data.message,
                 });
             } else if (!ok) {

@@ -511,6 +511,21 @@ pub async fn series_detail(
     };
     let is_tracked = db_series.is_some();
     let db_id = db_series.as_ref().map(|s| s.id);
+    let metadata_mapping_hold = if let Some(row) = &db_series {
+        let hold =
+            crate::models::metadata_cache::get_mapping_hold(&state.db, row.id, row.anilist_id)
+                .await
+                .ok()
+                .flatten();
+        if let Some(hold) = &hold {
+            hold.apply_title(&mut detail);
+            detail =
+                crate::services::auto_search::with_alternate_titles(detail, &row.alternate_titles);
+        }
+        hold
+    } else {
+        None
+    };
     let folder_name = db_series
         .as_ref()
         .map(|s| s.folder_name.clone())
@@ -845,6 +860,7 @@ pub async fn series_detail(
         mal_url,
         metadata_refreshed_at,
         metadata_is_stale,
+        metadata_mapping_hold,
         adult_without_indexers,
         recycle_enabled,
         monitor_mode,
