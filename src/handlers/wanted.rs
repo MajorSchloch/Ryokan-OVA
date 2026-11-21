@@ -27,11 +27,13 @@ use axum::{
     response::{Html, IntoResponse, Response},
 };
 use axum_htmx::{HxBoosted, HxRequest};
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::AppState;
 use crate::models::log::LogCategory;
 use crate::models::{config, episode_tags, local_metadata, monitoring, series};
+use crate::services::recent_episodes::{self, RetryStatus, RetryTiming};
 use crate::services::source::{self, Resolution};
 use crate::services::{auto_search, logger, media, naming, progress};
 
@@ -68,11 +70,69 @@ pub struct WantedRow {
     pub title: String,
     pub cover_url: String,
     pub slots: Vec<WantedSlot>,
+    #[serde(skip)]
+    recovery: Vec<WantedRecovery>,
 }
 
 impl WantedRow {
     pub fn count(&self) -> usize {
         self.slots.len()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct WantedRecovery {
+    episodes: String,
+    reason: String,
+    label: &'static str,
+    after: Option<DateTime<Utc>>,
+}
+
+fn recovery_episode_label(episodes: &[i32]) -> String {
+    episodes
+        .chunk_by(|first, next| first.checked_add(1) == Some(*next))
+        .map(|range| match range {
+            [one] => format!("E{one:02}"),
+            [first, .., last] => format!("E{first:02}-E{last:02}"),
+            [] => unreachable!("chunk_by never yields an empty range"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn attach_recovery(rows: &mut [WantedRow], statuses: &HashMap<(i64, i32), RetryStatus>) {
+    for row in rows {
+        let mut groups = HashMap::<_, Vec<i32>>::new();
+        for slot in &row.slots {
+            let Some(status) = statuses.get(&(row.series_id, slot.episode)) else {
+                continue;
+            };
+            let (label, after) = match status.timing {
+                RetryTiming::After(at) => match DateTime::from_timestamp(at, 0) {
+                    Some(time) => ("Retry after", Some(time)),
+                    None => ("Retry time unavailable", None),
+                },
+                RetryTiming::NextPass => ("Eligible for the next automatic pass", None),
+                RetryTiming::Checking => ("Automatic check in progress", None),
+                RetryTiming::Blocked => ("No automatic retry scheduled", None),
+            };
+            groups
+                .entry((status.reason.as_str(), label, after))
+                .or_default()
+                .push(slot.episode);
+        }
+        let mut groups: Vec<_> = groups.into_iter().collect();
+        // Show reasons from previous checks ahead of episodes waiting for a first check.
+        groups.sort_by_key(|((reason, _, _), episodes)| (reason.is_empty(), episodes[0]));
+        row.recovery = groups
+            .into_iter()
+            .map(|((reason, label, after), episodes)| WantedRecovery {
+                episodes: recovery_episode_label(&episodes),
+                reason: reason.to_string(),
+                label,
+                after,
+            })
+            .collect();
     }
 }
 
@@ -164,6 +224,7 @@ pub fn build_missing_rows(
                     quality: String::new(),
                 })
                 .collect(),
+            recovery: Vec::new(),
         });
     }
     rows.sort_by_key(|r| r.title.to_lowercase());
@@ -256,6 +317,7 @@ fn build_cutoff_rows(
             title: naming::SeriesNames::from_series(s).preferred_title(&cfg.title_language),
             cover_url: s.cover_url.clone(),
             slots,
+            recovery: Vec::new(),
         });
     }
     rows.sort_by_key(|r| r.title.to_lowercase());
@@ -550,6 +612,7 @@ struct WantedPageTemplate {
     /// batch grabs: `never` skips the file picker, as on the series page.
     grab_preview_mode: String,
     requirements_enabled: bool,
+    recovery_unavailable: bool,
 }
 
 #[derive(Template)]
@@ -559,6 +622,7 @@ struct WantedListPartial {
     rows: Vec<WantedRow>,
     library_is_empty: bool,
     requirements_enabled: bool,
+    recovery_unavailable: bool,
 }
 
 /// `GET /wanted?tab=missing|cutoff`. An HTMX (non-boost) request gets
@@ -577,13 +641,22 @@ pub async fn page(
         .unwrap_or_default();
     let library = series::get_all(&state.db).await.unwrap_or_default();
     let library_is_empty = library.is_empty();
-    let rows = rows_for(&state, &cfg, &library, &tab).await;
+    let mut rows = rows_for(&state, &cfg, &library, &tab).await;
+    let mut recovery_unavailable = false;
+    if tab == "missing" && !rows.is_empty() {
+        let series_ids: Vec<_> = rows.iter().map(|row| row.series_id).collect();
+        match recent_episodes::retry_statuses(&state.db, &cfg, &series_ids).await {
+            Ok(statuses) => attach_recovery(&mut rows, &statuses),
+            Err(_) => recovery_unavailable = true,
+        }
+    }
     if is_htmx && !is_boosted {
         let partial = WantedListPartial {
             tab,
             rows,
             library_is_empty,
             requirements_enabled: cfg.media_requirements_enabled,
+            recovery_unavailable,
         };
         return Html(partial.render().unwrap_or_default());
     }
@@ -595,6 +668,7 @@ pub async fn page(
         library_is_empty,
         grab_preview_mode: cfg.grab_preview_mode.clone(),
         requirements_enabled: cfg.media_requirements_enabled,
+        recovery_unavailable,
     };
     Html(tmpl.render().unwrap_or_default())
 }
@@ -975,6 +1049,66 @@ mod tests {
         assert_eq!(by_id.get(&4), Some(&vec![2, 3]));
         assert_eq!(rows[0].slots[0].label, "E03");
         assert_eq!(rows[0].count(), 3);
+    }
+
+    #[test]
+    fn wanted_groups_matching_recovery_statuses_and_shows_earliest_retry() {
+        let mut rows = build_missing_rows(
+            &[show(1, "all", Some(6), "FINISHED")],
+            &HashMap::new(),
+            &[(1, 3, "completed".to_string())],
+            &HashMap::new(),
+            &HashMap::from([(1, (1..=6).collect())]),
+            "romaji",
+        );
+        let after = DateTime::parse_from_rfc3339("2026-11-22T12:15:00Z")
+            .unwrap()
+            .timestamp();
+        let status = |reason: &str, timing| RetryStatus {
+            reason: reason.into(),
+            timing,
+        };
+        attach_recovery(
+            &mut rows,
+            &HashMap::from([
+                (
+                    (1, 1),
+                    status("Held <candidate>", RetryTiming::After(after)),
+                ),
+                (
+                    (1, 2),
+                    status("Held <candidate>", RetryTiming::After(after)),
+                ),
+                ((1, 3), status("Already imported", RetryTiming::Blocked)),
+                ((1, 4), status("Needs review", RetryTiming::Blocked)),
+                ((1, 5), status("", RetryTiming::Checking)),
+                ((1, 6), status("", RetryTiming::NextPass)),
+            ]),
+        );
+        let html = WantedListPartial {
+            tab: "missing".into(),
+            rows,
+            library_is_empty: false,
+            requirements_enabled: false,
+            recovery_unavailable: false,
+        }
+        .render()
+        .unwrap();
+        assert!(html.contains("<strong>E01-E02</strong>"), "{html}");
+        assert!(html.contains("Held &#60;candidate&#62;"), "{html}");
+        assert!(
+            html.contains("Retry after <time datetime=\"2026-11-22T12:15:00+00:00\">"),
+            "{html}"
+        );
+        assert!(html.contains("No automatic retry scheduled"), "{html}");
+        assert!(html.contains("Needs review"), "{html}");
+        assert!(html.contains("<summary>More automatic check details</summary>"));
+        assert!(html.contains("Automatic check in progress"), "{html}");
+        assert!(
+            html.contains("Eligible for the next automatic pass"),
+            "{html}"
+        );
+        assert!(!html.contains("Already imported"), "{html}");
     }
 
     #[tokio::test]

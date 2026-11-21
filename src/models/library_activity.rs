@@ -46,15 +46,17 @@ impl Event {
         if let Some(id) = self.series_id
             && let Ok(Some(s)) = super::series::get_by_id(db, id).await
         {
-            self.provider_id = Some(s.anilist_id);
+            let provider_id = *self.provider_id.get_or_insert(s.anilist_id);
             if self.title.is_empty() {
                 self.title = s.title.clone();
             }
-            self.franchise_id = super::library_layout::page_for_provider(db, s.anilist_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|p| p.0);
+            if provider_id == s.anilist_id {
+                self.franchise_id = super::library_layout::page_for_provider(db, provider_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|p| p.0);
+            }
         }
     }
 }

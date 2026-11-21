@@ -203,6 +203,7 @@ async fn recovery_cooldown_uses_one_release_hold_and_leaves_search_slots_availab
         "{summary}"
     );
     assert_eq!(client.adds.load(Ordering::SeqCst), 1);
+    run_once(&state).await.unwrap();
     let holds: Vec<(String, String)> =
         sqlx::query_as("SELECT action,reason FROM library_activity WHERE series_id=? ORDER BY id")
             .bind(capped)
@@ -247,6 +248,45 @@ async fn an_old_gap_is_revisited_when_a_suitable_source_appears_later() {
     .unwrap();
     assert_eq!(outcomes, vec!["held", "queued"]);
     assert!(run_once(&state).await.unwrap().contains("0 queued"));
+    assert_eq!(client.adds.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_repeat_hold_waits_without_spending_a_slot_and_revisits_when_due() {
+    let (state, client, _root) = state(0).await;
+    let sources = state.indexers.read().await.clone();
+    *state.indexers.write().await = Arc::new(Vec::new());
+    for _ in 0..2 {
+        assert!(run_once(&state).await.unwrap().contains("1 held"));
+    }
+
+    let cfg = config::get_config(&state.db).await.unwrap().unwrap();
+    let series = series::get_by_anilist_id(&state.db, 101)
+        .await
+        .unwrap()
+        .unwrap();
+    let projection = retry_statuses(&state.db, &cfg, &[series.id]).await.unwrap();
+    let slot = &projection[&(series.id, 7)];
+    assert!(slot.reason.contains("no matching release"));
+    assert!(matches!(slot.timing, RetryTiming::After(at) if at > chrono::Utc::now().timestamp()));
+
+    *state.indexers.write().await = sources;
+    let deferred = run_once(&state).await.unwrap();
+    assert!(
+        deferred.contains("Checked 0 missing episodes"),
+        "{deferred}"
+    );
+    assert!(
+        deferred.contains("1 episode in retry backoff"),
+        "{deferred}"
+    );
+    assert_eq!(client.adds.load(Ordering::SeqCst), 0);
+
+    sqlx::query("UPDATE library_activity SET detail=json_set(detail,'$.retry_at',unixepoch('now')-1) WHERE action=? AND json_extract(detail,'$.retry_at') IS NOT NULL")
+        .bind(FINISHED).execute(&state.db).await.unwrap();
+    let projection = retry_statuses(&state.db, &cfg, &[series.id]).await.unwrap();
+    assert_eq!(projection[&(series.id, 7)].timing, RetryTiming::NextPass);
+    assert!(run_once(&state).await.unwrap().contains("1 queued"));
     assert_eq!(client.adds.load(Ordering::SeqCst), 1);
 }
 
