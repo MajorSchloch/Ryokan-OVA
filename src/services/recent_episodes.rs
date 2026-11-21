@@ -1,7 +1,7 @@
 //! Paced recovery for monitored episodes that have fallen out of current RSS.
 //! This worker supplies demand only; the existing search and import gates decide
 //! whether a source is usable. A queued source is never reported as an import.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
 use serde_json::Value;
@@ -50,6 +50,47 @@ pub(crate) struct Target {
 
 pub fn enabled(cfg: &config::Config) -> bool {
     cfg.rss_master_enabled && cfg.recent_episode_search_enabled && cfg.post_processing_enabled
+}
+
+/// Latest recorded check for each episode of the current release identity.
+pub(crate) async fn last_checks(
+    db: &SqlitePool,
+    series_ids: &[i64],
+) -> Result<HashMap<(i64, i32), String>, sqlx::Error> {
+    if series_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let scope = serde_json::to_string(series_ids).unwrap_or_else(|_| "[]".into());
+    let rows = sqlx::query_as::<_, (i64, i32, String, String, String)>(
+        "WITH checks AS (
+            SELECT a.id, a.series_id, CASE WHEN json_valid(a.detail)
+                THEN json_extract(a.detail, '$.episode') END AS episode
+            FROM library_activity a JOIN series s ON s.id=a.series_id AND s.anilist_id=a.provider_id
+            WHERE a.series_id IN (SELECT value FROM json_each(?1)) AND a.action IN (?2,?3)
+        ), latest AS (
+            SELECT series_id, episode, MAX(id) AS id FROM checks
+            WHERE typeof(episode)='integer' AND episode BETWEEN 1 AND 2147483647
+            GROUP BY series_id, episode
+        )
+        SELECT l.series_id, l.episode, a.occurred_at, a.action, a.reason
+        FROM latest l JOIN library_activity a ON a.id=l.id",
+    )
+    .bind(scope)
+    .bind(STARTED)
+    .bind(FINISHED)
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(series_id, episode, at, action, reason)| {
+            let description = if action == STARTED {
+                format!("Last automatic check started at {at} UTC. It has no recorded result.")
+            } else {
+                format!("Last automatic check at {at} UTC. {reason}")
+            };
+            ((series_id, episode), description)
+        })
+        .collect())
 }
 
 /// Routes, when present, replace the parent grab's episode ownership.

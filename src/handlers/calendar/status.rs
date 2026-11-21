@@ -69,28 +69,9 @@ pub(super) async fn load(
             }
         }
     }
-    let checks=sqlx::query_as::<_,(i64,i64,String,String,String,String)>(
-        "SELECT a.series_id,a.provider_id,a.occurred_at,a.action,a.reason,a.detail FROM library_activity a
-         JOIN series s ON s.id=a.series_id AND s.anilist_id=a.provider_id
-         WHERE a.series_id IN(SELECT value FROM json_each(?1)) AND a.action IN(?2,?3) ORDER BY a.id DESC")
-        .bind(&scope).bind(recent_episodes::STARTED).bind(recent_episodes::FINISHED).fetch_all(db).await.map_err(|e|e.to_string())?;
-    let mut last_checks = HashMap::new();
-    for (sid, _, at, action, reason, detail) in checks {
-        let ep = serde_json::from_str::<serde_json::Value>(&detail)
-            .ok()
-            .and_then(|v| v.get("episode").and_then(|v| v.as_i64()));
-        if let Some(ep) = ep {
-            last_checks.entry((sid, ep as i32)).or_insert_with(|| {
-                if action == recent_episodes::STARTED {
-                    format!(
-                        "Last automatic check started {at} UTC. A completion has not been recorded."
-                    )
-                } else {
-                    format!("Last automatic check {at} UTC: {reason}")
-                }
-            });
-        }
-    }
+    let last_checks = recent_episodes::last_checks(db, &ids.into_iter().collect::<Vec<_>>())
+        .await
+        .map_err(|e| e.to_string())?;
     let holds:HashMap<_,_>=sqlx::query_as::<_,(i64,String,String)>(
         "SELECT a.grab_id,a.occurred_at,a.reason FROM library_activity a JOIN grabbed_torrents g ON g.id=a.grab_id
          WHERE g.state='pending' AND a.action='Held' ORDER BY a.id DESC")

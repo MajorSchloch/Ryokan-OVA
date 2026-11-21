@@ -51,6 +51,80 @@ fn empty_anime_detail(id: i64, title_english: &str, episodes: Option<i32>) -> an
 }
 
 #[tokio::test]
+async fn series_page_explains_missing_episodes_with_recorded_automatic_checks() {
+    use crate::models::{library_activity, metadata_cache};
+    use crate::services::recent_episodes;
+    use crate::test_support::{
+        build_test_app_state, in_memory_pool, seed_grabbed_torrent, seed_series,
+    };
+
+    let db = in_memory_pool().await;
+    let root = tempfile::tempdir().unwrap();
+    let title = "Recovery example";
+    let id = seed_series(&db, 101, title).await;
+    config::save_config(
+        &db,
+        &config::Config {
+            media_root: root.path().to_string_lossy().into(),
+            recent_episode_search_enabled: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    metadata_cache::upsert(&db, id, 101, None, &empty_anime_detail(101, title, Some(5)))
+        .await
+        .unwrap();
+    for ep in 1..=5 {
+        sqlx::query("INSERT INTO series_episode_metadata (series_id,episode_number,aired) VALUES (?,?,'2025-01-01')")
+            .bind(id).bind(ep).execute(&db).await.unwrap();
+        monitoring::set_episode_monitored(&db, id, ep, ep != 4)
+            .await
+            .unwrap();
+    }
+    std::fs::create_dir(root.path().join(title)).unwrap();
+    std::fs::write(
+        root.path()
+            .join(title)
+            .join("Recovery example - S01E05.mkv"),
+        b"file",
+    )
+    .unwrap();
+    seed_grabbed_torrent(&db, id, "pending", "Pending episode", &[3]).await;
+    let mut miss = library_activity::Event::new(
+        "finished",
+        recent_episodes::FINISHED,
+        Some(id),
+        title,
+        "No matching release found",
+    );
+    miss.detail = r#"{"episode":2,"outcome":"held"}"#.into();
+    library_activity::append(&db, miss).await;
+
+    let Html(body) = series_detail(
+        State(build_test_app_state(db, None)),
+        Path(id),
+        Query(super::super::SeriesIdKind::default()),
+    )
+    .await;
+    let check = |label| {
+        body.split_once(label)
+            .unwrap()
+            .1
+            .split_once("</details>")
+            .unwrap()
+            .0
+    };
+    assert!(check("Automatic check for episode 1").contains("No automatic check was recorded"));
+    let second = check("Automatic check for episode 2");
+    assert!(second.contains("No matching release found"));
+    assert!(second.contains("Automatic recovery is off."));
+    for ep in 3..=5 {
+        assert!(!body.contains(&format!("Automatic check for episode {ep}")));
+    }
+}
+
+#[tokio::test]
 async fn on_disk_upgrade_pending_state_uses_saved_ownership_not_display_quality() {
     use crate::models::grabbed_torrents::{self, GrabSeriesRoute};
     use crate::test_support::{in_memory_pool, seed_grabbed_torrent, seed_series};

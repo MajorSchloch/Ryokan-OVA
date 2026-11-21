@@ -454,6 +454,23 @@
                             <span class="ep-missing-text">Episode {{ ep.number }}</span>
                         </button>
                         {% endif %}
+                        {% if is_tracked && ep.monitored && !ep.unaired && !ep.downloaded && !ep.pending_grab %}
+                        <details class="episode-auto-check">
+                            <summary aria-label="Automatic check for episode {{ ep.number }}">Automatic check</summary>
+                            {% if let Some(checks) = automatic_checks %}
+                                {% if let Some(check) = checks.get(&(route_id, ep.number)) %}
+                                <p>{{ check }}</p>
+                                {% else %}
+                                <p>No automatic check was recorded when this page loaded.</p>
+                                {% endif %}
+                            {% else %}
+                            <p>Automatic check history is unavailable.</p>
+                            {% endif %}
+                            {% if automatic_recovery_off %}
+                            <p>Automatic recovery is off.</p>
+                            {% endif %}
+                        </details>
+                        {% endif %}
                     </td>
                     <td class="ep-col-aired">{{ ep.aired }}</td>
                     <td class="ep-col-quality" style="text-align:center"
