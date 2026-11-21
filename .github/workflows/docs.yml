@@ -1,25 +1,5 @@
-# Build the docs site with Zensical and deploy into the `docs/`
-# subdirectory of the `gh-pages` branch. The OAuth broker pages
-# already living at `gh-pages/auth/` are preserved by the
-# `keep_files: true` flag on `peaceiris/actions-gh-pages`; without
-# it the action wipes everything else under `gh-pages` on each
-# deploy and breaks the OAuth flow.
-#
-# Triggered only when the docs source actually changes so a code-
-# only commit doesn't churn gh-pages. Manual `workflow_dispatch`
-# stays available so you can force a rebuild without committing.
-#
-# Zensical reads `mkdocs.yml` directly — no separate `zensical.toml`
-# file is needed.
-#
-# Supply chain: every action is pinned to a commit SHA (Dependabot
-# bumps the SHA and the version comment together), and the build runs
-# third-party code (Zensical and its dependencies, installed from the
-# hash-pinned `docs-requirements.txt`) in a job that holds only a
-# read-only token. Only the deploy job can push, and it runs nothing
-# but the pinned deploy action. gh-pages also serves the OAuth broker,
-# so a token that can push there could swap the broker for one that
-# forwards AniList tokens elsewhere.
+# Build public docs with a read-only token. Only the deploy job on main
+# can publish the artifact to GitHub Pages.
 name: Build and deploy docs
 
 on:
@@ -29,16 +9,23 @@ on:
       - docs/**
       - mkdocs.yml
       - docs-requirements.txt
+      - .github/pages/**
+      - .github/workflows/docs.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - docs/**
+      - mkdocs.yml
+      - docs-requirements.txt
+      - .github/pages/**
       - .github/workflows/docs.yml
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# Only one docs deploy at a time — back-to-back pushes shouldn't
-# race each other on the gh-pages branch.
 concurrency:
-  group: docs-deploy
+  group: docs-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -71,43 +58,29 @@ jobs:
         # the workflow instead of shipping a 404.
         run: zensical build -s
 
-      - name: Hand the site to the deploy job
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - name: Assemble the Pages site
+        run: |
+          mkdir pages
+          cp .github/pages/index.html pages/index.html
+          mv site pages/docs
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          name: docs-site
-          path: site
-          if-no-files-found: error
-          retention-days: 1
+          path: pages
 
   deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # `peaceiris/actions-gh-pages` pushes to the gh-pages branch with
-    # the workflow's GITHUB_TOKEN. It publishes from the branch, so
-    # neither `pages: write` nor `id-token: write` is needed.
     permissions:
-      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Fetch the built site
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          name: docs-site
-          path: site
-
-      - name: Deploy to gh-pages/docs
-        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4.1.0
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./site
-          # `destination_dir` puts the built site under
-          # `gh-pages/docs/` instead of the branch root, so the
-          # OAuth broker at `gh-pages/auth/` is untouched.
-          destination_dir: docs
-          # Critical: without this the action wipes `gh-pages/auth/`
-          # on every deploy. With it, only `gh-pages/docs/` is
-          # rewritten.
-          keep_files: true
-          user_name: 'github-actions[bot]'
-          user_email: 'github-actions[bot]@users.noreply.github.com'
-          commit_message: 'docs: deploy from ${{ github.sha }}'
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

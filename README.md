@@ -15,6 +15,7 @@ I built this because Sonarr doesn't always work well for anime. The RSS sync for
 
 ## Documentation
 
+- [Ryokan OVA documentation](https://majorschloch.github.io/Ryokan-OVA/docs/)
 - [Install with Docker](docs/install.md)
 - [Build from source](docs/from-source.md)
 
