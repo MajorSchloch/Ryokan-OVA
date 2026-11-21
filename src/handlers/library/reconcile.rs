@@ -399,7 +399,11 @@ async fn resolve_series_context_raw(
 
     if let Some(ref tracked) = db_series {
         if let Ok(Some(cached)) = metadata_cache::get_by_series_id(db, tracked.id).await {
-            if !cached.is_fresh {
+            if !cached.is_fresh
+                && !metadata_cache::has_fresh_mapping_hold(db, tracked.id, tracked.anilist_id)
+                    .await
+                    .unwrap_or(false)
+            {
                 let db_clone = db.clone();
                 let tracked_clone = tracked.clone();
                 tokio::spawn(async move {

@@ -125,6 +125,54 @@ async fn series_page_explains_missing_episodes_with_recorded_automatic_checks() 
 }
 
 #[tokio::test]
+async fn release_page_displays_verified_title_with_a_mapping_hold() {
+    use crate::models::metadata_cache;
+    use crate::test_support::{build_test_app_state, in_memory_pool, seed_series};
+
+    let db = in_memory_pool().await;
+    let id = seed_series(&db, 1352, "Old title").await;
+    let cached = empty_anime_detail(1352, "Old title", Some(2));
+    metadata_cache::upsert(&db, id, 1352, None, &cached)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE series_metadata_cache SET cached_at='2000-01-01 00:00:00' WHERE series_id=?",
+    )
+    .bind(id)
+    .execute(&db)
+    .await
+    .unwrap();
+    let verified = empty_anime_detail(1352, "Verified title", Some(12));
+    assert!(
+        metadata_cache::save_mapping_hold(
+            &db,
+            id,
+            &verified,
+            "Episode mapping: unsupported ranges"
+        )
+        .await
+        .unwrap()
+    );
+
+    let Html(body) = series_detail(
+        State(build_test_app_state(db.clone(), None)),
+        Path(id),
+        Query(super::super::SeriesIdKind::default()),
+    )
+    .await;
+    assert!(body.contains("Verified title"));
+    assert!(body.contains("Episode mapping needs review."));
+    assert!(body.contains("Episode mapping: unsupported ranges"));
+    assert!(!body.contains("Metadata may be out of date."));
+    let complete = metadata_cache::get_by_series_id(&db, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(complete.is_stale);
+    assert_eq!(complete.detail.episodes, Some(2));
+}
+
+#[tokio::test]
 async fn on_disk_upgrade_pending_state_uses_saved_ownership_not_display_quality() {
     use crate::models::grabbed_torrents::{self, GrabSeriesRoute};
     use crate::test_support::{in_memory_pool, seed_grabbed_torrent, seed_series};

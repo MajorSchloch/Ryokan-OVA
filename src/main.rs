@@ -1926,10 +1926,7 @@ async fn main() {
                                 match services::metadata_sync::refresh_all_series_metadata(&db)
                                     .await
                                 {
-                                    Ok((refreshed, failed)) => (
-                                        if failed > 0 { "warn" } else { "ok" },
-                                        format!("refreshed={}, failed={}", refreshed, failed),
-                                    ),
+                                    Ok(report) => (report.status(), report.detail(false)),
                                     Err(busy) => ("warn", busy),
                                 };
                             let _ = models::scheduled_tasks::mark_finished(

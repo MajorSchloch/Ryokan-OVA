@@ -1129,6 +1129,18 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await?;
 
     sqlx::query(
+        "CREATE TABLE IF NOT EXISTS series_metadata_mapping_holds (
+            series_id INTEGER PRIMARY KEY REFERENCES series(id) ON DELETE CASCADE,
+            provider_id INTEGER NOT NULL,
+            title_json TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            refreshed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )",
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS artwork_cache (
             cache_key TEXT PRIMARY KEY,
