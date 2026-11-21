@@ -1,0 +1,7 @@
+<li>
+    <div class="wanted-recovery-status">
+        <strong>{{ check.episodes }}</strong>
+        <span>{{ check.label }}{% if let Some(time) = check.after %} <time datetime="{{ time.to_rfc3339() }}">{{ time.format("%b %-d, %Y at %H:%M UTC") }}</time>{% endif %}</span>
+    </div>
+    {% if !check.reason.is_empty() %}<p class="wanted-recovery-reason">{{ check.reason }}</p>{% endif %}
+</li>

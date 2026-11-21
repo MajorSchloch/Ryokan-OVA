@@ -148,6 +148,101 @@ async fn fair_order_moves_checked_episode_behind_unchecked_and_ignores_old_ident
         .unwrap();
     assert_eq!(targets(&db, &cfg).await.unwrap()[0].episode, 8);
 }
+
+#[tokio::test]
+async fn recent_priority_reserves_searches_for_older_gaps() {
+    let (_db, _cfg, t, _root) = fixture().await;
+    let mut recent: VecDeque<_> = (1..=8)
+        .map(|episode| Target {
+            episode,
+            ..t.clone()
+        })
+        .collect();
+    let mut older: VecDeque<_> = (9..=12)
+        .map(|episode| Target {
+            episode,
+            ..t.clone()
+        })
+        .collect();
+    let sequence: Vec<_> = (0..8)
+        .map(|checked| {
+            next_target(&mut recent, &mut older, checked)
+                .unwrap()
+                .episode
+        })
+        .collect();
+    assert_eq!(sequence, [1, 2, 3, 9, 4, 5, 6, 10]);
+}
+
+#[tokio::test]
+async fn wanted_timing_uses_current_identity_and_confirmed_airing() {
+    let (db, mut cfg, t, _root) = fixture().await;
+    let row =
+        |statuses: &HashMap<_, RetryStatus>| statuses[&(t.series_id, t.episode)].timing.clone();
+    let mut finished = library_activity::Event::new(
+        "old worker",
+        FINISHED,
+        Some(t.series_id),
+        &t.title,
+        "Old identity hold",
+    );
+    finished.provider_id = Some(t.provider_id);
+    finished.detail = serde_json::json!({"episode":t.episode,"airing_at":t.airing_at,"outcome":"held","retry_at":chrono::Utc::now().timestamp()+3600}).to_string();
+    sqlx::query("UPDATE series SET anilist_id=102 WHERE id=?")
+        .bind(t.series_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    assert!(library_activity::try_append(&db, finished).await.unwrap());
+    assert_eq!(
+        row(&retry_statuses(&db, &cfg, &[t.series_id]).await.unwrap()),
+        RetryTiming::NextPass
+    );
+
+    sqlx::query("INSERT INTO scheduled_task_runs(task_key,last_status,last_started_at) VALUES(?,'running',CURRENT_TIMESTAMP)")
+        .bind(TASK).execute(&db).await.unwrap();
+    let mut started = library_activity::Event::new(
+        "current worker",
+        STARTED,
+        Some(t.series_id),
+        &t.title,
+        "Checking",
+    );
+    started.detail = serde_json::json!({"episode":t.episode,"airing_at":t.airing_at}).to_string();
+    assert!(library_activity::try_append(&db, started).await.unwrap());
+    assert_eq!(
+        row(&retry_statuses(&db, &cfg, &[t.series_id]).await.unwrap()),
+        RetryTiming::Checking
+    );
+    sqlx::query("UPDATE episode_airings SET airing_at=airing_at-60 WHERE series_id=?")
+        .bind(t.series_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        row(&retry_statuses(&db, &cfg, &[t.series_id]).await.unwrap()),
+        RetryTiming::NextPass
+    );
+
+    cfg.recent_episode_search_enabled = false;
+    assert_eq!(
+        row(&retry_statuses(&db, &cfg, &[t.series_id]).await.unwrap()),
+        RetryTiming::Blocked
+    );
+    cfg.recent_episode_search_enabled = true;
+    sqlx::query("UPDATE episode_airings SET airing_at=unixepoch('now')+3600 WHERE series_id=?")
+        .bind(t.series_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    let upcoming = retry_statuses(&db, &cfg, &[t.series_id]).await.unwrap();
+    assert_eq!(row(&upcoming), RetryTiming::Blocked);
+    assert!(
+        upcoming[&(t.series_id, t.episode)]
+            .reason
+            .contains("not aired")
+    );
+}
 #[tokio::test]
 async fn old_monitored_gaps_never_expire_and_airing_changes_still_cancel_demand() {
     let (db, cfg, mut t, _root) = fixture().await;

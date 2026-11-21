@@ -60,12 +60,15 @@
     flex-shrink: 0;
 }
 
+.wanted-row-content {
+    flex: 1;
+    min-width: 0;
+}
+
 .wanted-row-link {
     display: flex;
     align-items: center;
     gap: 14px;
-    flex: 1;
-    min-width: 0;
     color: var(--text);
     text-decoration: none;
 }
@@ -113,6 +116,41 @@
 
 .wanted-slot-more {
     color: var(--text-dim);
+}
+
+.wanted-recovery {
+    margin: 8px 0 0 62px;
+    font-size: 13px;
+    overflow-wrap: anywhere;
+}
+
+.wanted-recovery-list {
+    display: grid;
+    gap: 6px;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.wanted-recovery-status {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 8px;
+    color: var(--text-bright);
+}
+
+.wanted-recovery-reason {
+    margin: 2px 0 0;
+    color: var(--text);
+}
+
+.wanted-recovery-more {
+    margin-top: 6px;
+}
+
+.wanted-recovery-more summary {
+    margin-bottom: 6px;
+    cursor: pointer;
 }
 
 .wanted-row-actions {

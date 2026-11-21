@@ -1,7 +1,7 @@
 //! Paced recovery for monitored episodes that have fallen out of current RSS.
 //! This worker supplies demand only; the existing search and import gates decide
 //! whether a source is usable. A queued source is never reported as an import.
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, LazyLock};
 
 use serde_json::Value;
@@ -11,11 +11,15 @@ use crate::AppState;
 use crate::models::{config, download_clients, grabbed_torrents, library_activity, series};
 use crate::services::{custom_formats::CompiledCustomFormat, media, redownload};
 
+mod pacing;
+pub(crate) use pacing::{RetryStatus, RetryTiming, retry_statuses};
+
 pub const TASK: &str = "recent_episode_search";
 pub const STARTED: &str = "Automatic episode check started";
 pub const FINISHED: &str = "Automatic episode check finished";
 const COOLDOWN_HELD: &str = "Automatic recovery held";
 const PASS_LIMIT: usize = 12;
+const PRIORITY_SHARE: usize = 4;
 static RUN_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(Default::default);
 
 // The same airing evidence is used during discovery and immediately before
@@ -57,39 +61,10 @@ pub(crate) async fn last_checks(
     db: &SqlitePool,
     series_ids: &[i64],
 ) -> Result<HashMap<(i64, i32), String>, sqlx::Error> {
-    if series_ids.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let scope = serde_json::to_string(series_ids).unwrap_or_else(|_| "[]".into());
-    let rows = sqlx::query_as::<_, (i64, i32, String, String, String)>(
-        "WITH checks AS (
-            SELECT a.id, a.series_id, CASE WHEN json_valid(a.detail)
-                THEN json_extract(a.detail, '$.episode') END AS episode
-            FROM library_activity a JOIN series s ON s.id=a.series_id AND s.anilist_id=a.provider_id
-            WHERE a.series_id IN (SELECT value FROM json_each(?1)) AND a.action IN (?2,?3)
-        ), latest AS (
-            SELECT series_id, episode, MAX(id) AS id FROM checks
-            WHERE typeof(episode)='integer' AND episode BETWEEN 1 AND 2147483647
-            GROUP BY series_id, episode
-        )
-        SELECT l.series_id, l.episode, a.occurred_at, a.action, a.reason
-        FROM latest l JOIN library_activity a ON a.id=l.id",
-    )
-    .bind(scope)
-    .bind(STARTED)
-    .bind(FINISHED)
-    .fetch_all(db)
-    .await?;
-    Ok(rows
+    Ok(pacing::history(db, series_ids)
+        .await?
         .into_iter()
-        .map(|(series_id, episode, at, action, reason)| {
-            let description = if action == STARTED {
-                format!("Last automatic check started at {at} UTC. It has no recorded result.")
-            } else {
-                format!("Last automatic check at {at} UTC. {reason}")
-            };
-            ((series_id, episode), description)
-        })
+        .map(|(key, row)| (key, row.description()))
         .collect())
 }
 
@@ -148,12 +123,14 @@ async fn retry_limit_reason(db: &SqlitePool, series_id: i64) -> Result<Option<St
     let failed = grabbed_torrents::count_recent_failed(db, series_id, redownload::WINDOW_HOURS)
         .await
         .map_err(|e| e.to_string())?;
-    Ok((failed >= redownload::LOOP_BREAKER).then(|| {
-        format!(
-            "Retry limit reached: {failed} failures in {} hours",
-            redownload::WINDOW_HOURS
-        )
-    }))
+    Ok((failed >= redownload::LOOP_BREAKER).then(|| failure_limit_reason(failed)))
+}
+
+fn failure_limit_reason(failed: i64) -> String {
+    format!(
+        "Retry limit reached: {failed} failures in {} hours",
+        redownload::WINDOW_HOURS
+    )
 }
 
 /// A fresh, explicit monitor row is required. Unknown monitoring is a hold.
@@ -319,6 +296,20 @@ async fn targets(db: &SqlitePool, cfg: &config::Config) -> Result<Vec<Target>, S
     .map_err(|e| e.to_string())
 }
 
+fn next_target(
+    recent: &mut VecDeque<Target>,
+    older: &mut VecDeque<Target>,
+    checked: usize,
+) -> Option<Target> {
+    // Reserve every fourth search for older gaps when both queues have work.
+    // A skipped slot never spends that queue's share.
+    if checked % PRIORITY_SHARE == PRIORITY_SHARE - 1 {
+        older.pop_front().or_else(|| recent.pop_front())
+    } else {
+        recent.pop_front().or_else(|| older.pop_front())
+    }
+}
+
 pub async fn run_once(state: &AppState) -> Result<String, String> {
     let _run = RUN_LOCK
         .try_lock()
@@ -330,21 +321,45 @@ pub async fn run_once(state: &AppState) -> Result<String, String> {
     if !enabled(&cfg) {
         return Ok("Automatic missing episode recovery is disabled".into());
     }
-    let candidates = targets(&state.db, &cfg).await?;
+    let mut candidates = targets(&state.db, &cfg).await?;
+    let series_ids: Vec<_> = candidates
+        .iter()
+        .map(|t| t.series_id)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let checks = pacing::history(&state.db, &series_ids)
+        .await
+        .map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().timestamp();
+    let candidate_count = candidates.len();
+    candidates.retain(|target| {
+        checks
+            .get(&(target.series_id, target.episode))
+            .and_then(|check| check.retry_at(target.airing_at))
+            .is_none_or(|at| at <= now)
+    });
+    let deferred = candidate_count - candidates.len();
+    let cooldowns = pacing::failure_cooldowns(&state.db, &series_ids, now)
+        .await
+        .map_err(|e| e.to_string())?;
     let slots = media::library_slots(
         cfg.media_root.clone(),
         candidates.iter().map(|t| t.folder_name.clone()).collect(),
     )
     .await;
+    let recent_cutoff = now - i64::from(cfg.recent_episode_search_days.clamp(1, 30)) * 86400;
+    let (mut recent, mut older): (VecDeque<_>, VecDeque<_>) = candidates
+        .into_iter()
+        .partition(|t| t.airing_at > 0 && t.airing_at >= recent_cutoff);
     let mut checked = 0;
     let mut queued = 0;
     let mut held = 0;
     let mut errors = 0;
     let mut cooldown_series = HashSet::new();
-    for t in candidates {
-        if checked == PASS_LIMIT {
-            break;
-        }
+    while checked < PASS_LIMIT
+        && let Some(t) = next_target(&mut recent, &mut older, checked)
+    {
         if cooldown_series.contains(&t.series_id)
             || slots
                 .get(&t.folder_name)
@@ -355,22 +370,22 @@ pub async fn run_once(state: &AppState) -> Result<String, String> {
         if has_pending(&state.db, t.series_id, t.episode).await? {
             continue;
         }
-        if let Some(reason) = retry_limit_reason(&state.db, t.series_id).await? {
+        if let Some(cooldown) = cooldowns.get(&t.series_id) {
             let mut event = library_activity::Event::new(
-                format!("recent:cooldown:{}:{}", t.series_id, rand::random::<u64>()),
+                format!(
+                    "recent:cooldown:{}:{}:{}",
+                    t.series_id, t.provider_id, cooldown.retry_at
+                ),
                 COOLDOWN_HELD,
                 Some(t.series_id),
                 &t.title,
-                &reason,
+                &cooldown.reason,
             );
             event.provider_id = Some(t.provider_id);
-            event.detail = serde_json::json!({"scope":"release","outcome":"held"}).to_string();
-            if !library_activity::try_append(&state.db, event)
+            event.detail = serde_json::json!({"scope":"release","outcome":"held","retry_at":cooldown.retry_at}).to_string();
+            library_activity::try_append(&state.db, event)
                 .await
-                .map_err(|e| e.to_string())?
-            {
-                return Err("Could not record release retry cooldown".into());
-            }
+                .map_err(|e| e.to_string())?;
             cooldown_series.insert(t.series_id);
             continue;
         }
@@ -387,6 +402,7 @@ pub async fn run_once(state: &AppState) -> Result<String, String> {
             &t.title,
             "Checking a monitored aired episode missing from the library",
         );
+        event.provider_id = Some(t.provider_id);
         event.detail = serde_json::json!({"episode":t.episode,"airing_at":t.airing_at}).to_string();
         if !library_activity::try_append(&state.db, event)
             .await
@@ -432,7 +448,15 @@ pub async fn run_once(state: &AppState) -> Result<String, String> {
             &t.title,
             &reason,
         );
-        event.detail = serde_json::json!({"episode":t.episode,"outcome":status}).to_string();
+        event.provider_id = Some(t.provider_id);
+        event.detail = serde_json::to_string(&pacing::check_detail(
+            &t,
+            status,
+            &reason,
+            checks.get(&(t.series_id, t.episode)),
+            chrono::Utc::now().timestamp(),
+        ))
+        .map_err(|e| e.to_string())?;
         if !library_activity::try_append(&state.db, event)
             .await
             .map_err(|e| e.to_string())?
@@ -443,6 +467,10 @@ pub async fn run_once(state: &AppState) -> Result<String, String> {
     let mut summary = format!(
         "Checked {checked} missing episodes: {queued} queued, {held} held, {errors} errors. Queued releases still require verified import."
     );
+    if deferred > 0 {
+        let noun = if deferred == 1 { "episode" } else { "episodes" };
+        summary.push_str(&format!(" {deferred} {noun} in retry backoff."));
+    }
     if !cooldown_series.is_empty() {
         let count = cooldown_series.len();
         let noun = if count == 1 { "release" } else { "releases" };
