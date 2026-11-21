@@ -4,7 +4,7 @@ The Wanted page lists what the library is still after, the way Sonarr's Wanted p
 
 ## Missing
 
-Every monitored episode that has already aired and is not on disk or downloading, grouped by series. A series whose monitoring is off does not appear, and neither do episodes that have not aired yet. Each row links to the series page and shows the episode numbers it is short of. For episodes eligible for automatic recovery, Wanted shows the last check result and when another check can start. A retry time is the earliest eligible time. A busy pass can check the episode later.
+Every monitored episode that has already aired and is not on disk or downloading, grouped by series. A series whose monitoring is off does not appear, and neither do episodes that have not aired yet. When a Calendar timestamp is available for an episode, Wanted uses that timestamp to determine if it has aired. Each row links to the series page and shows the episode numbers it is short of. For episodes eligible for automatic recovery, Wanted shows the last check result and when another check can start. A retry time is the earliest eligible time. A busy pass can check the episode later.
 
 ## Upgrade targets
 

@@ -1,9 +1,8 @@
 //! The Wanted page: Sonarr's Wanted → Missing / Quality cutoff unmet across
 //! the whole library, with "search selected" / "search all".
 //!
-//! **Missing** is every monitored episode of a monitored series that
-//! has aired (the same aired bound the library cards use), is not on
-//! disk or recorded as completed, and is not downloading. **Cutoff
+//! **Missing** is every aired, monitored episode of a monitored series
+//! with no file on disk, completed tag, or active download. **Cutoff
 //! unmet** is every file on disk below the quality cutoff for a series
 //! that allows upgrades, the exact list the daily upgrade sweep would
 //! target (`auto_search::build_upgrade_targets`). Both are computed on
@@ -32,7 +31,7 @@ use serde::Deserialize;
 
 use crate::AppState;
 use crate::models::log::LogCategory;
-use crate::models::{config, episode_tags, local_metadata, monitoring, series};
+use crate::models::{config, episode_airings, episode_tags, local_metadata, monitoring, series};
 use crate::services::recent_episodes::{self, RetryStatus, RetryTiming};
 use crate::services::source::{self, Resolution};
 use crate::services::{auto_search, logger, media, naming, progress};
@@ -139,8 +138,8 @@ fn attach_recovery(rows: &mut [WantedRow], statuses: &HashMap<(i64, i32), RetryS
 /// Missing rows from the library-wide inputs. Pure, so the rule is
 /// testable without a database: a series is included when its monitor
 /// mode is not `none`; an episode when it is monitored, has aired
-/// (`aired` count, else the series' episode total, none for a series
-/// not yet released), is not on disk (season 1 or unseasoned files
+/// (exact timestamp when present, else the historic aired count or
+/// episode total), is not on disk (season 1 or unseasoned files
 /// only, the library card rule), is not a completed tag row, and is
 /// not a `grabbed` tag row (downloading). Titles follow
 /// `title_language` like every other page.
@@ -153,6 +152,7 @@ pub fn build_missing_rows(
     disk: &HashMap<i64, Vec<media::EpisodeFile>>,
     tag_rows: &[(i64, i32, String)],
     aired: &HashMap<i64, i64>,
+    precise_airings: &HashMap<(i64, i32), bool>,
     monitored: &HashMap<i64, HashSet<i32>>,
     title_language: &str,
 ) -> Vec<WantedRow> {
@@ -181,9 +181,6 @@ pub fn build_missing_rows(
             _ if s.status == "NOT_YET_RELEASED" => 0,
             _ => total,
         };
-        if bound <= 0 {
-            continue;
-        }
         let mut have: HashSet<i32> = HashSet::new();
         if let Some(files) = disk.get(&s.id) {
             for f in files {
@@ -203,7 +200,13 @@ pub fn build_missing_rows(
         let mut wanted: Vec<i32> = monitored_eps
             .iter()
             .copied()
-            .filter(|ep| *ep >= 1 && i64::from(*ep) <= bound)
+            .filter(|ep| {
+                *ep >= 1
+                    && precise_airings
+                        .get(&(s.id, *ep))
+                        .copied()
+                        .unwrap_or(i64::from(*ep) <= bound)
+            })
             .filter(|ep| !have.contains(ep))
             .filter(|ep| !downloading.is_some_and(|d| d.contains(ep)))
             .collect();
@@ -446,8 +449,9 @@ async fn rows_for(
             .unwrap_or_default();
         effective_cutoff_rows(state, cfg, library, &disk, &tags).await
     } else {
-        let (aired, tag_rows, monitored) = tokio::join!(
+        let (aired, precise_airings, tag_rows, monitored) = tokio::join!(
             local_metadata::aired_episode_counts(&state.db),
+            episode_airings::aired_by_episode(&state.db, None),
             episode_tags::active_states_all_series(&state.db),
             monitoring::get_monitored_all_series(&state.db),
         );
@@ -456,6 +460,7 @@ async fn rows_for(
             &disk,
             &tag_rows.unwrap_or_default(),
             &aired.unwrap_or_default(),
+            &precise_airings.unwrap_or_default(),
             &monitored.unwrap_or_default(),
             &cfg.title_language,
         )
@@ -484,8 +489,9 @@ async fn rows_for_series(
         let tags_by_series = HashMap::from([(series.id, tags)]);
         effective_cutoff_rows(state, cfg, library, &disk, &tags_by_series).await
     } else {
-        let (aired, monitored_eps) = tokio::join!(
+        let (aired, precise_airings, monitored_eps) = tokio::join!(
             local_metadata::aired_episode_count(&state.db, series.id),
+            episode_airings::aired_by_episode(&state.db, Some(series.id)),
             monitoring::get_monitored_episode_numbers(&state.db, series.id),
         );
         let aired = HashMap::from([(series.id, aired.unwrap_or(0))]);
@@ -505,6 +511,7 @@ async fn rows_for_series(
             &disk,
             &tag_rows,
             &aired,
+            &precise_airings.unwrap_or_default(),
             &monitored,
             &cfg.title_language,
         )
@@ -1035,7 +1042,15 @@ mod tests {
         monitored.insert(2, (1..=12).collect::<HashSet<i32>>());
         monitored.insert(3, (1..=12).collect::<HashSet<i32>>());
         monitored.insert(4, [2, 3, 9].into_iter().collect::<HashSet<i32>>());
-        let rows = build_missing_rows(&library, &disk, &tag_rows, &aired, &monitored, "romaji");
+        let rows = build_missing_rows(
+            &library,
+            &disk,
+            &tag_rows,
+            &aired,
+            &HashMap::new(),
+            &monitored,
+            "romaji",
+        );
         let by_id: HashMap<i64, Vec<i32>> = rows
             .iter()
             .map(|r| (r.series_id, r.slots.iter().map(|s| s.episode).collect()))
@@ -1057,6 +1072,7 @@ mod tests {
             &[show(1, "all", Some(6), "FINISHED")],
             &HashMap::new(),
             &[(1, 3, "completed".to_string())],
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::from([(1, (1..=6).collect())]),
             "romaji",
@@ -1195,6 +1211,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_page_and_search_menu_prefer_precise_airings_over_sparse_metadata() {
+        use crate::models::episode_airings::EpisodeAiring;
+        use crate::test_support::{build_test_app_state, in_memory_pool, seed_series};
+
+        let db = in_memory_pool().await;
+        let id = seed_series(&db, 1, "Fixture Series").await;
+        sqlx::query("UPDATE series SET monitor_mode='all', episodes=8 WHERE id=?")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        for episode in 1..=8 {
+            monitoring::set_episode_monitored(&db, id, episode, true)
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO series_episode_metadata(series_id, episode_number, aired)
+             VALUES(?1,1,'2024-04-01'),(?1,2,'2024-04-08'),(?1,3,'2024-04-15'),
+                   (?1,4,'2024-04-22'),(?1,5,'2024-04-29')",
+        )
+        .bind(id)
+        .execute(&db)
+        .await
+        .unwrap();
+        let now = Utc::now().timestamp();
+        let airings =
+            [(5, now + 3600), (7, now - 3600), (8, now + 7200)].map(|(episode, airing_at)| {
+                EpisodeAiring {
+                    series_id: id,
+                    episode,
+                    airing_at,
+                    duration_minutes: 24,
+                }
+            });
+        episode_airings::upsert_for_series(&db, id, &airings)
+            .await
+            .unwrap();
+        let state = build_test_app_state(db, None);
+
+        let html = page(
+            State(state.clone()),
+            HxRequest(true),
+            HxBoosted(false),
+            Query(WantedQuery::default()),
+        )
+        .await
+        .0;
+        let menu = search_menu(
+            State(state),
+            Query(SearchMenuQuery {
+                series_id: id,
+                tab: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        for episode in 1..=8 {
+            let is_missing = matches!(episode, 1..=4 | 7);
+            assert_eq!(html.contains(&format!(">E{episode:02}</span>")), is_missing);
+            assert_eq!(
+                menu.contains(&format!("data-episode=\"{episode}\"")),
+                is_missing
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn search_menu_lists_batch_first_then_the_set_then_each_episode() {
         use crate::test_support::{build_test_app_state, in_memory_pool, seed_series};
         let db = in_memory_pool().await;
@@ -1328,6 +1413,7 @@ mod tests {
             &[b, a],
             &HashMap::new(),
             &[],
+            &HashMap::new(),
             &HashMap::new(),
             &monitored,
             "romaji",

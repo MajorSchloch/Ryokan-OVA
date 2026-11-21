@@ -20,7 +20,9 @@
 //! airingSchedules budget is 30/min, easy for a popping-off iCal
 //! poller fleet to drain.
 
-use sqlx::SqlitePool;
+use std::collections::HashMap;
+
+use sqlx::{QueryBuilder, SqlitePool};
 
 /// One upserted row. Mirrors the columns 1:1.
 #[derive(Debug, Clone)]
@@ -79,6 +81,29 @@ pub async fn prune_older_than(db: &SqlitePool, older_than_unix: i64) -> Result<u
         .execute(db)
         .await?;
     Ok(result.rows_affected())
+}
+
+/// Whether each episode with a cached timestamp has aired. A missing key
+/// leaves the caller's fallback in effect. The search menu can scope this
+/// query to one series, while the library can load all timestamps once.
+pub(crate) async fn aired_by_episode(
+    db: &SqlitePool,
+    series_id: Option<i64>,
+) -> Result<HashMap<(i64, i32), bool>, sqlx::Error> {
+    let mut query = QueryBuilder::new(
+        "SELECT series_id, episode, airing_at <= unixepoch('now') FROM episode_airings",
+    );
+    if let Some(series_id) = series_id {
+        query.push(" WHERE series_id = ").push_bind(series_id);
+    }
+    let rows = query
+        .build_query_as::<(i64, i32, bool)>()
+        .fetch_all(db)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(series_id, episode, aired)| ((series_id, episode), aired))
+        .collect())
 }
 
 #[cfg(test)]
