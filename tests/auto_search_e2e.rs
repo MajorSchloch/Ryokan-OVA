@@ -25,6 +25,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 mod automatic_numbering_compat;
 #[path = "auto_search_e2e/automatic_source_numbering.rs"]
 mod automatic_source_numbering;
+#[path = "auto_search_e2e/provider_overlap.rs"]
+mod provider_overlap;
 #[path = "auto_search_e2e/provider_singletons.rs"]
 mod provider_singletons;
 #[path = "auto_search_e2e/publication_date.rs"]
