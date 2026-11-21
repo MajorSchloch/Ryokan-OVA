@@ -815,6 +815,7 @@ async fn migrate_creates_metadata_cache_tables() {
         "episode_cache",
         "kitsu_episode_cache",
         "provider_metadata_cache",
+        "series_metadata_mapping_holds",
         "provider_relations_cache",
         "provider_episode_metadata",
         "series_relations_cache",

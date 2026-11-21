@@ -916,6 +916,7 @@ pub async fn invalidate_episode_sources(
     if let Some(plan) =
         crate::services::anibridge::mal_episode_plan(detail.id, detail.id_mal).await?
     {
+        plan.source_slots()?;
         sources.extend(plan.sources.iter().map(|source| source.mal_id));
     }
     for source in sources {

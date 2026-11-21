@@ -102,7 +102,13 @@
         </div>
         {% if is_tracked %}<p class="form-hint">Search uses monitored episodes and may download matching files. Choose a batch to review available releases before download.</p>{% endif %}
         {% if !is_tracked %}<p class="form-hint">Outside your library. Explore this release and its relations, then add what you want to track.</p>{% endif %}
-        {% if metadata_is_stale %}
+        {% if let Some(hold) = metadata_mapping_hold %}
+        <div class="alert alert-warn metadata-stale-banner" role="status">
+            <strong>{% if hold.is_stale %}Title metadata may be out of date.{% else %}Episode mapping needs review.{% endif %}</strong>
+            Title details last refreshed <span data-ts="{{ hold.refreshed_at }}" data-ts-rendered="1" title="{{ hold.refreshed_at }} UTC">{{ crate::services::relative_time::humanize_sqlite_short_now(hold.refreshed_at) }}</span>.
+            Ryokan kept the existing episode information. {{ hold.reason }}
+        </div>
+        {% else if metadata_is_stale %}
         <div class="alert alert-warn metadata-stale-banner" role="status">
             <strong>Metadata may be out of date.</strong>
             Last successful refresh was <span data-ts="{{ metadata_refreshed_at }}" data-ts-rendered="1" title="{{ metadata_refreshed_at }} UTC">{{ crate::services::relative_time::humanize_sqlite_short_now(metadata_refreshed_at) }}</span>.

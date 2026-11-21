@@ -18,6 +18,11 @@ const MAX_RELATION_TREE_NODES: usize = 64;
 pub static METADATA_SWEEP_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 
+// A background page refresh can overlap a sweep. Serialize refreshes of
+// the same series so an earlier hold cannot replace a later full refresh.
+static SERIES_REFRESH_LOCKS: [tokio::sync::Mutex<()>; 64] =
+    [const { tokio::sync::Mutex::const_new(()) }; 64];
+
 /// `true` when `detail` is the canonical AL row for `tracked` — used to
 /// decide whether to replace the stored `anilist_id` column with
 /// `detail.id`. Strict: anything other than an exact AL-id match (or a
@@ -115,7 +120,7 @@ fn title_candidates_for_series(tracked: &series::Series) -> Vec<String> {
 async fn fetch_live_detail(
     tracked: &series::Series,
     force_mal_fallback: bool,
-) -> Result<anilist::AnimeDetail, String> {
+) -> Result<(anilist::AnimeDetail, bool), String> {
     fetch_live_detail_for_ids(
         tracked.anilist_id,
         tracked.mal_id,
@@ -132,7 +137,7 @@ async fn fetch_live_detail_for_ids(
     title_candidates: &[String],
     episode_count: Option<i32>,
     force_mal_fallback: bool,
-) -> Result<anilist::AnimeDetail, String> {
+) -> Result<(anilist::AnimeDetail, bool), String> {
     // Fallback policy: when an entry has a real AniList ID and the user
     // hasn't explicitly opted into MAL, MAL is only used when AL is
     // genuinely *down* (5xx, network error, parse failure, etc.). A 429
@@ -151,7 +156,10 @@ async fn fetch_live_detail_for_ids(
             ));
         }
         match anilist::get_anime_detail_with_options(provider_id, mal_id, false).await {
-            Ok(detail) => return Ok(detail),
+            Ok(detail) => {
+                let exact_entry = detail.id == provider_id;
+                return Ok((detail, exact_entry));
+            }
             Err(err) => {
                 if anilist::is_rate_limit_error(&err) {
                     tracing::warn!(
@@ -178,7 +186,10 @@ async fn fetch_live_detail_for_ids(
     // MAL id; Jikan answers it with 400 and the mapping lookup with nothing.
     if let Some(mid) = mal_id.filter(|m| *m > 0) {
         match jikan::get_anime_detail_cached(mid).await {
-            Ok(detail) => return Ok(detail),
+            Ok(detail) => {
+                let exact_entry = provider_id < 0 && detail.id == provider_id;
+                return Ok((detail, exact_entry));
+            }
             Err(err) => {
                 tracing::warn!(
                     target: "ryokan::metadata_sync",
@@ -193,7 +204,7 @@ async fn fetch_live_detail_for_ids(
         // in one round-trip — try that before the multi-query title-fuzz
         // path, which costs 1–4 requests and risks a sequel false match.
         match kitsu::get_anime_detail_by_mal_id(mid).await {
-            Ok(Some(detail)) => return Ok(detail),
+            Ok(Some(detail)) => return Ok((detail, false)),
             Ok(None) => {
                 tracing::debug!(
                     target: "ryokan::metadata_sync",
@@ -213,10 +224,15 @@ async fn fetch_live_detail_for_ids(
     }
 
     if !title_candidates.is_empty() {
-        return kitsu::get_anime_detail_by_titles(title_candidates, None, episode_count).await;
+        return kitsu::get_anime_detail_by_titles(title_candidates, None, episode_count)
+            .await
+            .map(|detail| (detail, false));
     }
 
-    anilist::get_anime_detail_with_options(provider_id, mal_id, force_mal_fallback).await
+    let detail =
+        anilist::get_anime_detail_with_options(provider_id, mal_id, force_mal_fallback).await?;
+    let exact_entry = provider_id != 0 && detail.id == provider_id;
+    Ok((detail, exact_entry))
 }
 
 fn preferred_title_for_log(detail: &anilist::AnimeDetail) -> &str {
@@ -409,14 +425,23 @@ async fn cache_provider_detail(
         return Ok(());
     }
 
-    metadata_cache::upsert_provider(db, cache_provider_id, detail.id_mal, detail)
-        .await
-        .map_err(|e| e.to_string())?;
+    let episodes = build_episode_cache(db, cache_provider_id, detail, force_kitsu_fallback).await?;
+    write_provider_detail(db, cache_provider_id, detail, &episodes).await
+}
+
+async fn write_provider_detail(
+    db: &SqlitePool,
+    cache_provider_id: i64,
+    detail: &anilist::AnimeDetail,
+    episodes: &[local_metadata::CachedEpisodeMetadata],
+) -> Result<(), String> {
     local_metadata::replace_relations_for_provider(db, cache_provider_id, detail)
         .await
         .map_err(|e| e.to_string())?;
-    let merged = build_episode_cache(db, cache_provider_id, detail, force_kitsu_fallback).await?;
-    local_metadata::replace_episode_metadata_for_provider(db, cache_provider_id, &merged)
+    local_metadata::replace_episode_metadata_for_provider(db, cache_provider_id, episodes)
+        .await
+        .map_err(|e| e.to_string())?;
+    metadata_cache::upsert_provider(db, cache_provider_id, detail.id_mal, detail)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -600,7 +625,7 @@ async fn hydrate_relation_tree(
                 )
                 .await
                 {
-                    Ok(detail) => detail,
+                    Ok((detail, _)) => detail,
                     Err(err) => {
                         // Only AL rate-limits are worth retrying. MAL
                         // failures or genuine AL-down errors are already
@@ -614,7 +639,9 @@ async fn hydrate_relation_tree(
             };
 
             processed += 1;
-            let _ = cache_provider_detail(db, provider_id, &detail, force_kitsu_fallback).await;
+            if provider_id != root_provider_id {
+                let _ = cache_provider_detail(db, provider_id, &detail, force_kitsu_fallback).await;
+            }
 
             for related in &detail.relations {
                 let id_valid = if mal_mode {
@@ -672,13 +699,20 @@ async fn hydrate_relation_tree(
     }
 }
 
+struct RefreshedMetadata {
+    detail: anilist::AnimeDetail,
+    mapping_hold: Option<String>,
+}
+
 async fn refresh_series_metadata_inner(
     db: &SqlitePool,
     tracked: &series::Series,
     force_mal_fallback: bool,
     allow_degraded_cache_rebuild: bool,
-) -> Result<anilist::AnimeDetail, String> {
-    let detail = fetch_live_detail(tracked, force_mal_fallback).await?;
+) -> Result<RefreshedMetadata, String> {
+    let lock_slot = tracked.id.rem_euclid(SERIES_REFRESH_LOCKS.len() as i64) as usize;
+    let _series_refresh = SERIES_REFRESH_LOCKS[lock_slot].lock().await;
+    let (detail, exact_entry) = fetch_live_detail(tracked, force_mal_fallback).await?;
     let authoritative_detail = is_authoritative_detail(tracked, &detail);
     let trustworthy_write = is_trustworthy_write(tracked, &detail);
     if tracked.anilist_id > 0
@@ -717,9 +751,26 @@ async fn refresh_series_metadata_inner(
         .map(|cfg| cfg.force_kitsu_fallback)
         .unwrap_or(false);
 
-    // Resolve episode identities before updating the series or either cache.
-    // An unavailable/ambiguous map preserves the previous successful metadata.
-    let merged = build_episode_cache(db, tracked.anilist_id, &detail, force_kitsu_fallback).await?;
+    // A mapping hold keeps the complete snapshot and its proof freshness.
+    // Only the display fields from an exact provider lookup can be updated.
+    let merged =
+        match build_episode_cache(db, tracked.anilist_id, &detail, force_kitsu_fallback).await {
+            Ok(merged) => merged,
+            Err(reason) if exact_entry => {
+                if !metadata_cache::save_mapping_hold(db, tracked.id, &detail, &reason)
+                    .await
+                    .map_err(|e| e.to_string())?
+                {
+                    return Err("Release identity changed during metadata refresh".into());
+                }
+                artwork::cache_series_detail_artwork(db, tracked.id, &detail).await;
+                return Ok(RefreshedMetadata {
+                    detail,
+                    mapping_hold: Some(reason),
+                });
+            }
+            Err(reason) => return Err(reason),
+        };
 
     // Strict: only replace the row's `anilist_id` column when we got
     // the canonical AL detail back. MAL fallbacks (negative `detail.id`)
@@ -799,7 +850,13 @@ async fn refresh_series_metadata_inner(
             .await
             .map_err(|e| e.to_string())?;
 
-        cache_provider_detail(db, stored_anilist_id, &detail, force_kitsu_fallback).await?;
+        if stored_anilist_id != 0 {
+            if stored_anilist_id == tracked.anilist_id {
+                write_provider_detail(db, stored_anilist_id, &detail, &merged).await?;
+            } else {
+                cache_provider_detail(db, stored_anilist_id, &detail, force_kitsu_fallback).await?;
+            }
+        }
         hydrate_relation_tree(
             db,
             stored_anilist_id,
@@ -879,7 +936,15 @@ async fn refresh_series_metadata_inner(
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(detail)
+    if exact_entry {
+        metadata_cache::clear_mapping_hold(db, tracked.id, tracked.anilist_id)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(RefreshedMetadata {
+        detail,
+        mapping_hold: None,
+    })
 }
 
 pub async fn refresh_series_metadata(
@@ -887,7 +952,76 @@ pub async fn refresh_series_metadata(
     tracked: &series::Series,
     force_mal_fallback: bool,
 ) -> Result<anilist::AnimeDetail, String> {
-    refresh_series_metadata_inner(db, tracked, force_mal_fallback, false).await
+    let refreshed = refresh_series_metadata_inner(db, tracked, force_mal_fallback, false).await?;
+    if let Some(reason) = refreshed.mapping_hold {
+        return Err(reason);
+    }
+    Ok(refreshed.detail)
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct MetadataSweepReport {
+    pub refreshed: usize,
+    pub episode_mapping_held: usize,
+    pub failed: usize,
+}
+
+impl MetadataSweepReport {
+    pub fn status(&self) -> &'static str {
+        if self.failed > 0 || self.episode_mapping_held > 0 {
+            "warn"
+        } else {
+            "ok"
+        }
+    }
+
+    pub fn detail(&self, rebuild: bool) -> String {
+        let refreshed = if rebuild { "rebuilt" } else { "refreshed" };
+        format!(
+            "{refreshed}={}, episode_mapping_held={}, failed={}",
+            self.refreshed, self.episode_mapping_held, self.failed
+        )
+    }
+}
+
+async fn record_refresh(
+    db: &SqlitePool,
+    tracked: &series::Series,
+    outcome: RefreshedMetadata,
+    rebuild: bool,
+    report: &mut MetadataSweepReport,
+) {
+    let category = provider_category_for_detail(tracked, &outcome.detail);
+    if let Some(reason) = outcome.mapping_hold {
+        report.episode_mapping_held += 1;
+        logger::warn(
+            db,
+            category,
+            &format!(
+                "Title metadata refreshed with episode mapping held for {}",
+                tracked.title
+            ),
+            &reason,
+        )
+        .await;
+    } else {
+        report.refreshed += 1;
+        if rebuild {
+            logger::info(
+                db,
+                category,
+                &format!("Rebuilt cached metadata for {}", tracked.title),
+                &format!(
+                    "provider_id={}, anilist_id={}, mal_id={:?}, episodes={:?}",
+                    outcome.detail.id,
+                    tracked.anilist_id,
+                    outcome.detail.id_mal,
+                    outcome.detail.episodes
+                ),
+            )
+            .await;
+        }
+    }
 }
 
 /// Shared sweep driver for the manual rebuild and the periodic refresh.
@@ -909,7 +1043,7 @@ pub async fn refresh_series_metadata(
 async fn run_metadata_sweep(
     db: &SqlitePool,
     rebuild_artifacts: bool,
-) -> Result<(usize, usize), String> {
+) -> Result<MetadataSweepReport, String> {
     const MAX_RETRY_ROUNDS: usize = 3;
     const COOLDOWN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
     // Inter-series spacing: AniList allows 30 req/min for anonymous
@@ -957,7 +1091,10 @@ async fn run_metadata_sweep(
                 &err.to_string(),
             )
             .await;
-            return Ok((0, 1));
+            return Ok(MetadataSweepReport {
+                failed: 1,
+                ..Default::default()
+            });
         }
     };
 
@@ -968,8 +1105,7 @@ async fn run_metadata_sweep(
         .map(|c| c.force_mal_fallback)
         .unwrap_or(false);
 
-    let mut succeeded = 0usize;
-    let mut failed = 0usize;
+    let mut report = MetadataSweepReport::default();
     let mut deferred: Vec<series::Series> = Vec::new();
 
     let should_defer = |tracked: &series::Series| -> bool {
@@ -993,20 +1129,8 @@ async fn run_metadata_sweep(
         match refresh_series_metadata_inner(db, &tracked, force_mal_fallback, rebuild_artifacts)
             .await
         {
-            Ok(detail) => {
-                succeeded += 1;
-                if rebuild_artifacts {
-                    logger::info(
-                        db,
-                        provider_category_for_detail(&tracked, &detail),
-                        &format!("Rebuilt cached metadata for {}", tracked.title),
-                        &format!(
-                            "provider_id={}, anilist_id={}, mal_id={:?}, episodes={:?}",
-                            detail.id, tracked.anilist_id, detail.id_mal, detail.episodes
-                        ),
-                    )
-                    .await;
-                }
+            Ok(outcome) => {
+                record_refresh(db, &tracked, outcome, rebuild_artifacts, &mut report).await
             }
             Err(err) => {
                 // Post-check: this call may have been the 429 that just
@@ -1015,7 +1139,7 @@ async fn run_metadata_sweep(
                 if should_defer(&tracked) {
                     deferred.push(tracked);
                 } else {
-                    failed += 1;
+                    report.failed += 1;
                     logger::warn(
                         db,
                         LogCategory::AniList,
@@ -1080,26 +1204,14 @@ async fn run_metadata_sweep(
             match refresh_series_metadata_inner(db, &tracked, force_mal_fallback, rebuild_artifacts)
                 .await
             {
-                Ok(detail) => {
-                    succeeded += 1;
-                    if rebuild_artifacts {
-                        logger::info(
-                            db,
-                            provider_category_for_detail(&tracked, &detail),
-                            &format!("Rebuilt cached metadata for {}", tracked.title),
-                            &format!(
-                                "provider_id={}, anilist_id={}, mal_id={:?}, episodes={:?}",
-                                detail.id, tracked.anilist_id, detail.id_mal, detail.episodes
-                            ),
-                        )
-                        .await;
-                    }
+                Ok(outcome) => {
+                    record_refresh(db, &tracked, outcome, rebuild_artifacts, &mut report).await
                 }
                 Err(err) => {
                     if should_defer(&tracked) {
                         deferred.push(tracked);
                     } else {
-                        failed += 1;
+                        report.failed += 1;
                         logger::warn(
                             db,
                             LogCategory::AniList,
@@ -1121,7 +1233,7 @@ async fn run_metadata_sweep(
     // at that point AniList is sustainedly unavailable and we should
     // surface that rather than spin. Next periodic refresh will pick it up.
     if !deferred.is_empty() {
-        failed += deferred.len();
+        report.failed += deferred.len();
         for tracked in &deferred {
             logger::warn(
                 db,
@@ -1138,38 +1250,29 @@ async fn run_metadata_sweep(
 
     // Match the previous summary-log behaviour: rebuild always logs;
     // refresh only logs when something happened.
-    if rebuild_artifacts || succeeded > 0 || failed > 0 {
-        let detail = if rebuild_artifacts {
-            format!("rebuilt={}, skipped=0, failed={}", succeeded, failed)
-        } else {
-            format!("refreshed={}, failed={}", succeeded, failed)
-        };
+    if rebuild_artifacts || report.refreshed > 0 || report.status() == "warn" {
         logger::info(
             db,
             LogCategory::AniList,
             &format!("{} sweep complete", sweep_label),
-            &detail,
+            &report.detail(rebuild_artifacts),
         )
         .await;
     }
 
-    Ok((succeeded, failed))
+    Ok(report)
 }
 
 /// `Err` only when another sweep holds `METADATA_SWEEP_LOCK`; per-series
-/// failures are counted in the tuple, not surfaced as `Err`.
+/// holds and failures are counted in the report.
 pub async fn rebuild_cached_metadata_for_all(
     db: &SqlitePool,
-) -> Result<(usize, usize, usize), String> {
-    let (rebuilt, failed) = run_metadata_sweep(db, true).await?;
-    // The middle "skipped" counter has been zero for a while — the
-    // sweep doesn't have a "skip without trying" branch — but the
-    // tuple shape is part of the handler contract so keep it.
-    Ok((rebuilt, 0, failed))
+) -> Result<MetadataSweepReport, String> {
+    run_metadata_sweep(db, true).await
 }
 
 /// Same `Err` contract as `rebuild_cached_metadata_for_all`.
-pub async fn refresh_all_series_metadata(db: &SqlitePool) -> Result<(usize, usize), String> {
+pub async fn refresh_all_series_metadata(db: &SqlitePool) -> Result<MetadataSweepReport, String> {
     run_metadata_sweep(db, false).await
 }
 
@@ -1462,16 +1565,12 @@ mod tests {
     // ── run_metadata_sweep / refresh_all_series_metadata ─────────────
 
     #[tokio::test]
-    async fn refresh_all_series_metadata_returns_zero_zero_on_empty_db() {
-        // No series rows → run_metadata_sweep iterates an empty list
-        // and returns (0 refreshed, 0 failed). The shape of the tuple
-        // is part of the handler contract for `system::api_metadata_refresh`.
+    async fn refresh_all_series_metadata_reports_empty_library() {
         let db = crate::test_support::in_memory_pool().await;
-        let (refreshed, failed) = refresh_all_series_metadata(&db)
+        let report = refresh_all_series_metadata(&db)
             .await
             .expect("no other sweep holds the lock");
-        assert_eq!(refreshed, 0);
-        assert_eq!(failed, 0);
+        assert_eq!(report, MetadataSweepReport::default());
     }
 
     #[tokio::test]
@@ -1493,20 +1592,18 @@ mod tests {
         assert_eq!(err, "Cached metadata rebuild is already running");
         drop(guard);
         // Released: the same call goes through again.
-        assert_eq!(refresh_all_series_metadata(&db).await, Ok((0, 0)));
+        assert_eq!(
+            refresh_all_series_metadata(&db).await,
+            Ok(MetadataSweepReport::default())
+        );
     }
 
     #[tokio::test]
-    async fn rebuild_cached_metadata_for_all_returns_triple_zero_on_empty_db() {
-        // Three-tuple shape (rebuilt, skipped, failed) — kept for
-        // handler contract even though the middle slot has been
-        // hard-coded zero since the sweep refactor.
+    async fn rebuild_cached_metadata_for_all_reports_empty_library() {
         let db = crate::test_support::in_memory_pool().await;
-        let (rebuilt, skipped, failed) = rebuild_cached_metadata_for_all(&db)
+        let report = rebuild_cached_metadata_for_all(&db)
             .await
             .expect("no other sweep holds the lock");
-        assert_eq!(rebuilt, 0);
-        assert_eq!(skipped, 0);
-        assert_eq!(failed, 0);
+        assert_eq!(report, MetadataSweepReport::default());
     }
 }
