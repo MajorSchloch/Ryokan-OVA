@@ -2,7 +2,6 @@ version: 2
 updates:
   - package-ecosystem: cargo
     directory: /
-    target-branch: dev
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
@@ -25,7 +24,6 @@ updates:
 
   - package-ecosystem: github-actions
     directory: /
-    target-branch: dev
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
@@ -61,7 +59,6 @@ updates:
 
   - package-ecosystem: docker
     directory: /
-    target-branch: dev
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
@@ -74,7 +71,6 @@ updates:
   # docs-requirements.in by `uv pip compile` (command in the .in file).
   - package-ecosystem: pip
     directory: /
-    target-branch: dev
     schedule:
       interval: weekly
     open-pull-requests-limit: 3
