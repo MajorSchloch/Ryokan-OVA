@@ -2,9 +2,11 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::{AIRED_TARGETS, FINISHED, STARTED, TASK, Target, enabled, failure_limit_reason};
+use super::{
+    AIRED_TARGETS, FINISHED, RETRY_DISABLED, STARTED, TASK, Target, enabled,
+    retry::failure_cooldowns,
+};
 use crate::models::config;
-use crate::services::redownload;
 use sqlx::SqlitePool;
 
 const SHORT_DELAY: i64 = 30 * 60;
@@ -203,54 +205,6 @@ pub(super) fn check_detail(
     }
 }
 
-pub(super) struct FailureCooldown {
-    pub reason: String,
-    pub retry_at: i64,
-}
-
-/// The retry budget clears when the oldest of the newest blocking failures
-/// leaves the window. Its boundary is inclusive, so add one second.
-pub(super) async fn failure_cooldowns(
-    db: &SqlitePool,
-    series_ids: &[i64],
-    now: i64,
-) -> Result<HashMap<i64, FailureCooldown>, sqlx::Error> {
-    if series_ids.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let scope = serde_json::to_string(series_ids).unwrap_or_else(|_| "[]".into());
-    let rows: Vec<(i64, i64, i64)> = sqlx::query_as(
-        "WITH ranked AS (
-            SELECT series_id, unixepoch(grabbed_at) AS at,
-                   COUNT(*) OVER (PARTITION BY series_id) AS failures,
-                   ROW_NUMBER() OVER (PARTITION BY series_id ORDER BY grabbed_at DESC, id DESC) AS n
-            FROM grabbed_torrents
-            WHERE series_id IN (SELECT value FROM json_each(?1)) AND state='failed'
-            AND grabbed_at>=datetime(?2, 'unixepoch', ?3 || ' hours')
-        )
-        SELECT series_id, failures, at+?4+1 FROM ranked WHERE n=?5 AND at IS NOT NULL",
-    )
-    .bind(scope)
-    .bind(now)
-    .bind(format!("-{}", redownload::WINDOW_HOURS))
-    .bind(redownload::WINDOW_HOURS * 3600)
-    .bind(redownload::LOOP_BREAKER)
-    .fetch_all(db)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(id, failures, retry_at)| {
-            (
-                id,
-                FailureCooldown {
-                    reason: failure_limit_reason(failures),
-                    retry_at,
-                },
-            )
-        })
-        .collect())
-}
-
 pub(crate) async fn retry_statuses(
     db: &SqlitePool,
     cfg: &config::Config,
@@ -311,6 +265,15 @@ pub(crate) async fn retry_statuses(
                     },
                 );
             };
+            if !cfg.auto_redownload_failed && cooldowns.episodes.contains_key(&key) {
+                return (
+                    key,
+                    RetryStatus {
+                        reason: RETRY_DISABLED.into(),
+                        timing: RetryTiming::Blocked,
+                    },
+                );
+            }
             let check = checks.get(&key);
             let status = if check.is_some_and(|h| {
                 h.action == STARTED
@@ -328,12 +291,20 @@ pub(crate) async fn retry_statuses(
                     .and_then(|h| h.retry_at(airing_at))
                     .filter(|at| *at > now);
                 if let Some(cooldown) = cooldowns
+                    .releases
                     .get(&series_id)
-                    .filter(|c| retry_at.is_none_or(|at| at <= c.retry_at))
+                    .into_iter()
+                    .chain(cooldowns.episodes.get(&key))
+                    .max_by_key(|hold| hold.retry_at)
+                    .filter(|hold| retry_at.is_none_or(|at| at <= hold.retry_at))
                 {
                     RetryStatus {
                         reason: cooldown.reason.clone(),
-                        timing: RetryTiming::After(cooldown.retry_at),
+                        timing: if cooldown.retry_at > now {
+                            RetryTiming::After(cooldown.retry_at)
+                        } else {
+                            RetryTiming::NextPass
+                        },
                     }
                 } else {
                     RetryStatus {

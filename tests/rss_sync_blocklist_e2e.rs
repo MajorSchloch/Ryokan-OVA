@@ -63,6 +63,20 @@ fn feed_body() -> String {
     )
 }
 
+fn feed_with_magnets(releases: &[(&str, &str)]) -> String {
+    let items = releases
+        .iter()
+        .map(|(title, hash)| {
+            format!(
+                "<item><title>{title}</title><guid>{hash}</guid>\
+                 <nyaa:magneturi>magnet:?xt=urn:btih:{hash}</nyaa:magneturi>\
+                 <nyaa:infohash>{hash}</nyaa:infohash><nyaa:seeders>10</nyaa:seeders></item>"
+            )
+        })
+        .collect::<String>();
+    format!("<rss xmlns:nyaa=\"https://nyaa.si/xmlns/nyaa\"><channel>{items}</channel></rss>")
+}
+
 struct RecordingClient {
     add_calls: Mutex<Vec<(String, String)>>,
 }
@@ -392,21 +406,10 @@ async fn automatic_rss_grabs_next_eligible_release_when_top_ranked_one_is_blockl
     const FALLBACK_HASH: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
     let mock = MockServer::start().await;
-    let items = [
+    let feed = feed_with_magnets(&[
         (PREFERRED_TITLE, PREFERRED_HASH),
         (FALLBACK_TITLE, FALLBACK_HASH),
-    ]
-    .into_iter()
-    .map(|(title, hash)| {
-        format!(
-            "<item><title>{title}</title><guid>{hash}</guid>\
-                 <nyaa:magneturi>magnet:?xt=urn:btih:{hash}</nyaa:magneturi>\
-                 <nyaa:infohash>{hash}</nyaa:infohash><nyaa:seeders>10</nyaa:seeders></item>"
-        )
-    })
-    .collect::<String>();
-    let feed =
-        format!("<rss xmlns:nyaa=\"https://nyaa.si/xmlns/nyaa\"><channel>{items}</channel></rss>");
+    ]);
     Mock::given(method("GET"))
         .and(path("/feed"))
         .respond_with(ResponseTemplate::new(200).set_body_string(feed))
@@ -525,5 +528,139 @@ async fn automatic_rss_grabs_next_eligible_release_when_top_ranked_one_is_blockl
             .expect("RSS persists the episode numbering decision");
         assert_eq!(saved.anilist_id, 9101);
         assert_eq!(saved.episodes(), vec![4]);
+    }
+}
+
+#[tokio::test]
+async fn automatic_rss_retries_a_distinct_episode_source_after_its_cooldown() {
+    const BLOCKED_TITLE: &str = "[Preferred] Blocklist Feed Show - 07 (1080p) [WEB].mkv";
+    const BLOCKED_HASH: &str = "1111111111111111111111111111111111111111";
+    const FALLBACK_TITLE: &str = "[Fallback] Blocklist Feed Show - 07 (1080p) [WEB].mkv";
+    const FALLBACK_HASH: &str = "2222222222222222222222222222222222222222";
+    const NEW_TITLE: &str = "[Preferred] Blocklist Feed Show - 08 (1080p) [WEB].mkv";
+    const NEW_HASH: &str = "3333333333333333333333333333333333333333";
+
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/feed"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(feed_with_magnets(&[
+                (BLOCKED_TITLE, BLOCKED_HASH),
+                (FALLBACK_TITLE, FALLBACK_HASH),
+                (NEW_TITLE, NEW_HASH),
+            ])),
+        )
+        .expect(2)
+        .mount(&mock)
+        .await;
+
+    for (last_failure_age_minutes, expected_grabs) in [
+        (120, vec![(FALLBACK_HASH, 7), (NEW_HASH, 8)]),
+        (10, vec![(NEW_HASH, 8)]),
+    ] {
+        let db = in_memory_pool().await;
+        let media = tempfile::tempdir().unwrap();
+        ryokan::models::config::save_config(
+            &db,
+            &ryokan::models::config::Config {
+                rss_enabled: false,
+                preferred_groups: "Preferred,Fallback".into(),
+                auto_redownload_failed: true,
+                media_requirements_enabled: true,
+                media_root: media.path().to_string_lossy().into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let series_id = seed_monitored_series(&db).await;
+        for (title, hash, age) in [
+            (BLOCKED_TITLE, BLOCKED_HASH, last_failure_age_minutes),
+            (
+                "[Earlier] Blocklist Feed Show - 07 (1080p) [WEB].mkv",
+                "4444444444444444444444444444444444444444",
+                180,
+            ),
+            (
+                "[Old] Blocklist Feed Show - 07 (1080p) [WEB].mkv",
+                "5555555555555555555555555555555555555555",
+                240,
+            ),
+        ] {
+            let grab_id =
+                ryokan::test_support::seed_grabbed_torrent(&db, series_id, hash, title, &[7]).await;
+            sqlx::query(
+                "UPDATE grabbed_torrents SET state='failed', failure_reason='requirements_rejected',
+                 grabbed_at=datetime('now', ?) WHERE id=?",
+            )
+            .bind(format!("-{age} minutes"))
+            .bind(grab_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+
+        direct_rss_feeds::insert(
+            &db,
+            DirectRssFeedForm {
+                name: "Episode fallback feed",
+                url: &format!("{}/feed", mock.uri()),
+                enabled: true,
+                download_client_id: None,
+                request_timeout_secs: None,
+            },
+        )
+        .await
+        .unwrap();
+        let client = Arc::new(RecordingClient {
+            add_calls: Mutex::new(Vec::new()),
+        });
+        let state = build_test_app_state(db.clone(), Some(client.clone()));
+
+        let summary = sync_once(&state, "auto").await.unwrap();
+        let decisions = rss::recent_decisions(&db, 10).await.unwrap();
+        assert_eq!(summary.items_seen, 3, "{summary:?}");
+        assert_eq!(
+            summary.grabbed as usize,
+            expected_grabs.len(),
+            "Latest E7 failure was {last_failure_age_minutes} minutes ago. {decisions:#?}"
+        );
+        let run = rss::latest_run(&db).await.unwrap().unwrap();
+        assert_eq!(run.trigger_source, "auto");
+        assert_eq!(run.status, "ok");
+        assert!(
+            decisions.iter().any(|entry| {
+                entry.title == BLOCKED_TITLE
+                    && entry.decision == "rejected"
+                    && entry.reason.starts_with("Blocklisted release")
+            }),
+            "{decisions:#?}"
+        );
+
+        let mut adds = client.add_calls();
+        adds.sort();
+        assert_eq!(
+            adds,
+            expected_grabs
+                .iter()
+                .map(|(hash, _)| (format!("magnet:?xt=urn:btih:{hash}"), (*hash).to_owned()))
+                .collect::<Vec<_>>(),
+        );
+
+        let mut pending = grabbed_torrents::get_all_pending(&db).await.unwrap();
+        pending.sort_by(|left, right| left.hash.cmp(&right.hash));
+        assert_eq!(pending.len(), expected_grabs.len());
+        for (grab, (hash, episode)) in pending.iter().zip(expected_grabs) {
+            assert_eq!(grab.hash, hash);
+            assert_eq!(grab.series_id, series_id);
+            assert_eq!(grab.episode_numbers, [episode]);
+            assert_eq!(grab.download_client_id, Some(1));
+            let mapping = grabbed_torrents::get_release_mapping(&db, grab.id)
+                .await
+                .unwrap()
+                .expect("RSS must record the exact episode mapping");
+            assert_eq!(mapping.anilist_id, 9101);
+            assert_eq!(mapping.episodes(), [episode]);
+        }
     }
 }

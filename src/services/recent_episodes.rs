@@ -10,15 +10,18 @@ use sqlx::SqlitePool;
 use tokio::time::Instant;
 
 use crate::AppState;
-use crate::models::{config, download_clients, grabbed_torrents, library_activity, series};
-use crate::services::{custom_formats::CompiledCustomFormat, media, redownload};
+use crate::models::{config, download_clients, library_activity, series};
+use crate::services::{custom_formats::CompiledCustomFormat, media};
 
 mod pacing;
+mod retry;
 pub(crate) use pacing::{RetryStatus, RetryTiming, retry_statuses};
+pub(crate) use retry::{FailureCooldowns, TrialSources, failure_cooldowns, release_on_hold};
 
 pub const TASK: &str = "recent_episode_search";
 pub const STARTED: &str = "Automatic episode check started";
 pub const FINISHED: &str = "Automatic episode check finished";
+const RETRY_DISABLED: &str = "Automatic retry of failed downloads is disabled";
 const COOLDOWN_HELD: &str = "Automatic recovery held";
 const PASS_LIMIT: usize = 12;
 const PRIORITY_SHARE: usize = 4;
@@ -96,7 +99,7 @@ pub(crate) async fn retry_allowed(
     cfg: &config::Config,
     sid: i64,
     ep: i32,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let last: Option<(String, String)> = sqlx::query_as(
         "SELECT g.state,COALESCE(g.failure_reason,'') FROM grabbed_torrents g WHERE (
          (g.series_id=?1 AND NOT EXISTS(SELECT 1 FROM grabbed_torrent_series r WHERE r.grab_id=g.id)
@@ -104,39 +107,36 @@ pub(crate) async fn retry_allowed(
          EXISTS(SELECT 1 FROM grabbed_torrent_series r WHERE r.grab_id=g.id AND r.series_id=?1
           AND EXISTS(SELECT 1 FROM json_each(r.episode_numbers) WHERE value=?2))) ORDER BY g.grabbed_at DESC,g.id DESC LIMIT 1",
     ).bind(sid).bind(ep).fetch_optional(db).await.map_err(|e| e.to_string())?;
-    if let Some((state, reason)) = last {
-        // Existing queue revision rules remain with the RSS caller.
-        if state == "pending" {
-            return Ok(());
-        }
-        if state != "failed" || !matches!(reason.as_str(), "client_error" | "requirements_rejected")
+    if let Some((state, reason)) = last.as_ref().filter(|(state, _)| state != "pending") {
+        if state != "failed"
+            || !matches!(
+                reason.as_str(),
+                crate::services::redownload::CLIENT_ERROR_REASON
+                    | crate::services::post_processing::REQUIREMENTS_REJECTED_REASON
+            )
         {
             return Err(format!(
                 "Previous attempt is {state}; review it before another automatic download"
             ));
         }
         if !cfg.auto_redownload_failed {
-            return Err("Automatic retry of failed downloads is disabled".into());
+            return Err(RETRY_DISABLED.into());
         }
     }
-    match retry_limit_reason(db, sid).await? {
-        Some(reason) => Err(reason),
-        None => Ok(()),
-    }
-}
-
-async fn retry_limit_reason(db: &SqlitePool, series_id: i64) -> Result<Option<String>, String> {
-    let failed = grabbed_torrents::count_recent_failed(db, series_id, redownload::WINDOW_HOURS)
+    let now = chrono::Utc::now().timestamp();
+    let mut cooldowns = retry::failure_cooldowns(db, &[sid], now)
         .await
-        .map_err(|e| e.to_string())?;
-    Ok((failed >= redownload::LOOP_BREAKER).then(|| failure_limit_reason(failed)))
-}
-
-fn failure_limit_reason(failed: i64) -> String {
-    format!(
-        "Retry limit reached: {failed} failures in {} hours",
-        redownload::WINDOW_HOURS
-    )
+        .map_err(|error| error.to_string())?;
+    // The existing RSS queue-revision path still owns pending jobs. The
+    // episode's hourly rate limit applies even to a revised source.
+    if last.is_some_and(|(state, _)| state == "pending") {
+        cooldowns.releases.remove(&sid);
+    }
+    let needs_trial = cooldowns.needs_trial(sid, ep, now)?;
+    if needs_trial && !cfg.auto_redownload_failed {
+        return Err(RETRY_DISABLED.into());
+    }
+    Ok(needs_trial)
 }
 
 /// A fresh, explicit monitor row is required. Unknown monitoring is a hold.
@@ -189,7 +189,9 @@ async fn demand(db: &SqlitePool, cfg: &config::Config, t: &Target) -> Result<(),
     if preview || has_pending(db, t.series_id, t.episode).await? {
         return Err("A download, import, or file selection is already pending".into());
     }
-    retry_allowed(db, cfg, t.series_id, t.episode).await
+    retry_allowed(db, cfg, t.series_id, t.episode)
+        .await
+        .map(|_| ())
 }
 
 /// Keep settings in memory, never in an activity record (they contain secrets).
@@ -348,7 +350,7 @@ pub async fn run_once(state: &AppState, turn: &mut SearchTurn) -> Result<String,
             .is_none_or(|at| at <= now)
     });
     let deferred = candidate_count - candidates.len();
-    let cooldowns = pacing::failure_cooldowns(&state.db, &series_ids, now)
+    let cooldowns = retry::failure_cooldowns(&state.db, &series_ids, now)
         .await
         .map_err(|e| e.to_string())?;
     let slots = media::library_slots(
@@ -365,6 +367,7 @@ pub async fn run_once(state: &AppState, turn: &mut SearchTurn) -> Result<String,
     let mut held = 0;
     let mut errors = 0;
     let mut cooldown_series = HashSet::new();
+    let mut cooldown_episodes = 0;
     // Complete the admitted search and its history before stopping. Always
     // allow one search so a slow discovery scan cannot prevent progress.
     while checked < PASS_LIMIT
@@ -381,7 +384,7 @@ pub async fn run_once(state: &AppState, turn: &mut SearchTurn) -> Result<String,
         if has_pending(&state.db, t.series_id, t.episode).await? {
             continue;
         }
-        if let Some(cooldown) = cooldowns.get(&t.series_id) {
+        if let Some(cooldown) = cooldowns.releases.get(&t.series_id) {
             let mut event = library_activity::Event::new(
                 format!(
                     "recent:cooldown:{}:{}:{}",
@@ -398,6 +401,14 @@ pub async fn run_once(state: &AppState, turn: &mut SearchTurn) -> Result<String,
                 .await
                 .map_err(|e| e.to_string())?;
             cooldown_series.insert(t.series_id);
+            continue;
+        }
+        if cooldowns
+            .episodes
+            .get(&(t.series_id, t.episode))
+            .is_some_and(|hold| hold.retry_at > now)
+        {
+            cooldown_episodes += 1;
             continue;
         }
         let key = format!(
@@ -482,6 +493,14 @@ pub async fn run_once(state: &AppState, turn: &mut SearchTurn) -> Result<String,
     if deferred > 0 {
         let noun = if deferred == 1 { "episode" } else { "episodes" };
         summary.push_str(&format!(" {deferred} {noun} in retry backoff."));
+    }
+    if cooldown_episodes > 0 {
+        let noun = if cooldown_episodes == 1 {
+            "episode"
+        } else {
+            "episodes"
+        };
+        summary.push_str(&format!(" Hourly retry held {cooldown_episodes} {noun}."));
     }
     if !cooldown_series.is_empty() {
         let count = cooldown_series.len();
