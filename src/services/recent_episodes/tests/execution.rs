@@ -5,10 +5,19 @@ use crate::services::download_client::{
 use crate::services::indexers::{Indexer, IndexerCaps, Release, SearchQuery};
 use crate::test_support::build_test_app_state;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use tokio::sync::Notify;
+
+#[derive(Default)]
+struct AddGate {
+    armed: AtomicBool,
+    entered: Notify,
+    finish: Notify,
+}
 
 struct Client {
     adds: AtomicUsize,
     duplicate: bool,
+    gate: Option<AddGate>,
 }
 #[async_trait::async_trait]
 impl DownloadClient for Client {
@@ -17,6 +26,12 @@ impl DownloadClient for Client {
     }
     async fn add_torrent(&self, _: &str, _: &str) -> Result<AddOutcome, String> {
         self.adds.fetch_add(1, Ordering::SeqCst);
+        if let Some(gate) = &self.gate
+            && gate.armed.swap(false, Ordering::SeqCst)
+        {
+            gate.entered.notify_one();
+            gate.finish.notified().await;
+        }
         Ok(if self.duplicate {
             AddOutcome::AlreadyPresent
         } else {
@@ -97,15 +112,30 @@ impl Indexer for Source {
                 _ => {}
             }
         }
-        Ok(vec![serde_json::from_value(serde_json::json!({
-            "indexer_id":91,"indexer_priority":1,"indexer_name":"Fixture",
-            "title": if self.mode==5 {"[SubsPlease] Test Series - 01-12 [1080p WEB-DL] [Batch]"}else{"[SubsPlease] Test Series - 07 [1080p WEB-DL]"},
-            "guid":"episode-seven","link":"https://example.invalid/release.torrent",
-            "magnet":"magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "publish_date":0,"size_bytes":500000000,"seeders":10,"leechers":0,
-            "info_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","categories":[5070],
-            "download_volume_factor":null,"upload_volume_factor":null
-        })).unwrap()])
+        let episodes: &[i32] = if self.mode == 8 {
+            &[2, 7, 8, 9, 10]
+        } else {
+            &[7]
+        };
+        Ok(episodes
+            .iter()
+            .map(|&episode| {
+                let hash = if episode == 7 { "a".repeat(40) } else { format!("{episode:040x}") };
+                let title = if self.mode == 5 {
+                    "[SubsPlease] Test Series - 01-12 [1080p WEB-DL] [Batch]".into()
+                } else {
+                    format!("[SubsPlease] Test Series - {episode:02} [1080p WEB-DL]")
+                };
+                serde_json::from_value(serde_json::json!({
+                    "indexer_id":91,"indexer_priority":1,"indexer_name":"Fixture",
+                    "title":title,"guid":format!("episode-{episode}"),"link":"https://example.invalid/release.torrent",
+                    "magnet":format!("magnet:?xt=urn:btih:{hash}"),
+                    "publish_date":0,"size_bytes":500000000,"seeders":10,"leechers":0,
+                    "info_hash":hash,"categories":[5070],
+                    "download_volume_factor":null,"upload_volume_factor":null
+                })).unwrap()
+            })
+            .collect())
     }
 }
 async fn state(mode: u8) -> (AppState, Arc<Client>, tempfile::TempDir) {
@@ -115,6 +145,9 @@ async fn state(mode: u8) -> (AppState, Arc<Client>, tempfile::TempDir) {
     cfg.media_requirements_enabled = true;
     cfg.required_audio_languages = "ja".into();
     cfg.required_subtitle_languages = "en".into();
+    if mode == 8 {
+        cfg.rss_interval_minutes = 1;
+    }
     config::save_config(&db, &cfg).await.unwrap();
     sqlx::query("INSERT INTO indexers(id,name,kind,url,min_seeders,enabled) VALUES(91,'Fixture','torznab','https://example.invalid',1,1)").execute(&db).await.unwrap();
     sqlx::query("INSERT OR REPLACE INTO download_clients(id,name,kind,url,enabled,is_default) VALUES(1,'Fixture','qbittorrent','https://example.invalid',1,1)").execute(&db).await.unwrap();
@@ -129,6 +162,7 @@ async fn state(mode: u8) -> (AppState, Arc<Client>, tempfile::TempDir) {
     let client = Arc::new(Client {
         adds: AtomicUsize::new(0),
         duplicate: mode == 6,
+        gate: (mode == 8).then(AddGate::default),
     });
     let state = build_test_app_state(db.clone(), Some(client.clone()));
     *state.indexers.write().await = Arc::new(vec![Arc::new(Source {
@@ -139,6 +173,93 @@ async fn state(mode: u8) -> (AppState, Arc<Client>, tempfile::TempDir) {
     })]);
     (state, client, root)
 }
+
+async fn run_once(state: &AppState) -> Result<String, String> {
+    super::run_once(state, &mut SearchTurn::default()).await
+}
+
+#[tokio::test]
+async fn short_passes_finish_admitted_searches_discover_fresh_episodes_and_reserve_old_turns() {
+    let (state, client, _root) = state(8).await;
+    let sid = series::get_by_anilist_id(&state.db, 101)
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    let now = chrono::Utc::now().timestamp();
+    for (episode, airing_at) in [
+        (2, now - 400 * 86400),
+        (8, now + 3600),
+        (9, now - 7200),
+        (10, now - 10800),
+        (11, now - 600),
+    ] {
+        sqlx::query(
+            "INSERT INTO episode_airings(series_id,episode,airing_at,duration_minutes) VALUES(?,?,?,24)",
+        )
+        .bind(sid)
+        .bind(episode)
+        .bind(airing_at)
+        .execute(&state.db)
+        .await
+        .unwrap();
+        crate::models::monitoring::set_episode_monitored(&state.db, sid, episode, true)
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO grabbed_torrents(hash,torrent_name,series_id,episode_numbers,state)
+         VALUES('pending','Pending source',?,'[11]','pending')",
+    )
+    .bind(sid)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let gate = client.gate.as_ref().unwrap();
+    let mut turn = SearchTurn::default();
+    for (pass, episode) in [7, 8, 9, 2, 10].into_iter().enumerate() {
+        gate.armed.store(true, Ordering::SeqCst);
+        let release_dispatch = async {
+            tokio::time::timeout(Duration::from_secs(10), gate.entered.notified())
+                .await
+                .expect("recovery must reach the client");
+            if pass == 0 {
+                sqlx::query(
+                    "UPDATE episode_airings SET airing_at=? WHERE series_id=? AND episode=8",
+                )
+                .bind(now - 1)
+                .bind(sid)
+                .execute(&state.db)
+                .await
+                .unwrap();
+            }
+            // Advance the deadline while the download client is busy.
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(60)).await;
+            tokio::time::resume();
+            gate.finish.notify_one();
+        };
+        let (summary, ()) = tokio::join!(super::run_once(&state, &mut turn), release_dispatch);
+        let summary = summary.unwrap();
+        assert!(
+            summary.contains("Checked 1 missing episodes: 1 queued"),
+            "{summary}"
+        );
+        let finished: (i32, String) = sqlx::query_as(
+            "SELECT json_extract(detail,'$.episode'),json_extract(detail,'$.outcome')
+             FROM library_activity WHERE action=? ORDER BY id DESC LIMIT 1",
+        )
+        .bind(FINISHED)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(finished, (episode, "queued".into()));
+        assert!(has_pending(&state.db, sid, episode).await.unwrap());
+    }
+    assert_eq!(client.adds.load(Ordering::SeqCst), 5);
+}
+
 #[tokio::test]
 async fn bounded_recovery_dispatches_one_missing_episode_once_and_records_the_outcome() {
     let (state, client, _root) = state(0).await;

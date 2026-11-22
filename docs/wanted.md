@@ -4,7 +4,7 @@ The Wanted page lists what the library is still after, the way Sonarr's Wanted p
 
 ## Missing
 
-Every monitored episode that has already aired and is not on disk or downloading, grouped by series. A series whose monitoring is off does not appear, and neither do episodes that have not aired yet. Each row links to the series page and shows the episode numbers it is short of. For episodes eligible for automatic recovery, Wanted shows the last check result and when another check can start. A retry time is the earliest eligible time. A busy pass can check the episode later.
+Every monitored episode that has already aired and is not on disk or downloading, grouped by series. A series whose monitoring is off does not appear, and neither do episodes that have not aired yet. When a Calendar timestamp is available for an episode, Wanted uses that timestamp to determine if it has aired. Each row links to the series page and shows the episode numbers it is short of. For episodes eligible for automatic recovery, Wanted shows the last check result and when another check can start. A retry time is the earliest eligible time. A busy pass can check the episode later.
 
 ## Upgrade targets
 
@@ -24,4 +24,4 @@ Press **Grab** on the release you want. A grabbed episode leaves the list once i
 
 Tick several rows and press **Search selected**, or press **Search all** for every row on the current tab. Both run the automatic search. The searches run one series at a time in the background, and the toast in the corner follows along and reports how many releases were grabbed at the end. Only one such run goes at a time; a second request while one is running is refused rather than queued.
 
-Automatic recovery keeps checking aired, monitored gaps when enabled under **Settings → General**. A first hold uses the usual interval. Repeated checks with the same hold wait 30 minutes, then double the delay up to eight hours. During an episode's first 24 hours after airing, the delay is at most one hour. Recent episodes get priority and older gaps still get a share of each pass. RSS and searches you start from Wanted can still find a release during the delay.
+Automatic recovery keeps checking aired, monitored gaps when enabled under **Settings → General**. A first hold uses the usual interval. Repeated checks with the same hold wait 30 minutes, then double the delay up to eight hours. During an episode's first 24 hours after airing, the delay is at most one hour. Recent episodes get priority, with one turn in four reserved for older gaps across passes. RSS and searches you start from Wanted can still find a release during the delay.

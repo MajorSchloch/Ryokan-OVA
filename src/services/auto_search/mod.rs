@@ -2015,30 +2015,16 @@ async fn run_queries(
         })
         .collect();
 
-    let responses: Vec<_> = stream::iter(opts_list)
+    let nyaa_responses = stream::iter(opts_list)
         .map(|opts| async move { nyaa::search(&opts, 1).await })
         .buffer_unordered(nyaa::NYAA_BUFFER)
-        .collect()
-        .await;
+        .collect::<Vec<_>>();
 
-    // Issue #28 — fan out to configured torznab/newznab
-    // indexers concurrently with the Nyaa stream. The indexer
-    // results land in the same `candidates` Vec via the same
-    // dedup/match pipeline; downstream scoring sees a unified
-    // pool. Empty `ctx.indexers` (the v1.4 default) skips this
-    // pass entirely so behavior is unchanged for users who
-    // haven't configured any indexers.
-    //
-    // PR #107 review fix #1+#3: collect raw `Release` records
-    // (not pre-converted to SearchResult) so `dedup_for_auto_search`
-    // can apply priority-based attribution + max-seeders aggregation
-    // across indexers reporting the same infohash. Per-query
-    // fan-outs run concurrently via `buffer_unordered` so a slow
-    // indexer holds up only its own slot, not subsequent queries.
-    let indexer_releases: Vec<crate::services::indexers::Release> = if ctx.indexers.is_empty() {
-        Vec::new()
-    } else {
-        let outcome_streams: Vec<_> = stream::iter(queries.iter().cloned())
+    let indexer_outcomes = async {
+        if ctx.indexers.is_empty() {
+            return Vec::new();
+        }
+        stream::iter(queries.iter().cloned())
             .map(|query| async move {
                 let search_query = crate::services::indexers::SearchQuery {
                     q: query.clone(),
@@ -2053,39 +2039,35 @@ async fn run_queries(
             })
             .buffer_unordered(nyaa::NYAA_BUFFER)
             .collect()
-            .await;
-        let mut releases: Vec<crate::services::indexers::Release> = Vec::new();
-        for (query, outcomes) in outcome_streams {
-            for outcome in outcomes {
-                match outcome.result {
-                    Ok(rs) => releases.extend(rs.into_iter().filter(|release| {
-                        ctx.availability
-                            .is_none_or(|policy| policy.check_indexer_release(release).is_ok())
-                    })),
-                    Err(e) => {
-                        tracing::debug!(
-                            "indexer fan-out failed for '{}' on indexer #{} ({}): {}",
-                            query,
-                            outcome.indexer_id,
-                            outcome.indexer_name,
-                            e
-                        );
-                    }
+            .await
+    };
+
+    // Run both lookups together, then process Nyaa first for the same
+    // cross-source deduplication and scoring regardless of response order.
+    let (responses, indexer_outcomes) = tokio::join!(nyaa_responses, indexer_outcomes);
+    let mut indexer_releases = Vec::new();
+    for (query, outcomes) in indexer_outcomes {
+        for outcome in outcomes {
+            match outcome.result {
+                Ok(rs) => indexer_releases.extend(rs.into_iter().filter(|release| {
+                    ctx.availability
+                        .is_none_or(|policy| policy.check_indexer_release(release).is_ok())
+                })),
+                Err(e) => {
+                    tracing::debug!(
+                        "indexer fan-out failed for '{}' on indexer #{} ({}): {}",
+                        query,
+                        outcome.indexer_id,
+                        outcome.indexer_name,
+                        e
+                    );
                 }
             }
         }
-        // Cross-indexer + cross-query dedup with priority attribution
-        // (decision #3): when two indexers report the same infohash,
-        // the lowest-priority-number indexer wins attribution and
-        // seeders aggregate via `max`. Without this the per-`run_queries`
-        // `seen` HashSet (further down) would attribute by HashMap
-        // iteration order — nondeterministic.
-        crate::services::indexers::dedup_for_auto_search(releases)
-    };
-    let indexer_responses: Vec<crate::services::nyaa::SearchResult> = indexer_releases
-        .into_iter()
-        .map(|r| r.into_search_result())
-        .collect();
+    }
+    // Keep priority-based attribution and maximum seeder counts when
+    // multiple indexers return the same info hash.
+    let indexer_releases = crate::services::indexers::dedup_for_auto_search(indexer_releases);
 
     // Releases the gate turned away in this call. They stay out of
     // `seen` so a later pass with more aliases can admit them, but the
@@ -2217,7 +2199,7 @@ async fn run_queries(
     // key (info_hash | title) catches the case of an indexer
     // surfacing a release Nyaa already returned via Prowlarr's
     // Nyaa indexer — no double-counting.
-    for mut result in indexer_responses {
+    for mut result in indexer_releases.into_iter().map(|r| r.into_search_result()) {
         if ctx
             .availability
             .is_some_and(|policy| !policy.allows_result(&result))
