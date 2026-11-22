@@ -153,6 +153,50 @@ pub async fn run_auto_search_targets(
     .await
 }
 
+fn trial_source(
+    result: &crate::services::nyaa::SearchResult,
+) -> crate::models::grabbed_torrents::source_replay::SourceRef<'_> {
+    crate::models::grabbed_torrents::source_replay::SourceRef {
+        url: if !result.magnet.is_empty() {
+            &result.magnet
+        } else {
+            &result.torrent
+        },
+        guid: &result.source_guid,
+        indexer_id: result.indexer_id,
+        ..Default::default()
+    }
+}
+
+fn can_retry_one_episode(result: &crate::services::nyaa::SearchResult, episode: i32) -> bool {
+    !crate::services::upgrade::release_covers_multiple(result)
+        && result.replay_episodes.is_none()
+        && match &result.release_mapping {
+            Some(mapping) => mapping.episodes() == [episode],
+            None => !result.is_batch,
+        }
+}
+
+pub(crate) async fn run_failed_download_search(
+    state: &AppState,
+    sid: i64,
+    target: auto_search::SearchTarget,
+) -> Result<auto_search::AutoSearchReport, (axum::http::StatusCode, String)> {
+    run_auto_search_targets_with_upgrades(
+        state,
+        sid,
+        false,
+        vec![target],
+        false,
+        Some(sid),
+        UpgradeContext {
+            automatic_retry: true,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
 /// Recent-episode recovery requests one missing slot. A proven file from a
 /// pack can fill it without changing an existing client job.
 pub(crate) async fn run_recent_missing_target(
@@ -211,6 +255,7 @@ pub(crate) async fn run_recent_missing_target(
 #[derive(Default)]
 pub(crate) struct UpgradeContext {
     pub recent_demand: Option<crate::services::recent_episodes::Demand>,
+    pub automatic_retry: bool,
     /// The existing classification per upgrade-target episode.
     pub classifications:
         std::collections::HashMap<i32, crate::services::source::ClassificationResult>,
@@ -621,7 +666,44 @@ async fn run_auto_search_targets_with_upgrades(
         }
         let label = auto_search::target_label(&target);
         let is_upgrade = upgrades.classifications.contains_key(&target_episode);
-        let allow_whole_batch = allow_batch && !is_upgrade && total_targets > 1;
+        let retry_series =
+            series_id.filter(|_| upgrades.recent_demand.is_some() || upgrades.automatic_retry);
+        let trial_sources = if let Some(sid) = retry_series {
+            match crate::services::recent_episodes::retry_allowed(
+                &state.db,
+                &cfg,
+                sid,
+                target_episode,
+            )
+            .await
+            {
+                Ok(false) => None,
+                Ok(true) => match crate::services::recent_episodes::TrialSources::load(
+                    &state.db,
+                    sid,
+                    target_episode,
+                )
+                .await
+                {
+                    Ok(sources) => Some(sources),
+                    Err(reason) => {
+                        skipped.push(format!("{label}: {reason}"));
+                        continue;
+                    }
+                },
+                Err(reason) => {
+                    skipped.push(format!("{label}: {reason}"));
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        let allow_whole_batch = allow_batch
+            && !is_upgrade
+            && total_targets > 1
+            && !upgrades.automatic_retry
+            && trial_sources.is_none();
         progress::emit(
             "search",
             "info",
@@ -637,13 +719,13 @@ async fn run_auto_search_targets_with_upgrades(
         let eligible =
             |result: &crate::services::nyaa::SearchResult,
              incoming: &crate::services::source::ClassificationResult| {
-                if upgrades.recent_demand.is_some()
-                    && (crate::services::upgrade::release_covers_multiple(result)
-                        || result.replay_episodes.is_some()
-                        || result
-                            .release_mapping
-                            .as_ref()
-                            .is_some_and(|mapping| mapping.episodes() != [target_episode]))
+                if retry_series.is_some() && !can_retry_one_episode(result, target_episode) {
+                    return false;
+                }
+                if let Some(sources) = &trial_sources
+                    && sources
+                        .check(&result.info_hash, &result.title, trial_source(result))
+                        .is_err()
                 {
                     return false;
                 }
@@ -1028,6 +1110,68 @@ async fn run_auto_search_targets_with_upgrades(
                         "{label}: this exact source was excluded after discovery"
                     ));
                     continue;
+                }
+                if let Some(sid) = retry_series {
+                    use crate::services::recent_episodes::{TrialSources, retry_allowed};
+                    let config_now = if upgrades.automatic_retry {
+                        match config::get_config(&state.db).await {
+                            Ok(Some(current)) if current.auto_redownload_failed => Some(current),
+                            _ => {
+                                skipped.push(format!(
+                                    "{label}: automatic retry settings changed or are unavailable"
+                                ));
+                                continue;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    match retry_allowed(
+                        &state.db,
+                        config_now.as_ref().unwrap_or(&cfg),
+                        sid,
+                        target_episode,
+                    )
+                    .await
+                    {
+                        Ok(false) => {}
+                        Ok(true) => {
+                            // The failure budget may have changed while the search ran.
+                            let Some(row) = tracked.as_ref().filter(|row| row.id == sid) else {
+                                skipped
+                                    .push(format!("{label}: current retry owner is unavailable"));
+                                continue;
+                            };
+                            if !can_retry_one_episode(&result, target_episode) {
+                                skipped.push(format!(
+                                    "{label}: the hourly retry needs one verified episode"
+                                ));
+                                continue;
+                            }
+                            let source =
+                                crate::models::grabbed_torrents::source_replay::SourceRef {
+                                    url: &url,
+                                    ..trial_source(&result)
+                                };
+                            if let Err(reason) = TrialSources::reserve(
+                                &state.db,
+                                row,
+                                target_episode,
+                                &result.info_hash,
+                                &result.title,
+                                source,
+                            )
+                            .await
+                            {
+                                skipped.push(format!("{label}: {reason}"));
+                                continue;
+                            }
+                        }
+                        Err(reason) => {
+                            skipped.push(format!("{label}: {reason}"));
+                            continue;
+                        }
+                    }
                 }
                 let mut bound_prepared = None;
                 let mut existing_recent = false;
@@ -1513,6 +1657,15 @@ pub async fn auto_search_series(
     Path(request_id): Path<i64>,
     Query(q): Query<AutoSearchQuery>,
 ) -> Result<Json<auto_search::AutoSearchReport>, (axum::http::StatusCode, String)> {
+    auto_search_series_with_retry(state, request_id, q, false).await
+}
+
+pub(crate) async fn auto_search_series_with_retry(
+    state: AppState,
+    request_id: i64,
+    q: AutoSearchQuery,
+    automatic_retry: bool,
+) -> Result<Json<auto_search::AutoSearchReport>, (axum::http::StatusCode, String)> {
     let progress_handle = match progress::sanitize_progress_id(q.progress_id.as_deref()) {
         Some(id) => Some(state.progress.register(id).await),
         None => None,
@@ -1675,6 +1828,7 @@ pub async fn auto_search_series(
     // policy gate reads the revision, group, and score from.
     let upgrades = UpgradeContext {
         recent_demand: None,
+        automatic_retry,
         classifications: upgrade_targets
             .into_iter()
             .filter_map(|(t, classification)| match t {

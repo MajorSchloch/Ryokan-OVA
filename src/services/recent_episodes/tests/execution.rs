@@ -1,8 +1,10 @@
 use super::*;
+use crate::models::grabbed_torrents;
 use crate::services::download_client::{
     AddOutcome, DownloadClient, DownloadFile, DownloadItem, SelectiveOutcome,
 };
 use crate::services::indexers::{Indexer, IndexerCaps, Release, SearchQuery};
+use crate::services::redownload;
 use crate::test_support::build_test_app_state;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::Notify;
@@ -17,6 +19,7 @@ struct AddGate {
 struct Client {
     adds: AtomicUsize,
     duplicate: bool,
+    reject_add: AtomicBool,
     gate: Option<AddGate>,
 }
 #[async_trait::async_trait]
@@ -31,6 +34,9 @@ impl DownloadClient for Client {
         {
             gate.entered.notify_one();
             gate.finish.notified().await;
+        }
+        if self.reject_add.load(Ordering::SeqCst) {
+            return Err("Fixture rejected the download submission".into());
         }
         Ok(if self.duplicate {
             AddOutcome::AlreadyPresent
@@ -162,6 +168,7 @@ async fn state(mode: u8) -> (AppState, Arc<Client>, tempfile::TempDir) {
     let client = Arc::new(Client {
         adds: AtomicUsize::new(0),
         duplicate: mode == 6,
+        reject_add: AtomicBool::new(false),
         gate: (mode == 8).then(AddGate::default),
     });
     let state = build_test_app_state(db.clone(), Some(client.clone()));
@@ -305,10 +312,11 @@ async fn recovery_cooldown_uses_one_release_hold_and_leaves_search_slots_availab
     for failure in 0..redownload::LOOP_BREAKER {
         sqlx::query(
             "INSERT INTO grabbed_torrents(hash,torrent_name,series_id,episode_numbers,state,failure_reason)
-             VALUES(?,'Previous release',?,'[1]','failed','requirements_rejected')",
+             VALUES(?,'Previous release',?,'[1]','failed',?)",
         )
         .bind(format!("failed-{failure}"))
         .bind(capped)
+        .bind(redownload::CLIENT_ERROR_REASON)
         .execute(&state.db)
         .await
         .unwrap();
@@ -341,7 +349,171 @@ async fn recovery_cooldown_uses_one_release_hold_and_leaves_search_slots_availab
         .execute(&state.db)
         .await
         .unwrap();
-    assert_eq!(retry_limit_reason(&state.db, capped).await.unwrap(), None);
+    let cfg = config::get_config(&state.db).await.unwrap().unwrap();
+    let statuses = retry_statuses(&state.db, &cfg, &[capped]).await.unwrap();
+    assert_eq!(statuses[&(capped, 1)].timing, RetryTiming::NextPass);
+}
+
+#[tokio::test]
+async fn verified_rejections_delay_only_the_failed_episode_and_allow_a_later_alternative() {
+    let (state, client, _root) = state(8).await;
+    let sid = series::get_by_anilist_id(&state.db, 101)
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    sqlx::query(
+        "INSERT INTO episode_airings(series_id,episode,airing_at,duration_minutes)
+         VALUES(?,8,unixepoch('now')-1,24)",
+    )
+    .bind(sid)
+    .execute(&state.db)
+    .await
+    .unwrap();
+    crate::models::monitoring::set_episode_monitored(&state.db, sid, 8, true)
+        .await
+        .unwrap();
+
+    seed_verified_rejections(&state.db, sid).await;
+
+    let cfg = config::get_config(&state.db).await.unwrap().unwrap();
+    let statuses = retry_statuses(&state.db, &cfg, &[sid]).await.unwrap();
+    assert!(
+        matches!(statuses[&(sid, 7)].timing, RetryTiming::After(at) if at > chrono::Utc::now().timestamp())
+    );
+    assert!(
+        statuses[&(sid, 7)]
+            .reason
+            .contains("Verified media failures")
+    );
+    assert_eq!(statuses[&(sid, 8)].timing, RetryTiming::NextPass);
+
+    let first = run_once(&state).await.unwrap();
+    assert!(
+        first.contains("Checked 1 missing episodes: 1 queued"),
+        "{first}"
+    );
+    assert!(first.contains("Hourly retry held 1 episode."), "{first}");
+    let pending = grabbed_torrents::get_all_pending(&state.db).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].series_id, sid);
+    assert_eq!(pending[0].episode_numbers, vec![8]);
+    assert_eq!(pending[0].download_client_id, Some(1));
+    assert_eq!(client.adds.load(Ordering::SeqCst), 1);
+
+    age_verified_rejections(&state.db, sid).await;
+    let statuses = retry_statuses(&state.db, &cfg, &[sid]).await.unwrap();
+    assert_eq!(statuses[&(sid, 7)].timing, RetryTiming::NextPass);
+
+    let second = run_once(&state).await.unwrap();
+    assert!(
+        second.contains("Checked 1 missing episodes: 1 queued"),
+        "{second}"
+    );
+    let pending = grabbed_torrents::get_all_pending(&state.db).await.unwrap();
+    assert_eq!(pending.len(), 2);
+    let replacement = pending
+        .iter()
+        .find(|grab| grab.episode_numbers == [7])
+        .unwrap();
+    assert_eq!(replacement.hash, "a".repeat(40));
+    assert_eq!(replacement.series_id, sid);
+    assert_eq!(replacement.download_client_id, Some(1));
+    assert_eq!(client.adds.load(Ordering::SeqCst), 2);
+
+    let outcomes: Vec<i32> = sqlx::query_scalar(
+        "SELECT json_extract(detail,'$.episode') FROM library_activity
+         WHERE series_id=? AND action=? AND json_extract(detail,'$.outcome')='queued'
+         ORDER BY id",
+    )
+    .bind(sid)
+    .bind(FINISHED)
+    .fetch_all(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(outcomes, vec![8, 7]);
+}
+
+async fn seed_verified_rejections(db: &SqlitePool, sid: i64) {
+    for attempt in 1..=3 {
+        let id = crate::test_support::seed_grabbed_torrent(
+            db,
+            sid,
+            &format!("{attempt:040x}"),
+            &format!("[Previous{attempt}] Test Series - 07 [1080p WEB-DL]"),
+            &[7],
+        )
+        .await;
+        grabbed_torrents::stamp_completed_seen(db, id)
+            .await
+            .unwrap();
+        let completed_at = grabbed_torrents::completed_seen_at(db, id).await.unwrap();
+        let grab = grabbed_torrents::get_by_id(db, id).await.unwrap().unwrap();
+        assert!(
+            grabbed_torrents::fail_pending_requirements_attempt(db, &grab, &completed_at)
+                .await
+                .unwrap()
+        );
+    }
+}
+
+async fn age_verified_rejections(db: &SqlitePool, sid: i64) {
+    sqlx::query(
+        "UPDATE grabbed_torrents SET grabbed_at=datetime('now','-2 hours'),
+           completed_seen_at=datetime('now','-2 hours')
+         WHERE series_id=? AND state='failed' AND failure_reason=?",
+    )
+    .bind(sid)
+    .bind(crate::services::post_processing::REQUIREMENTS_REJECTED_REASON)
+    .execute(db)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn rejected_client_add_keeps_the_hourly_retry_hold() {
+    let (state, client, _root) = state(0).await;
+    let sid = series::get_by_anilist_id(&state.db, 101)
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    seed_verified_rejections(&state.db, sid).await;
+    age_verified_rejections(&state.db, sid).await;
+    client.reject_add.store(true, Ordering::SeqCst);
+
+    let first = run_once(&state).await.unwrap_err();
+    assert!(
+        first.contains("Checked 1 missing episodes: 0 queued, 0 held, 1 errors"),
+        "{first}"
+    );
+    assert_eq!(client.adds.load(Ordering::SeqCst), 1);
+    assert!(!has_pending(&state.db, sid, 7).await.unwrap());
+
+    let attempts: Vec<(i32, i64)> = sqlx::query_as(
+        "SELECT json_extract(detail,'$.episode'),unixepoch(occurred_at)
+         FROM library_activity WHERE series_id=? AND provider_id=101 AND action=?",
+    )
+    .bind(sid)
+    .bind("Automatic source retry attempted")
+    .fetch_all(&state.db)
+    .await
+    .unwrap();
+    let [(7, attempted_at)] = attempts.as_slice() else {
+        panic!("Expected one episode 7 retry attempt, got {attempts:?}");
+    };
+    let cfg = config::get_config(&state.db).await.unwrap().unwrap();
+    let statuses = retry_statuses(&state.db, &cfg, &[sid]).await.unwrap();
+    assert_eq!(
+        statuses[&(sid, 7)].timing,
+        RetryTiming::After(attempted_at + 3600)
+    );
+
+    client.reject_add.store(false, Ordering::SeqCst);
+    let next = run_once(&state).await.unwrap();
+    assert!(next.contains("Hourly retry held 1 episode."), "{next}");
+    assert_eq!(client.adds.load(Ordering::SeqCst), 1);
+    assert!(!has_pending(&state.db, sid, 7).await.unwrap());
 }
 
 #[tokio::test]

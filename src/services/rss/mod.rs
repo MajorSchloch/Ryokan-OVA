@@ -526,6 +526,67 @@ struct PendingCandidate {
     classification: ClassificationResult,
 }
 
+impl PendingCandidate {
+    fn trial_source(&self) -> crate::models::grabbed_torrents::source_replay::SourceRef<'_> {
+        crate::models::grabbed_torrents::source_replay::SourceRef {
+            url: self.item.grab_url(),
+            guid: &self.item.guid,
+            indexer_id: match self.item.source {
+                RssSource::Indexer { id, .. } => Some(id),
+                _ => None,
+            },
+            ..Default::default()
+        }
+    }
+
+    fn can_trial(&self, episode: i32) -> bool {
+        self.found.resolved_eps.len() == 1
+            && self.found.resolved_eps.contains(&episode)
+            && (!self.item.is_batch
+                || self.release_mapping.as_ref().is_some_and(|mapping| {
+                    mapping.bound_source().is_some() && mapping.episodes() == [episode]
+                }))
+    }
+}
+
+async fn precheck_episode_trial(
+    db: &sqlx::SqlitePool,
+    candidate: &PendingCandidate,
+    cooldowns: &crate::services::recent_episodes::FailureCooldowns,
+    sources: &mut HashMap<(i64, i32), crate::services::recent_episodes::TrialSources>,
+    now: i64,
+) -> Result<(), String> {
+    use crate::services::recent_episodes::TrialSources;
+    if candidate.is_upgrade {
+        return Ok(());
+    }
+    for &episode in &candidate.found.resolved_eps {
+        let sid = candidate.found.series.id;
+        // General failures and pending revisions keep their existing final
+        // check. Source eligibility must be checked before ranking a trial.
+        if let Some(hold) = cooldowns.episodes.get(&(sid, episode)) {
+            if hold.retry_at > now {
+                return Err(hold.reason.clone());
+            }
+            if !candidate.can_trial(episode) {
+                return Err("The hourly retry needs one verified episode".into());
+            }
+            let sources = match sources.entry((sid, episode)) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(TrialSources::load(db, sid, episode).await?)
+                }
+            };
+            sources.check(
+                &candidate.exact_hash,
+                &candidate.item.title,
+                candidate.trial_source(),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 impl SeriesMeta {
     fn from_series(series: &series::Series) -> Self {
         let mut alias_input = vec![
@@ -1752,6 +1813,19 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
 
     // The acquisition floor uses the same complete CF context as scoring,
     // including SeaDex hashes; source/CF upgrade cutoffs remain separate.
+    let now = chrono::Utc::now().timestamp();
+    let retry_series: Vec<_> = pending
+        .iter()
+        .filter(|candidate| !candidate.is_upgrade)
+        .map(|candidate| candidate.found.series.id)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let cooldowns =
+        crate::services::recent_episodes::failure_cooldowns(&state.db, &retry_series, now)
+            .await
+            .map_err(|error| error.to_string())?;
+    let mut trial_sources = HashMap::new();
     let mut eligible_pending = Vec::with_capacity(pending.len());
     for candidate in pending {
         let hashes = seadex_hashes
@@ -1803,6 +1877,20 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                 "Blocklisted release | {}",
                 build_match_diag(&candidate.item, Some(&candidate.found), candidate.score)
             );
+            record_availability_hold(
+                state,
+                &candidate.item,
+                &candidate.item_key,
+                &candidate.found,
+                &reason,
+            )
+            .await;
+            continue;
+        }
+        if let Err(reason) =
+            precheck_episode_trial(&state.db, &candidate, &cooldowns, &mut trial_sources, now).await
+        {
+            skipped += 1;
             record_availability_hold(
                 state,
                 &candidate.item,
@@ -1997,19 +2085,28 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             .await;
             continue;
         }
+        let mut trial_episode = None;
         if !cand.is_upgrade {
             let mut hold = None;
-            for ep in &cand.found.resolved_eps {
-                if let Err(reason) = crate::services::recent_episodes::retry_allowed(
+            for &ep in &cand.found.resolved_eps {
+                match crate::services::recent_episodes::retry_allowed(
                     &state.db,
                     &cfg,
                     cand.found.series.id,
-                    *ep,
+                    ep,
                 )
                 .await
                 {
-                    hold = Some(reason);
-                    break;
+                    Ok(false) => {}
+                    Ok(true) if cand.can_trial(ep) => trial_episode = Some(ep),
+                    Ok(true) => {
+                        hold = Some("The hourly retry needs one verified episode".into());
+                        break;
+                    }
+                    Err(reason) => {
+                        hold = Some(reason);
+                        break;
+                    }
                 }
             }
             let slots = media::library_slots(
@@ -2051,6 +2148,21 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                 "This exact source was excluded after RSS discovery",
             )
             .await;
+            continue;
+        }
+        if let Some(episode) = trial_episode
+            && let Err(reason) = crate::services::recent_episodes::TrialSources::reserve(
+                &state.db,
+                &cand.found.series,
+                episode,
+                info_hash,
+                &cand.item.title,
+                cand.trial_source(),
+            )
+            .await
+        {
+            skipped += 1;
+            record_availability_hold(state, &cand.item, &cand.item_key, &cand.found, &reason).await;
             continue;
         }
         let mut prepared_bound = None;

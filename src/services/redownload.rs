@@ -6,7 +6,7 @@
 //! ordinary import failures remain for review (`import_stalled`, an
 //! all-files-failed import). A probed source that conclusively fails the
 //! configured media minimum can try another release, under the same
-//! setting and failure budget. The misgrab sweep has its own gate.
+//! setting and an episode-level failure budget. The misgrab sweep has its own gate.
 //!
 //! The failed row is already the blocklist entry, so the search cannot
 //! pick the same release again; [`LOOP_BREAKER`] keeps a series whose
@@ -20,8 +20,8 @@ use crate::models::{
 };
 use crate::services::{auto_search, logger, media};
 
-/// Failed grabs per series within [`WINDOW_HOURS`] after which the
-/// automatic re-search stops. The misgrab sweep has its own counter.
+/// Failed grabs within [`WINDOW_HOURS`] before pacing starts. General failures
+/// count per series and verified media failures count per episode.
 pub const LOOP_BREAKER: i64 = 3;
 pub const WINDOW_HOURS: i64 = 24;
 
@@ -147,6 +147,14 @@ pub async fn after_requirements_rejected(state: &AppState, grab: &GrabbedTorrent
     {
         return false;
     }
+    // The scheduled paths own the hourly trial once the initial episode
+    // budget is spent. This immediate path still retries the earlier failures.
+    if !matches!(
+        crate::services::recent_episodes::retry_allowed(&state.db, &cfg, grab.series_id, ep).await,
+        Ok(false)
+    ) {
+        return false;
+    }
     after_failure(state, grab, "a verified media-requirement rejection").await
 }
 
@@ -159,12 +167,12 @@ async fn after_failure(state: &AppState, grab: &GrabbedTorrent, why: &str) -> bo
         .flatten()
         .map(|c| c.auto_redownload_failed)
         .unwrap_or(false);
-    let recent = grabbed_torrents::count_recent_failed(&state.db, grab.series_id, WINDOW_HOURS)
+    let on_hold = crate::services::recent_episodes::release_on_hold(&state.db, grab.series_id)
         .await
-        .unwrap_or(LOOP_BREAKER);
-    match decide(enabled, recent) {
+        .unwrap_or(true);
+    match decide(enabled, if on_hold { LOOP_BREAKER } else { 0 }) {
         Ok(()) => {
-            search_replacement(state, grab, why).await;
+            search_replacement_with_retry(state, grab, why, true).await;
             true
         }
         Err(Skip::Disabled) => {
@@ -185,7 +193,7 @@ async fn after_failure(state: &AppState, grab: &GrabbedTorrent, why: &str) -> bo
                 &state.db,
                 LogCategory::AutoSearch,
                 &format!(
-                    "Not re-searching after {} for '{}': {} failed grabs for this series in {}h",
+                    "Not re-searching after {} for '{}': at least {} download failures for this series in {}h",
                     why, grab.torrent_name, n, WINDOW_HOURS
                 ),
                 "the series needs a look; check the download client and the configured indexers",
@@ -269,6 +277,15 @@ pub async fn remove_failed_from_client(state: &AppState, grab: &GrabbedTorrent) 
 /// monitored episode, Sonarr's season search included). Shared with the
 /// misgrab sweep, which gates it on its own counter.
 pub async fn search_replacement(state: &AppState, grab: &GrabbedTorrent, why: &str) {
+    search_replacement_with_retry(state, grab, why, false).await;
+}
+
+async fn search_replacement_with_retry(
+    state: &AppState,
+    grab: &GrabbedTorrent,
+    why: &str,
+    automatic_retry: bool,
+) {
     let Some(series_row) = series::get_by_id(&state.db, grab.series_id)
         .await
         .ok()
@@ -291,7 +308,8 @@ pub async fn search_replacement(state: &AppState, grab: &GrabbedTorrent, why: &s
     let state = state.clone();
     tokio::spawn(async move {
         use crate::handlers::library::search::{
-            AutoSearchQuery, auto_search_series, run_auto_search_targets,
+            AutoSearchQuery, auto_search_series_with_retry, run_auto_search_targets,
+            run_failed_download_search,
         };
         let outcome = match single_episode {
             Some(ep) => {
@@ -299,14 +317,19 @@ pub async fn search_replacement(state: &AppState, grab: &GrabbedTorrent, why: &s
                     Ok(Some(cached)) => auto_search::SearchTarget::for_episode(&cached.detail, ep),
                     _ => auto_search::SearchTarget::Episode(ep),
                 };
-                run_auto_search_targets(&state, series_id, vec![target], false, Some(series_id))
-                    .await
-                    .map(|r| r.grabbed.len())
+                if automatic_retry {
+                    run_failed_download_search(&state, series_id, target).await
+                } else {
+                    run_auto_search_targets(&state, series_id, vec![target], false, Some(series_id))
+                        .await
+                }
+                .map(|r| r.grabbed.len())
             }
-            None => auto_search_series(
-                axum::extract::State(state.clone()),
-                axum::extract::Path(series_id),
-                axum::extract::Query(AutoSearchQuery::default()),
+            None => auto_search_series_with_retry(
+                state.clone(),
+                series_id,
+                AutoSearchQuery::default(),
+                automatic_retry,
             )
             .await
             .map(|json| json.0.grabbed.len()),

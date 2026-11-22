@@ -38,16 +38,22 @@ async fn identity(
         .fetch_optional(&mut *db)
         .await?
         .ok_or_else(|| fail("the source indexer no longer exists"))?;
+    indexer_identity(indexer, row.get("kind"), row.get("url"), source.guid)
+}
+
+pub(crate) fn indexer_identity(
+    id: i64,
+    kind: &str,
+    url: &str,
+    guid: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    if guid.trim().is_empty() {
+        return Ok(None);
+    }
     // Preserve the opaque configured endpoint. Never strip credentials or
     // reconstruct a Prowlarr/Jackett URL. Only the digest is stored/exported.
-    let input = serde_json::to_vec(&(
-        1,
-        indexer,
-        row.get::<String, _>("kind"),
-        row.get::<String, _>("url"),
-        source.guid,
-    ))
-    .map_err(|e| sqlx::Error::Decode(e.into()))?;
+    let input =
+        serde_json::to_vec(&(1, id, kind, url, guid)).map_err(|e| sqlx::Error::Decode(e.into()))?;
     Ok(Some(format!(
         "indexer-guid-v1:{}",
         hex::encode(Sha256::digest(input))
