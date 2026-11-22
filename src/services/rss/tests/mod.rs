@@ -16,3 +16,4 @@ mod title_identity;
 
 mod admission;
 mod current_history;
+mod rate_limits;

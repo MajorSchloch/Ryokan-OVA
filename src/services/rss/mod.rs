@@ -11,6 +11,7 @@ use crate::{
     AppState,
     models::log::LogCategory,
     models::{config, episode_tags, monitoring, rss, series},
+    services::indexers::cooldown,
     services::source::{self, ClassificationResult, Resolution, Source},
     services::{auto_search, logger, media, monitoring as monitoring_service, quality},
 };
@@ -800,6 +801,22 @@ async fn fetch_all_sources(
                     crate::models::indexers::record_rss_poll_metrics(&state.db, row.id, count, "")
                         .await;
             }
+            Err(err) if cooldown::is_deferred(&err) => {
+                // The cooldown bypasses the request. Keep the last real poll
+                // metrics and report the deadline once.
+                if logger::first_in_window(
+                    &format!("rss-indexer-deferred:{}:{err}", row.id),
+                    std::time::Duration::from_secs(cooldown::MAX_WAIT_SECONDS),
+                ) {
+                    logger::info(
+                        &state.db,
+                        LogCategory::Rss,
+                        &format!("Indexer-RSS poll deferred: {}", row.name),
+                        &err,
+                    )
+                    .await;
+                }
+            }
             Err(err) => {
                 let _ =
                     crate::models::indexers::record_rss_poll_metrics(&state.db, row.id, 0, &err)
@@ -811,17 +828,8 @@ async fn fetch_all_sources(
                     &err,
                 )
                 .await;
-                // Opportunistic IndexerDown notification with per-id
-                // 1h dedup. Suppress the cooldown shape since that's
-                // the upstream's own rate-limit signaling and not an
-                // "indexer is down" condition the user needs paged
-                // about — once the cooldown lifts, the next tick
-                // either succeeds (no event) or returns a real error
-                // (real event). The string-prefix match here mirrors
-                // the project-wide tag-prefix error convention; the
-                // exact prefix is set in
-                // `services/indexers/torznab/client.rs`'s 429 path.
-                if !err.starts_with("Indexer rate-limited") {
+                // Notify only on errors that can indicate an outage.
+                if !cooldown::is_rate_limit(&err) {
                     crate::services::notifications::emit_indexer_down(state, row.id, &err).await;
                 }
             }

@@ -39,7 +39,7 @@ pub async fn new_fixture_with_row(
     (server, client)
 }
 
-fn sample_row_for(server: &MockServer, kind: &str, display_name: &str) -> IndexerRow {
+pub(super) fn sample_row_for(server: &MockServer, kind: &str, display_name: &str) -> IndexerRow {
     IndexerRow {
         id: 7,
         name: display_name.to_string(),
