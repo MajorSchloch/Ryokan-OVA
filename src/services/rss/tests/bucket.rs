@@ -65,6 +65,7 @@ fn candidate(title: &str, score: i32) -> PendingCandidate {
     PendingCandidate {
         item_key: title.to_string(),
         item,
+        exact_hash: String::new(),
         found,
         score,
         new_episode_count: 1,
