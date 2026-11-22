@@ -2,9 +2,8 @@
 //! (`services::rss::sync_once`). A release the misgrab sweep removed,
 //! or the user failed, must never be re-grabbed from a feed: by hash
 //! when the item carries one, by exact title for the same series when
-//! it does not. Drives a real direct feed through the whole loop so
-//! the gate is pinned where it sits, after matching and scoring and
-//! before the client add, rather than in isolation.
+//! it does not. Drives a real direct feed through ranking and client
+//! dispatch so a blocked release cannot hide an eligible alternative.
 //!
 //! No env var to coordinate: the feed URL is a table row. Nyaa's own
 //! RSS is switched off in the seeded config (it is on by default) so
@@ -383,4 +382,148 @@ async fn rss_sync_grabs_the_same_items_when_nothing_is_blocklisted() {
     let summary = sync_once(&state, "manual").await.expect("sync runs");
     assert_eq!(summary.grabbed, 3, "{summary:?}");
     assert_eq!(client.add_calls().len(), 3);
+}
+
+#[tokio::test]
+async fn automatic_rss_grabs_next_eligible_release_when_top_ranked_one_is_blocklisted() {
+    const PREFERRED_TITLE: &str = "[Preferred] Blocklist Feed Show - 04 (1080p) [WEB].mkv";
+    const FALLBACK_TITLE: &str = "[Fallback] Blocklist Feed Show - 04 (1080p) [WEB].mkv";
+    const PREFERRED_HASH: &str = "dddddddddddddddddddddddddddddddddddddddd";
+    const FALLBACK_HASH: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+    let mock = MockServer::start().await;
+    let items = [
+        (PREFERRED_TITLE, PREFERRED_HASH),
+        (FALLBACK_TITLE, FALLBACK_HASH),
+    ]
+    .into_iter()
+    .map(|(title, hash)| {
+        format!(
+            "<item><title>{title}</title><guid>{hash}</guid>\
+                 <nyaa:magneturi>magnet:?xt=urn:btih:{hash}</nyaa:magneturi>\
+                 <nyaa:infohash>{hash}</nyaa:infohash><nyaa:seeders>10</nyaa:seeders></item>"
+        )
+    })
+    .collect::<String>();
+    let feed =
+        format!("<rss xmlns:nyaa=\"https://nyaa.si/xmlns/nyaa\"><channel>{items}</channel></rss>");
+    Mock::given(method("GET"))
+        .and(path("/feed"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(feed))
+        .expect(2)
+        .mount(&mock)
+        .await;
+
+    // Verify both the ranking with an empty blocklist and the automatic fallback.
+    for (block_preferred, (expected_title, expected_hash, rejected_title, reason)) in [
+        (
+            false,
+            (
+                PREFERRED_TITLE,
+                PREFERRED_HASH,
+                FALLBACK_TITLE,
+                "Lower score",
+            ),
+        ),
+        (
+            true,
+            (
+                FALLBACK_TITLE,
+                FALLBACK_HASH,
+                PREFERRED_TITLE,
+                "Blocklisted release",
+            ),
+        ),
+    ] {
+        let db = in_memory_pool().await;
+        let media = tempfile::tempdir().unwrap();
+        ryokan::models::config::save_config(
+            &db,
+            &ryokan::models::config::Config {
+                rss_enabled: false,
+                preferred_groups: "Preferred,Fallback".into(),
+                auto_redownload_failed: true,
+                media_root: media.path().to_string_lossy().into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let series_id = seed_monitored_series(&db).await;
+        if block_preferred {
+            let id = ryokan::test_support::seed_grabbed_torrent(
+                &db,
+                series_id,
+                PREFERRED_HASH,
+                PREFERRED_TITLE,
+                &[4],
+            )
+            .await;
+            sqlx::query(
+                "UPDATE grabbed_torrents SET state = 'failed', failure_reason = 'requirements_rejected' WHERE id = ?",
+            )
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        direct_rss_feeds::insert(
+            &db,
+            DirectRssFeedForm {
+                name: "Ranking Feed",
+                url: &format!("{}/feed", mock.uri()),
+                enabled: true,
+                download_client_id: None,
+                request_timeout_secs: None,
+            },
+        )
+        .await
+        .unwrap();
+        let client = Arc::new(RecordingClient {
+            add_calls: Mutex::new(Vec::new()),
+        });
+        let state = build_test_app_state(db.clone(), Some(client.clone()));
+
+        let summary = sync_once(&state, "auto").await.unwrap();
+        let decisions = rss::recent_decisions(&db, 10).await.unwrap();
+        assert_eq!(summary.items_seen, 2, "{summary:?}");
+        assert_eq!(summary.matched, 2, "{summary:?}");
+        assert_eq!(summary.grabbed, 1, "{summary:?}\n{decisions:#?}");
+        assert_eq!(summary.skipped, 1, "{summary:?}");
+        assert_eq!(
+            client.add_calls(),
+            vec![(
+                format!("magnet:?xt=urn:btih:{expected_hash}"),
+                expected_hash.into()
+            )]
+        );
+        assert_eq!(decisions.len(), 2, "{decisions:?}");
+        assert!(
+            decisions.iter().any(|decision| {
+                decision.title == rejected_title
+                    && decision.decision == "rejected"
+                    && decision.reason.starts_with(reason)
+            }),
+            "{decisions:?}"
+        );
+        assert!(
+            decisions.iter().any(|decision| {
+                decision.title == expected_title && decision.decision == "grabbed"
+            }),
+            "{decisions:?}"
+        );
+
+        let pending = grabbed_torrents::get_all_pending(&db).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].hash, expected_hash);
+        assert_eq!(pending[0].series_id, series_id);
+        assert_eq!(pending[0].episode_numbers, vec![4]);
+        assert_eq!(pending[0].download_client_id, Some(1));
+        let saved = grabbed_torrents::get_release_mapping(&db, pending[0].id)
+            .await
+            .unwrap()
+            .expect("RSS persists the episode numbering decision");
+        assert_eq!(saved.anilist_id, 9101);
+        assert_eq!(saved.episodes(), vec![4]);
+    }
 }

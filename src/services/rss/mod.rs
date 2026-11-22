@@ -349,21 +349,25 @@ fn exact_item_hash(item: &RssItem) -> Result<String, String> {
 
 /// Exact reviewed content can identify a tracked entry before title/offset
 /// heuristics. Multiple reviewed owners remain a hold, not an arbitrary winner.
+/// Return the validated hash for the blocklist and client admission as well.
 async fn exact_source_match(
     db: &sqlx::SqlitePool,
     item: &RssItem,
     all_meta: &[SeriesMeta],
     automatic_sources: &crate::services::source_numbering::loader::Resolver,
 ) -> Result<
-    Option<(
-        MatchResult,
-        crate::services::release_numbering::ReleaseMapping,
-    )>,
+    (
+        String,
+        Option<(
+            MatchResult,
+            crate::services::release_numbering::ReleaseMapping,
+        )>,
+    ),
     String,
 > {
     let hash = exact_item_hash(item)?;
     if hash.is_empty() {
-        return Ok(None);
+        return Ok((hash, None));
     }
     let migration: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM grabbed_torrents WHERE hash=? COLLATE NOCASE AND library_migration_bridge IS NOT NULL)")
         .bind(&hash).fetch_one(db).await.map_err(|error| error.to_string())?;
@@ -376,7 +380,7 @@ async fn exact_source_match(
                 "Episode mapping: migration replay conflicts with a source-numbering review".into(),
             );
         }
-        return Ok(None);
+        return Ok((hash, None));
     }
     let mut saved_sources = crate::models::source_numbering::lookup_hash(db, &hash).await?;
     if saved_sources.iter().any(|saved| {
@@ -479,7 +483,7 @@ async fn exact_source_match(
             "Episode mapping: exact source has no tracked owner; source remains on hold".into(),
         );
     }
-    Ok(selected)
+    Ok((hash, selected))
 }
 
 struct CandidateDecision {
@@ -509,6 +513,7 @@ struct SeriesMeta {
 struct PendingCandidate {
     item: RssItem,
     item_key: String,
+    exact_hash: String,
     found: MatchResult,
     score: i32,
     new_episode_count: i32,
@@ -1064,8 +1069,9 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             continue;
         }
 
-        let exact = match exact_source_match(&state.db, &item, &all_meta, &automatic_sources).await
-        {
+        let source_match =
+            exact_source_match(&state.db, &item, &all_meta, &automatic_sources).await;
+        let (exact_hash, exact) = match source_match {
             Ok(value) => value,
             Err(reason) => {
                 skipped += 1;
@@ -1701,6 +1707,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         pending.push(PendingCandidate {
             item,
             item_key,
+            exact_hash,
             found,
             // Scored below, once the SeaDex hashes are in.
             score: 0,
@@ -1779,9 +1786,34 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                 },
             )
             .await;
-        } else {
-            eligible_pending.push(candidate);
+            continue;
         }
+        // Choose the winner from eligible sources. A blocked release must
+        // never suppress another candidate for the same episode.
+        if crate::models::grabbed_torrents::is_blocklisted_release(
+            &state.db,
+            candidate.found.series.id,
+            &candidate.exact_hash,
+            &candidate.item.title,
+        )
+        .await
+        {
+            skipped += 1;
+            let reason = format!(
+                "Blocklisted release | {}",
+                build_match_diag(&candidate.item, Some(&candidate.found), candidate.score)
+            );
+            record_availability_hold(
+                state,
+                &candidate.item,
+                &candidate.item_key,
+                &candidate.found,
+                &reason,
+            )
+            .await;
+            continue;
+        }
+        eligible_pending.push(candidate);
     }
     let pending = eligible_pending;
 
@@ -1893,15 +1925,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         // Keep the original source URL for reviewed release mappings.
         let magnet = cand.item.nyaa_dispatch_magnet();
         let client_url = magnet.as_deref().unwrap_or(grab_url);
-        let info_hash = match exact_item_hash(&cand.item) {
-            Ok(hash) => hash,
-            Err(reason) => {
-                skipped += 1;
-                record_availability_hold(state, &cand.item, &cand.item_key, &cand.found, &reason)
-                    .await;
-                continue;
-            }
-        };
+        let info_hash = cand.exact_hash.as_str();
         // multi-rss commit F — resolve the dispatch client per-item
         // based on the source's pin (Nyaa pin / indexer pin /
         // direct-feed pin). A pin pointing at a deleted client
@@ -1937,46 +1961,6 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             .await;
             continue;
         };
-        // use the returning-id variant so SAB grabs persist
-        // their `nzo_id` instead of the pre-computed BT-style hash.
-        // For BT clients the returned id equals `info_hash` (default
-        // impl), no behavior change.
-        // Misgrab guardrails: the blocklist wins over RSS matching. A
-        // release the sweep removed (or the user failed) is never
-        // re-grabbed from a feed, by hash or by exact title.
-        if crate::models::grabbed_torrents::is_blocklisted_release(
-            &state.db,
-            cand.found.series.id,
-            &info_hash,
-            &cand.item.title,
-        )
-        .await
-        {
-            skipped += 1;
-            let reason = format!(
-                "Blocklisted release | {}",
-                build_match_diag(&cand.item, Some(&cand.found), cand.score)
-            );
-            let (src_str, src_id) = source_dedup_key(&cand.item.source);
-            let _ = rss::record_decision(
-                &state.db,
-                rss::DecisionRecord {
-                    item_key: &cand.item_key,
-                    title: &cand.item.title,
-                    link: &cand.item.link,
-                    series_id: Some(cand.found.series.id),
-                    series_title: &cand.found.series.title,
-                    group_name: &cand.item.group,
-                    is_batch: cand.item.is_batch,
-                    decision: "rejected",
-                    reason: &reason,
-                    source: src_str,
-                    source_id: src_id,
-                },
-            )
-            .await;
-            continue;
-        }
         // Coordinate final admission with imports and search retries. The
         // finite RSS pass already holds RSS_SYNC_LOCK; provider work above
         // stays outside the import/configuration locks.
@@ -2053,7 +2037,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
         if crate::models::grabbed_torrents::is_blocklisted_release(
             &state.db,
             cand.found.series.id,
-            &info_hash,
+            info_hash,
             &cand.item.title,
         )
         .await
@@ -2078,7 +2062,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             crate::services::source_numbering_grab::add_bound(
                 client.as_ref(),
                 client_url,
-                &info_hash,
+                info_hash,
                 mapping,
             )
             .await
@@ -2089,7 +2073,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             })
         } else {
             client
-                .add_torrent_returning_id(client_url, &info_hash)
+                .add_torrent_returning_id(client_url, info_hash)
                 .await
                 .map(|(_, id)| id)
         };
