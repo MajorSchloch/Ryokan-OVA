@@ -4461,6 +4461,7 @@ mod episode_set_tests {
             resolution: Resolution::R720p,
             subtitles_satisfied: false,
             audio_satisfied: true,
+            present_target_audio: 0,
             duration_seconds: Some(1364.676),
         };
         let aliases = vec![
@@ -4579,6 +4580,7 @@ mod episode_set_tests {
             resolution: Resolution::R1080p,
             subtitles_satisfied: false,
             audio_satisfied: true,
+            present_target_audio: 0,
             duration_seconds: None,
         };
         let judge = |result: &SearchResult| {

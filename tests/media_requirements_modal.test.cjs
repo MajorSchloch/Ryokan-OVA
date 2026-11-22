@@ -113,3 +113,18 @@ test('requested dub is separate from subtitles and uses the effective release la
     assert.match(section.innerHTML, /Unknown language · aac/);
     assert.doesNotMatch(section.innerHTML, /English|Required dialogue audio present/);
 });
+
+test('good enough audio remains separate after minimum dialogue and video pass', () => {
+    const audio = { enabled: true, required_languages: ['ja'], match_mode: 'all', satisfied: true };
+    const html = context.renderMediaRequirements(status({
+        target_resolution: '1080p',
+        selectable_subtitles_satisfied: true,
+        target_audio_languages: ['ja', 'en'],
+        target_audio_languages_satisfied: false,
+    }), languages, true, audio);
+    assert.match(html, /Minimum<\/dt><dd>Passed/);
+    assert.match(html, /Good enough target<\/dt><dd>Below target/);
+    assert.match(html, /Required audio<\/dt><dd>All of: Japanese/);
+    assert.match(html, /Good enough audio<\/dt><dd>Japanese, English/);
+    assert.match(html, /Waiting for the selected dialogue languages/);
+});

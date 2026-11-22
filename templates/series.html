@@ -183,6 +183,7 @@
 
 
 <section data-title-panel="settings">
+{% if let Some(requirements) = requirements %}{% include "partials/library/requirements.html" %}{% else %}<p class="form-hint">Add this release to configure its requirements.</p>{% endif %}
 <details class="management-panel other-titles"><summary>Other titles and synonyms</summary><dl><dt>English</dt><dd>{{ detail.title_english }}</dd><dt>Romaji</dt><dd>{{ detail.title_romaji }}</dd><dt>Native</dt><dd>{{ detail.title_native }}</dd></dl>{% if !detail.synonyms.is_empty() %}<p>Provider synonyms</p><ul class="title-chips">{% for alias in detail.synonyms %}<li>{{ alias }}</li>{% endfor %}</ul>{% endif %}</details>
 <!-- Folder mapping -->
 {% if is_tracked %}
@@ -250,7 +251,6 @@
 </div>
 {% endif %}
 
-{% if let Some(requirements) = requirements %}{% include "partials/library/requirements.html" %}{% else %}<p class="form-hint">Add this release to configure its requirements.</p>{% endif %}
 </section>
 <section data-title-panel="episodes">
 <section class="release-overview" aria-label="Release management">

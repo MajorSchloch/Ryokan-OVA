@@ -1,4 +1,4 @@
-//! Nullable quality overrides. Language overrides retain their existing storage.
+//! Nullable media target overrides. Minimum language overrides retain their existing storage.
 use sqlx::{Row, SqlitePool};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, sqlx::FromRow)]
@@ -7,6 +7,7 @@ pub struct QualityPreferences {
     pub target_resolution: Option<String>,
     pub minimum_subtitle_check: Option<bool>,
     pub target_subtitle_check: Option<bool>,
+    pub target_audio_languages: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, sqlx::FromRow)]
@@ -31,6 +32,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         ("target_resolution", "TEXT"),
         ("minimum_subtitle_check", "BOOLEAN"),
         ("target_subtitle_check", "BOOLEAN"),
+        ("target_audio_languages", "TEXT"),
     ] {
         if !columns.iter().any(|r| r.get::<String, _>("name") == name) {
             sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -56,10 +58,23 @@ pub async fn save_quality(
     series_id: i64,
     p: &QualityPreferences,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO series_language_preferences(series_id,minimum_resolution,target_resolution,minimum_subtitle_check,target_subtitle_check)
-        VALUES(?,?,?,?,?) ON CONFLICT(series_id) DO UPDATE SET minimum_resolution=excluded.minimum_resolution,
-        target_resolution=excluded.target_resolution,minimum_subtitle_check=excluded.minimum_subtitle_check,target_subtitle_check=excluded.target_subtitle_check")
-        .bind(series_id).bind(&p.minimum_resolution).bind(&p.target_resolution).bind(p.minimum_subtitle_check).bind(p.target_subtitle_check).execute(db).await?;
+    sqlx::query(
+        "INSERT INTO series_language_preferences(
+            series_id,minimum_resolution,target_resolution,minimum_subtitle_check,target_subtitle_check,
+            target_audio_languages
+        ) VALUES(?,?,?,?,?,?) ON CONFLICT(series_id) DO UPDATE SET
+            minimum_resolution=excluded.minimum_resolution,target_resolution=excluded.target_resolution,
+            minimum_subtitle_check=excluded.minimum_subtitle_check,target_subtitle_check=excluded.target_subtitle_check,
+            target_audio_languages=excluded.target_audio_languages",
+    )
+    .bind(series_id)
+    .bind(&p.minimum_resolution)
+    .bind(&p.target_resolution)
+    .bind(p.minimum_subtitle_check)
+    .bind(p.target_subtitle_check)
+    .bind(&p.target_audio_languages)
+    .execute(db)
+    .await?;
     Ok(())
 }
 
@@ -87,6 +102,6 @@ pub async fn franchise(db: &SqlitePool, id: &str) -> Result<FranchisePreferences
 }
 
 pub async fn quality(db: &SqlitePool, id: i64) -> Result<QualityPreferences, sqlx::Error> {
-    Ok(sqlx::query_as("SELECT minimum_resolution,target_resolution,minimum_subtitle_check,target_subtitle_check FROM series_language_preferences WHERE series_id=?")
+    Ok(sqlx::query_as("SELECT minimum_resolution,target_resolution,minimum_subtitle_check,target_subtitle_check,target_audio_languages FROM series_language_preferences WHERE series_id=?")
         .bind(id).fetch_optional(db).await?.unwrap_or_default())
 }

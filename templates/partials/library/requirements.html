@@ -1,24 +1,79 @@
 <section id="media-requirements-form" class="management-panel">
     <h3>{% if requirements.scope == "franchise" %}Franchise defaults{% else %}Release requirements{% endif %}</h3>
     <p class="form-hint">App defaults → franchise defaults → release overrides. Inherit each field or set an exception. Saving does not start a search.</p>
-    {% if !requirements.enabled %}<p class="alert alert-warn">Minimum + good enough mode is off. Language rules still apply; upgrades use the quality cutoff.</p>{% endif %}
+    {% if !requirements.enabled %}<p class="alert alert-warn">Minimum + good enough mode is off. {% if requirements.scope == "release" %}Minimum language rules still apply. Upgrades use the quality cutoff.{% else %}Language rules still apply; upgrades use the quality cutoff.{% endif %}</p>{% endif %}
     {% if !requirements.error.is_empty() %}<p class="alert alert-error" role="alert">{{ requirements.error }}</p>{% endif %}
     {% if !requirements.message.is_empty() %}<p class="alert alert-success" role="status">{{ requirements.message }}</p>{% endif %}
     <form action="/library/requirements" method="post" hx-post="/library/requirements" hx-target="#media-requirements-form" hx-swap="outerHTML" hx-disable="find button[type='submit']">
         <input type="hidden" name="scope" value="{{ requirements.scope }}"><input type="hidden" name="id" value="{{ requirements.id }}"><input type="hidden" name="return_to" value="{{ requirements.return_to }}">
-        <div class="requirement-fields">
+        <div class="requirement-fields{% if requirements.scope == "release" %} release-requirement-fields{% endif %}">
         {% for field in requirements.fields %}
-        <div class="form-group"><label for="requirement-{{ field.name }}">{{ field.label }}</label>
+        {% if requirements.scope == "release" && (field.name == "minimum_resolution" || field.name == "target_resolution") %}
+        <fieldset class="form-group requirement-choices" aria-describedby="requirement-effective-{{ field.name }}">
+            <legend>{{ field.label }}</legend>
+            <div class="requirement-picks">
+                {% for (value, label) in field.options %}
+                <label><input type="radio" name="{{ field.name }}" value="{{ value }}"{% if field.value == *value %} checked{% endif %}> {{ label }}</label>
+                {% endfor %}
+            </div>
+            <small id="requirement-effective-{{ field.name }}">Effective: {{ field.effective }} · {{ field.origin }}</small>
+        </fieldset>
+        {% else %}
+        <div class="form-group{% if requirements.scope == "release" && field.name == "subtitle_mode" %} requirement-subtitle-languages{% endif %}">
+            <label for="requirement-{{ field.name }}">{{ field.label }}</label>
             <select id="requirement-{{ field.name }}" name="{{ field.name }}">{% for (value,label) in field.options %}<option value="{{ value }}"{% if field.value == *value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select>
             <small>Effective: {{ field.effective }} · {{ field.origin }}</small>
             {% if field.name == "audio_mode" %}
-            <label for="requirement-audio">Required audio languages</label><input id="requirement-audio" name="audio_languages" value="{{ requirements.audio }}" placeholder="Japanese, German or language codes">
+            {% if requirements.scope == "release" %}
+            <div class="requirement-custom-languages">
+                <div class="requirement-picks" role="group" aria-label="Required audio languages">
+                    {% for option in requirements.audio.options %}
+                    <label><input type="checkbox" name="audio_lang_{{ option.code }}"{% if option.selected %} checked{% endif %}> {{ option.name }}</label>
+                    {% endfor %}
+                </div>
+                <label for="requirement-audio">Other audio languages</label>
+                <input type="text" id="requirement-audio" name="audio_languages" value="{{ requirements.audio.other }}" placeholder="Names or codes, separated by commas">
+                <label for="requirement-audio-match">Multiple audio languages</label>
+                <select id="requirement-audio-match" name="audio_match"><option value="all"{% if requirements.audio_match == "all" %} selected{% endif %}>Require all listed</option><option value="any"{% if requirements.audio_match == "any" %} selected{% endif %}>Require any listed</option></select>
+            </div>
+            {% else %}
+            <label for="requirement-audio">Required audio languages</label><input id="requirement-audio" name="audio_languages" value="{{ requirements.audio.other }}" placeholder="Japanese, German or language codes">
             <label for="requirement-audio-match">Multiple audio languages</label><select id="requirement-audio-match" name="audio_match"><option value="all"{% if requirements.audio_match == "all" %} selected{% endif %}>Require all listed</option><option value="any"{% if requirements.audio_match == "any" %} selected{% endif %}>Require any listed</option></select>
+            {% endif %}
             {% else if field.name == "subtitle_mode" %}
-            <label for="requirement-subs">Required subtitle languages</label><input id="requirement-subs" name="subtitle_languages" value="{{ requirements.subtitles }}" placeholder="English, Spanish or language codes">
+            {% if requirements.scope == "release" %}
+            <div class="requirement-custom-languages">
+                <div class="requirement-picks" role="group" aria-label="Required subtitle languages">
+                    {% for option in requirements.subtitles.options %}
+                    <label><input type="checkbox" name="subtitle_lang_{{ option.code }}"{% if option.selected %} checked{% endif %}> {{ option.name }}</label>
+                    {% endfor %}
+                </div>
+                <label for="requirement-subs">Other subtitle languages</label>
+                <input type="text" id="requirement-subs" name="subtitle_languages" value="{{ requirements.subtitles.other }}" placeholder="Names or codes, separated by commas">
+                <label for="requirement-subtitle-match">Multiple subtitle languages</label>
+                <select id="requirement-subtitle-match" name="subtitle_match"><option value="all"{% if requirements.subtitle_match == "all" %} selected{% endif %}>Require all listed</option><option value="any"{% if requirements.subtitle_match == "any" %} selected{% endif %}>Require any listed</option></select>
+            </div>
+            {% else %}
+            <label for="requirement-subs">Required subtitle languages</label><input id="requirement-subs" name="subtitle_languages" value="{{ requirements.subtitles.other }}" placeholder="English, Spanish or language codes">
             <label for="requirement-subtitle-match">Multiple subtitle languages</label><select id="requirement-subtitle-match" name="subtitle_match"><option value="all"{% if requirements.subtitle_match == "all" %} selected{% endif %}>Require all listed</option><option value="any"{% if requirements.subtitle_match == "any" %} selected{% endif %}>Require any listed</option></select>
             {% endif %}
+            {% endif %}
         </div>
+        {% endif %}
+        {% if requirements.scope == "release" && field.name == "audio_mode" %}
+        <fieldset class="form-group requirement-choices" aria-describedby="target-audio-hint">
+            <legend>Good enough audio</legend>
+            <p class="form-hint" id="target-audio-hint">Require these languages alongside minimum audio before Ryokan stops upgrading. Clear the list to use minimum audio only.</p>
+            <div class="requirement-picks">
+                {% for option in requirements.target_audio.options %}
+                <label><input type="checkbox" name="target_audio_lang_{{ option.code }}"{% if option.selected %} checked{% endif %}> {{ option.name }}</label>
+                {% endfor %}
+            </div>
+            <label for="requirement-target-audio">Other languages for this target</label>
+            <input type="text" id="requirement-target-audio" name="target_audio_languages" value="{{ requirements.target_audio.other }}" placeholder="Names or codes, separated by commas">
+            <small>Effective: {{ requirements.target_audio_effective }} · {{ requirements.target_audio_origin }}</small>
+        </fieldset>
+        {% endif %}
         {% endfor %}
         </div>
         <p class="form-hint">Audio must contain a declared dialogue track. Full selectable subtitles count; signs-only and forced tracks do not. Burned-in captions cannot satisfy a selectable-subtitle check.</p>

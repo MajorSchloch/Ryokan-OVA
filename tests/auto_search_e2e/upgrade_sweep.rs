@@ -286,6 +286,109 @@ async fn daily_sweep_single_entry_search_keeps_target_pin_pending_and_span_prote
 }
 
 #[tokio::test]
+async fn scheduled_sweep_respects_observed_target_audio_at_the_resolution_cutoff() {
+    let _gate = ENV_LOCK.lock().await;
+    let server = MockServer::start().await;
+    let html = nyaa_results_page(&format!(
+        "{}{}",
+        nyaa_row(
+            GOOD_HASH,
+            998851,
+            "[Candidate] Feature Story S01E01 [1080p WEB-DL Dual Audio AAC]",
+            "500 MiB",
+            5,
+        ),
+        nyaa_row(
+            "4567845678456784567845678456784567845678",
+            998852,
+            "[Candidate] Feature Story S01E02 [1080p WEB-DL Dual Audio AAC]",
+            "500 MiB",
+            5,
+        ),
+    ));
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(html))
+        .mount(&server)
+        .await;
+    set_nyaa_base(&server.uri());
+
+    let (_temp, state, client, sid, old) = fixture("TV", 2, 1920, 1080, true, false).await;
+    let mut cfg = ryokan::models::config::get_config(&state.db)
+        .await
+        .unwrap()
+        .unwrap();
+    cfg.required_audio_languages = "ja".into();
+    cfg.audio_language_match = "all".into();
+    ryokan::models::config::save_config(&state.db, &cfg)
+        .await
+        .unwrap();
+    ryokan::models::requirement_preferences::save_quality(
+        &state.db,
+        sid,
+        &ryokan::models::requirement_preferences::QualityPreferences {
+            target_audio_languages: Some("ja,en".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // Episode 1 claims dual audio in its name, but only episode 2 has both tracks.
+    let first = old.with_file_name("Feature Story - S01E01 [1080p WEB-DL Dual Audio].mkv");
+    let second = old.with_file_name("Feature Story - S01E02 [1080p WEB-DL].mkv");
+    std::fs::rename(old, &first).unwrap();
+    std::fs::copy(&first, &second).unwrap();
+    for (path, has_english_audio) in [(&first, false), (&second, true)] {
+        let canonical = std::fs::canonicalize(path).unwrap();
+        let identity = ryokan::services::media_info::FileIdentity::from_metadata(
+            &std::fs::metadata(&canonical).unwrap(),
+        )
+        .unwrap();
+        let mut streams = vec![
+            serde_json::json!({"index":0,"codec_type":"video","codec_name":"h264","width":1920,"height":1080}),
+            serde_json::json!({"index":1,"codec_type":"audio","codec_name":"aac","channels":2,"tags":{"language":"jpn"}}),
+            serde_json::json!({"index":2,"codec_type":"subtitle","codec_name":"ass","tags":{"language":"eng"}}),
+        ];
+        if has_english_audio {
+            streams.push(serde_json::json!({"index":3,"codec_type":"audio","codec_name":"aac","channels":2,"tags":{"language":"eng"}}));
+        }
+        ryokan::models::media_probe_cache::upsert_identified(
+            &state.db,
+            canonical.to_str().unwrap(),
+            &identity.cache_key(),
+            identity.size as i64,
+            &serde_json::json!({"format":{"duration":"1400"},"streams":streams}).to_string(),
+        )
+        .await;
+    }
+    ryokan::models::scheduled_tasks::touch_definition(
+        &state.db,
+        "upgrade_search",
+        "Quality upgrade search",
+        "Every 24 hours (when enabled)",
+        true,
+    )
+    .await
+    .unwrap();
+
+    let summary = ryokan::services::upgrade::run_scheduled_once(&state).await;
+    unset_nyaa_base();
+    let summary = summary.unwrap();
+    assert_eq!(summary.episodes_checked, 1, "{}", summary.detail);
+    assert_eq!(
+        summary.upgrades_grabbed,
+        1,
+        "{}",
+        dump_logs(&state.db).await
+    );
+    assert_logical_grab(&state, &client, sid).await;
+    for path in [first, second] {
+        assert_eq!(std::fs::read(path).unwrap(), b"existing full-length video");
+    }
+}
+
+#[tokio::test]
 async fn scheduled_sweep_finishes_later_targets_after_thirty_minutes() {
     let _gate = ENV_LOCK.lock().await;
     let server = MockServer::start().await;

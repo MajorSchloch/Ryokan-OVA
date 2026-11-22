@@ -23,6 +23,12 @@ pub(crate) fn is_content_rejection(reason: &str) -> bool {
     reason.starts_with(CONTENT_REJECTION_PREFIX)
 }
 
+pub(super) fn is_target_audio_rejection(reason: &str) -> bool {
+    reason
+        .strip_prefix(CONTENT_REJECTION_PREFIX)
+        .is_some_and(|reason| reason == crate::services::media_requirements::TARGET_AUDIO_REJECTION)
+}
+
 pub(crate) struct RequiredSubtitleImport {
     dir: Option<TempDir>,
     source: PathBuf,
@@ -431,7 +437,11 @@ pub(super) async fn import_required_with_edition(
             policy
                 .validate_replacement_with_edition(&before, after, reviewed)
                 .map_err(|reason| {
-                    format!("Media requirement: {reason}; existing media was kept")
+                    if reason == crate::services::media_requirements::TARGET_AUDIO_REJECTION {
+                        format!("{CONTENT_REJECTION_PREFIX}{reason}")
+                    } else {
+                        format!("Media requirement: {reason}; existing media was kept")
+                    }
                 })?;
         }
     }
@@ -1192,6 +1202,134 @@ mod tests {
                 }
             );
             assert!(source.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn overgeared_imports_japanese_first_and_waits_for_verified_dual_audio() {
+        let db = crate::test_support::in_memory_pool().await;
+        let temp = tempfile::tempdir().unwrap();
+        let dest = temp.path().join("Overgeared - S01E09.mkv");
+        let cfg = Config {
+            media_requirements_enabled: true,
+            minimum_resolution: "720".into(),
+            target_resolution: "1080".into(),
+            required_audio_languages: "ja".into(),
+            target_audio_languages: "ja,en".into(),
+            required_subtitle_languages: "en".into(),
+            ..Default::default()
+        };
+        let policy = crate::services::media_requirements::Policy::from_config(&cfg);
+        let mut expected_file = "";
+        // The English commentary candidate claims dual audio, but the real
+        // dialogue streams are the only facts used for replacement.
+        for (file, width, height, english_title, accept, target_met) in [
+            ("720p Japanese", 1280, 720, None, true, false),
+            ("1080p Japanese", 1920, 1080, None, true, false),
+            (
+                "1080p Dual Audio label only",
+                1920,
+                1080,
+                Some("Commentary"),
+                false,
+                false,
+            ),
+            (
+                "1080p Japanese and English",
+                1920,
+                1080,
+                Some("English Dialogue"),
+                true,
+                true,
+            ),
+            (
+                "2160p Japanese and English",
+                3840,
+                2160,
+                Some("English Dialogue"),
+                false,
+                true,
+            ),
+        ] {
+            let source = temp.path().join(format!("Overgeared - {file}.mkv"));
+            tokio::fs::write(&source, file).await.unwrap();
+            let source = tokio::fs::canonicalize(source).await.unwrap();
+            let identity =
+                FileIdentity::from_metadata(&tokio::fs::metadata(&source).await.unwrap()).unwrap();
+            let mut streams = vec![
+                serde_json::json!({"index":0,"codec_type":"video","codec_name":"h264","width":width,"height":height}),
+                serde_json::json!({"index":1,"codec_type":"audio","codec_name":"aac","channels":2,"tags":{"language":"jpn"}}),
+                serde_json::json!({"index":2,"codec_type":"subtitle","codec_name":"ass","tags":{"language":"eng"}}),
+            ];
+            if let Some(title) = english_title {
+                streams.push(serde_json::json!({"index":3,"codec_type":"audio","codec_name":"aac","channels":2,"tags":{"language":"eng","title":title}}));
+            }
+            let probe_json = serde_json::json!({"streams":streams}).to_string();
+            crate::models::media_probe_cache::upsert_identified(
+                &db,
+                source.to_str().unwrap(),
+                &identity.cache_key(),
+                identity.size as i64,
+                &probe_json,
+            )
+            .await;
+            let old = if expected_file.is_empty() {
+                &[][..]
+            } else {
+                std::slice::from_ref(&dest)
+            };
+            let result = import_required(
+                &db,
+                &cfg,
+                "copy",
+                &source,
+                &dest,
+                old,
+                1,
+                "Overgeared",
+                &[],
+                None,
+                1,
+                true,
+            )
+            .await;
+            assert_eq!(result.is_ok(), accept, "{file}: {result:?}");
+            if english_title == Some("Commentary") {
+                let reason = result.as_ref().unwrap_err();
+                assert!(
+                    is_content_rejection(reason) && is_target_audio_rejection(reason),
+                    "{reason}"
+                );
+            }
+            if accept {
+                expected_file = file;
+                // These test bytes stand in for video. Reuse the source's
+                // probe facts at the new file identity after the copy.
+                let canonical = tokio::fs::canonicalize(&dest).await.unwrap();
+                let installed =
+                    FileIdentity::from_metadata(&tokio::fs::metadata(&canonical).await.unwrap())
+                        .unwrap();
+                crate::models::media_probe_cache::upsert_identified(
+                    &db,
+                    canonical.to_str().unwrap(),
+                    &installed.cache_key(),
+                    installed.size as i64,
+                    &probe_json,
+                )
+                .await;
+            }
+            assert_eq!(
+                tokio::fs::read_to_string(&dest).await.unwrap(),
+                expected_file
+            );
+            assert!(source.exists());
+            let installed = media_info::inspect(&db, &dest).await.unwrap();
+            assert!(policy.minimum_met(&policy.observe(&installed)));
+            assert_eq!(
+                policy.target_met(&policy.observe(&installed)),
+                target_met,
+                "{file}"
+            );
         }
     }
 

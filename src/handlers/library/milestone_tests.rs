@@ -218,6 +218,88 @@ async fn cached_file(db: &sqlx::SqlitePool, path: &std::path::Path, audio: &str,
 }
 
 #[tokio::test]
+async fn release_requirement_choices_save_and_clear_additional_target_audio() {
+    let db = in_memory_pool().await;
+    let id = seed_series(&db, 7001, "Test").await;
+    config::save_config(&db, &policy()).await.unwrap();
+    let app = requirements::routes().with_state(build_test_app_state(db.clone(), None));
+
+    let submit = |form: String| {
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::post("/library/requirements")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .header("HX-Request", "true")
+                        .body(Body::from(form))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            String::from_utf8(body.to_vec()).unwrap()
+        }
+    };
+    let requirements = format!(
+        "scope=release&id={id}&audio_mode=require&audio_match=all&audio_lang_de=on&\
+        subtitle_mode=require&subtitle_match=all&subtitle_lang_en=on&\
+        minimum_resolution=720&target_resolution=1080"
+    );
+
+    let saved = submit(format!(
+        "{requirements}&target_audio_lang_ja=on&target_audio_languages=Thai%2C+jpn"
+    ))
+    .await;
+    assert!(saved.contains("Requirements saved"));
+    assert!(saved.contains("type=\"radio\" name=\"minimum_resolution\" value=\"720\" checked"));
+    assert!(saved.contains("type=\"radio\" name=\"target_resolution\" value=\"1080\" checked"));
+    assert!(saved.contains("name=\"audio_lang_de\" checked"));
+    assert!(saved.contains("name=\"subtitle_lang_en\" checked"));
+    assert!(saved.contains("name=\"target_audio_lang_ja\" checked"));
+    assert!(saved.contains("name=\"target_audio_languages\" value=\"th\""));
+
+    let invalid = submit(format!(
+        "{requirements}&target_audio_lang_ja=on&target_audio_languages=wronglanguage"
+    ))
+    .await;
+    assert!(invalid.contains("Unknown good enough audio language"));
+    assert!(invalid.contains("name=\"target_audio_lang_ja\" checked"));
+    assert!(invalid.contains("name=\"target_audio_languages\" value=\"wronglanguage\""));
+
+    let old_form = submit(requirements.clone()).await;
+    assert!(old_form.contains("Requirements saved"));
+    assert_eq!(
+        requirement_preferences::quality(&db, id)
+            .await
+            .unwrap()
+            .target_audio_languages
+            .as_deref(),
+        Some("ja,th")
+    );
+    let reset = submit(format!("{requirements}&target_audio_languages=")).await;
+    assert!(reset.contains("Requirements saved"));
+    assert!(reset.contains("Effective: German · Minimum audio"));
+    let quality = requirement_preferences::quality(&db, id).await.unwrap();
+    assert_eq!(quality.target_audio_languages, None);
+    assert_eq!(quality.target_resolution.as_deref(), Some("1080"));
+    let policy = language_preferences::effective_config(&db, &policy(), id)
+        .await
+        .unwrap();
+    assert_eq!(policy.required_audio_languages, "de");
+    assert_eq!(policy.required_subtitle_languages, "en");
+    assert!(policy.target_audio_languages.is_empty());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM grabbed_torrents")
+            .fetch_one(&db)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn file_summary_counts_range_once_and_invalidates_changed_video() {
     let db = in_memory_pool().await;
     let temp = tempfile::tempdir().unwrap();

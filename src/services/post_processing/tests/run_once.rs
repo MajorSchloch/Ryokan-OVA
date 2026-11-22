@@ -2555,11 +2555,12 @@ async fn run_once_imports_the_subtitle_next_to_the_video_when_enabled() {
 #[tokio::test]
 async fn run_once_distinguishes_verified_requirements_from_unreadable_media() {
     let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
-    for (dimensions_and_subs, unknown_audio) in [
-        (Some((1920, 1080, false)), false),
-        (Some((854, 480, true)), false),
-        (None, false),
-        (Some((1920, 1080, true)), true),
+    for (dimensions_and_subs, unknown_audio, missing_target_audio) in [
+        (Some((1920, 1080, false)), false, false),
+        (Some((854, 480, true)), false, false),
+        (None, false, false),
+        (Some((1920, 1080, true)), true, false),
+        (Some((1920, 1080, true)), false, true),
     ] {
         let db = in_memory_pool().await;
         let media_root = tempfile::tempdir().unwrap();
@@ -2574,7 +2575,7 @@ async fn run_once_distinguishes_verified_requirements_from_unreadable_media() {
         .execute(&db)
         .await
         .unwrap();
-        if unknown_audio {
+        if unknown_audio || missing_target_audio {
             sqlx::query("UPDATE config SET required_audio_languages='ja'")
                 .execute(&db)
                 .await
@@ -2600,10 +2601,11 @@ async fn run_once_distinguishes_verified_requirements_from_unreadable_media() {
                 "index":0,"codec_type":"video","codec_name":"h264",
                 "width":width,"height":height
             })];
-            if unknown_audio {
+            if unknown_audio || missing_target_audio {
+                let language = if unknown_audio { "und" } else { "jpn" };
                 streams.push(serde_json::json!({
-                    "index":2,"codec_type":"audio","codec_name":"aac",
-                    "tags":{"language":"und"}
+                    "index":2,"codec_type":"audio","codec_name":"aac","channels":2,
+                    "tags":{"language":language}
                 }));
             }
             if subtitles {
@@ -2612,14 +2614,40 @@ async fn run_once_distinguishes_verified_requirements_from_unreadable_media() {
                     "tags":{"language":"eng"}
                 }));
             }
+            let probe = serde_json::json!({"streams":streams}).to_string();
             crate::models::media_probe_cache::upsert_identified(
                 &db,
                 canonical.to_str().unwrap(),
                 &identity.cache_key(),
                 identity.size as i64,
-                &serde_json::json!({"streams":streams}).to_string(),
+                &probe,
             )
             .await;
+            if missing_target_audio {
+                crate::models::requirement_preferences::save_quality(
+                    &db,
+                    sid,
+                    &crate::models::requirement_preferences::QualityPreferences {
+                        target_audio_languages: Some("ja,en".into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+                let old_path = std::fs::canonicalize(&old).unwrap();
+                let old_identity = crate::services::media_info::FileIdentity::from_metadata(
+                    &std::fs::metadata(&old_path).unwrap(),
+                )
+                .unwrap();
+                crate::models::media_probe_cache::upsert_identified(
+                    &db,
+                    old_path.to_str().unwrap(),
+                    &old_identity.cache_key(),
+                    old_identity.size as i64,
+                    &probe,
+                )
+                .await;
+            }
         }
         let grab_id =
             grabbed_torrents::record_grab(&db, "requirement-hash", title, sid, &[1], false)
@@ -2687,7 +2715,7 @@ async fn run_once_distinguishes_verified_requirements_from_unreadable_media() {
             } else {
                 ""
             },
-            "unreadable files must stay ordinary import failures"
+            "verified upgrade misses must stay episode-scoped. Unreadable files remain import failures"
         );
         assert_eq!(std::fs::read(&old).unwrap(), b"original media remains here");
         assert_eq!(std::fs::read(&source).unwrap(), b"downloaded video fixture");

@@ -21,7 +21,7 @@ use crate::{
     services::{language_preferences, logger},
 };
 
-const CHOICES: &[(&str, &str)] = &[
+pub(super) const CHOICES: &[(&str, &str)] = &[
     ("en", "English"),
     ("de", "German"),
     ("ja", "Japanese"),
