@@ -485,6 +485,7 @@ fn observation(
         resolution,
         subtitles_satisfied,
         audio_satisfied: true,
+        present_target_audio: 0,
         duration_seconds: None,
     }
 }

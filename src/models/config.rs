@@ -145,6 +145,9 @@ pub struct Config {
     pub required_audio_languages: String,
     #[serde(default = "default_subtitle_language_match")]
     pub audio_language_match: String,
+    /// Extra dialogue tracks required at the target. Set by release preferences.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub target_audio_languages: String,
     /// Automatic torrents need this many seeders. Zero disables the floor.
     #[serde(default = "default_minimum_torrent_seeders")]
     pub minimum_torrent_seeders: i32,
@@ -350,6 +353,7 @@ impl Default for Config {
             prefer_subs: true,
             required_audio_languages: String::new(),
             audio_language_match: default_subtitle_language_match(),
+            target_audio_languages: String::new(),
             minimum_torrent_seeders: 1,
             required_subtitle_languages: String::new(),
             subtitle_language_match: default_subtitle_language_match(),
@@ -606,6 +610,7 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
         prefer_subs: r.prefer_subs != 0,
         required_audio_languages: r.required_audio_languages,
         audio_language_match: r.audio_language_match,
+        target_audio_languages: String::new(),
         minimum_torrent_seeders: i32::try_from(r.minimum_torrent_seeders).unwrap_or(-1),
         required_subtitle_languages: r.required_subtitle_languages,
         subtitle_language_match: r.subtitle_language_match,

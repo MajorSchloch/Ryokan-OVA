@@ -539,6 +539,11 @@ function renderMediaRequirements(status, subtitles, upgradesAllowed, audio) {
             + (audio.required_languages || []).map(mediaLanguageLabel).join(', '))
             + requirement('Audio result', audio.satisfied ? 'Required dialogue audio present' : 'Required dialogue audio not verified');
     }
+    if (Array.isArray(status.target_audio_languages) && status.target_audio_languages.length) {
+        html += requirement('Good enough audio', status.target_audio_languages.map(mediaLanguageLabel).join(', '))
+            + requirement('Good enough audio result', status.target_audio_languages_satisfied
+                ? 'All selected dialogue languages present' : 'Waiting for the selected dialogue languages');
+    }
     const subtitleKind = mediaSubtitleRequirementKind(status, subtitles);
     if (subtitleKind !== 'none') {
         const names = (subtitles.required_languages || []).map(mediaLanguageLabel).join(', ');

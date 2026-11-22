@@ -1303,6 +1303,7 @@ enum ImportOutcome {
     },
     RequirementsRejected {
         failed_episodes: Vec<i32>,
+        retry_immediately: bool,
     },
     Protected {
         imported_files: usize,
@@ -1941,6 +1942,7 @@ async fn import_torrent(
     // by re-running the file op.
     let mut failed_episodes: Vec<i32> = Vec::new();
     let mut requirements_rejected_episode_count = 0_usize;
+    let mut retry_immediately = false;
 
     // Old grab ids we've marked as replaced during this import pass,
     // paired with the new `grab.id` that superseded them. Deduped via
@@ -2704,6 +2706,9 @@ async fn import_torrent(
                     let refused: Vec<i32> = resolved.episodes().collect();
                     if content_rejection {
                         requirements_rejected_episode_count += refused.len();
+                        // An unmet audio target is an upgrade miss. Leave the
+                        // working file to the usual upgrade search and RSS.
+                        retry_immediately |= !subtitle_guard::is_target_audio_rejection(&reason);
                     }
                     let _ = episode_tags::mark_grab_failed_for_episodes(
                         &state.db,
@@ -3369,7 +3374,7 @@ async fn import_torrent(
                 );
                 event.provider_id = Some(ctx.series.anilist_id);
                 event.grab_id = Some(grab.id);
-                event.detail=serde_json::json!({"release":grab.torrent_name,"file":dest_basename,"episodes":resolved.episodes().collect::<Vec<_>>(),"previous_files":existing_for_ep.iter().map(|(p,_)|p.display().to_string()).collect::<Vec<_>>(),"rules_at_import":{"minimum":import_cfg.minimum_resolution,"target":import_cfg.target_resolution,"quality_gates_enabled":import_cfg.media_requirements_enabled,"required_audio":import_cfg.required_audio_languages,"required_subtitles":import_cfg.required_subtitle_languages,"minimum_selectable_subtitles":import_cfg.minimum_subtitle_check,"target_selectable_subtitles":import_cfg.target_subtitle_check}}).to_string();
+                event.detail=serde_json::json!({"release":grab.torrent_name,"file":dest_basename,"episodes":resolved.episodes().collect::<Vec<_>>(),"previous_files":existing_for_ep.iter().map(|(p,_)|p.display().to_string()).collect::<Vec<_>>(),"rules_at_import":{"minimum":import_cfg.minimum_resolution,"target":import_cfg.target_resolution,"quality_gates_enabled":import_cfg.media_requirements_enabled,"required_audio":import_cfg.required_audio_languages,"target_audio":import_cfg.target_audio_languages,"required_subtitles":import_cfg.required_subtitle_languages,"minimum_selectable_subtitles":import_cfg.minimum_subtitle_check,"target_selectable_subtitles":import_cfg.target_subtitle_check}}).to_string();
                 import_activity.push(event);
 
                 // Issue #118 — fire `Imported` once per file, like Sonarr,
@@ -3471,7 +3476,10 @@ async fn import_torrent(
         if !failed_episodes.is_empty() {
             if specials_refused == 0 && failed_episodes.len() == requirements_rejected_episode_count
             {
-                return Ok(ImportOutcome::RequirementsRejected { failed_episodes });
+                return Ok(ImportOutcome::RequirementsRejected {
+                    failed_episodes,
+                    retry_immediately,
+                });
             }
             return Ok(ImportOutcome::AllFailed { failed_episodes });
         }
@@ -4524,7 +4532,10 @@ pub async fn run_once(state: &AppState) {
                 )
                 .await;
             }
-            Ok(ImportOutcome::RequirementsRejected { failed_episodes }) => {
+            Ok(ImportOutcome::RequirementsRejected {
+                failed_episodes,
+                retry_immediately,
+            }) => {
                 logger::warn(
                     &state.db,
                     LogCategory::PostProcess,
@@ -4546,6 +4557,7 @@ pub async fn run_once(state: &AppState) {
                     )
                     .await
                     .is_ok_and(|changed| changed)
+                    && retry_immediately
                     && let Some(ep) = grab.episode_numbers.first()
                     && !requirements_researched.contains(&(grab.series_id, *ep))
                     && crate::services::redownload::after_requirements_rejected(state, grab).await

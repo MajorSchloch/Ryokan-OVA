@@ -17,6 +17,9 @@ use super::{
 };
 use crate::models::config::Config;
 
+pub(crate) const TARGET_AUDIO_REJECTION: &str =
+    "The file does not improve or preserve the selected good enough audio languages";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Policy {
     pub enabled: bool,
@@ -28,6 +31,7 @@ pub struct Policy {
     pub language_match: String,
     pub required_audio_languages: Vec<String>,
     pub audio_language_match: String,
+    pub target_audio_languages: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -35,6 +39,8 @@ pub struct Observed {
     pub resolution: Resolution,
     pub subtitles_satisfied: bool,
     pub audio_satisfied: bool,
+    /// Present languages in the order of `Policy::target_audio_languages`.
+    pub present_target_audio: u16,
     pub duration_seconds: Option<f64>,
 }
 
@@ -48,6 +54,9 @@ pub struct Status {
     pub target_resolution: &'static str,
     pub selectable_subtitles_satisfied: bool,
     pub audio_languages_satisfied: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub target_audio_languages: Vec<String>,
+    pub target_audio_languages_satisfied: bool,
     pub minimum_subtitle_check: bool,
     pub target_subtitle_check: bool,
     pub reasons: Vec<String>,
@@ -77,6 +86,13 @@ impl Policy {
                 .map(str::to_owned)
                 .collect(),
             audio_language_match: cfg.audio_language_match.clone(),
+            target_audio_languages: cfg
+                .target_audio_languages
+                .split(',')
+                .map(str::trim)
+                .filter(|language| !language.is_empty())
+                .map(str::to_owned)
+                .collect(),
         }
     }
 
@@ -107,14 +123,45 @@ impl Policy {
                 &self.audio_language_match,
             )
             .satisfied,
+            present_target_audio: self.present_target_audio(info),
             duration_seconds: info.duration_seconds.filter(|d| d.is_finite() && *d > 0.0),
         }
+    }
+
+    fn present_target_audio(&self, info: &MediaInfo) -> u16 {
+        if self.target_audio_languages.is_empty() {
+            return 0;
+        }
+        let audio =
+            media_info::evaluate_audio_requirements(info, &self.target_audio_languages, "all");
+        self.target_audio_languages
+            .iter()
+            .take(u16::BITS as usize)
+            .enumerate()
+            .fold(0, |present, (index, language)| {
+                if media_info::normalize_language(language)
+                    .is_some_and(|code| audio.available_languages.contains(&code))
+                {
+                    present | (1 << index)
+                } else {
+                    present
+                }
+            })
+    }
+
+    fn target_audio_met(&self, observed: &Observed) -> bool {
+        observed.present_target_audio.count_ones() as usize == self.target_audio_languages.len()
     }
 
     fn valid(&self) -> bool {
         self.minimum_resolution != Resolution::Unknown
             && self.target_resolution != Resolution::Unknown
             && self.target_resolution.rank() >= self.minimum_resolution.rank()
+            && self.target_audio_languages.len() <= u16::BITS as usize
+            && self
+                .target_audio_languages
+                .iter()
+                .all(|language| media_info::normalize_language(language).is_some())
             && (self.required_audio_languages.is_empty()
                 || (matches!(self.audio_language_match.as_str(), "all" | "any")
                     && self
@@ -134,6 +181,7 @@ impl Policy {
     pub fn target_met(&self, observed: &Observed) -> bool {
         self.valid()
             && observed.audio_satisfied
+            && self.target_audio_met(observed)
             && observed.resolution != Resolution::Unknown
             && observed.resolution.rank() >= self.target_resolution.rank()
             && (!(self.target_subtitle_check || self.minimum_subtitle_check)
@@ -164,6 +212,9 @@ impl Policy {
         if !observed.audio_satisfied {
             reasons.push("Required audio languages could not be verified.".into());
         }
+        if self.enabled && !self.target_audio_met(&observed) {
+            reasons.push("Good enough audio languages have not been verified.".into());
+        }
         Status {
             enabled: self.enabled,
             minimum_met: self.minimum_met(&observed),
@@ -173,6 +224,12 @@ impl Policy {
             target_resolution: self.target_resolution.as_str(),
             selectable_subtitles_satisfied: observed.subtitles_satisfied,
             audio_languages_satisfied: observed.audio_satisfied,
+            target_audio_languages: if self.enabled {
+                self.target_audio_languages.clone()
+            } else {
+                Vec::new()
+            },
+            target_audio_languages_satisfied: self.target_audio_met(&observed),
             minimum_subtitle_check: self.minimum_subtitle_check,
             target_subtitle_check: self.target_subtitle_check,
             reasons,
@@ -321,8 +378,9 @@ impl Policy {
             && !self.required_languages.is_empty()
             && !existing.subtitles_satisfied
             && !claims_hardsub;
-        let possible_audio_gain =
-            !self.required_audio_languages.is_empty() && !existing.audio_satisfied;
+        let possible_audio_gain = (!self.required_audio_languages.is_empty()
+            && !existing.audio_satisfied)
+            || !self.target_audio_met(existing);
         if resolution_gain || possible_subtitle_gain || possible_audio_gain {
             Ok(UpgradeKind::Requirements)
         } else {
@@ -369,16 +427,24 @@ impl Policy {
         {
             return Err(UpgradeRejection::RequirementsDowngrade.message());
         }
+        if old.present_target_audio & !new.present_target_audio != 0 {
+            return Err(TARGET_AUDIO_REJECTION.into());
+        }
         let resolution_gain = old.resolution.rank() < self.target_resolution.rank()
             && new.resolution.rank() > old.resolution.rank();
         let subtitle_gain = (self.target_subtitle_check || self.minimum_subtitle_check)
             && !old.subtitles_satisfied
             && new.subtitles_satisfied;
-        let audio_gain = !self.required_audio_languages.is_empty()
+        let audio_gain = (!self.required_audio_languages.is_empty()
             && !old.audio_satisfied
-            && new.audio_satisfied;
+            && new.audio_satisfied)
+            || old.present_target_audio != new.present_target_audio;
         if !resolution_gain && !subtitle_gain && !audio_gain {
-            return Err(UpgradeRejection::RequirementsNoImprovement.message());
+            return Err(if self.target_audio_met(old) {
+                UpgradeRejection::RequirementsNoImprovement.message()
+            } else {
+                TARGET_AUDIO_REJECTION.into()
+            });
         }
         Ok(())
     }
@@ -464,6 +530,7 @@ pub async fn observe_files(
                             }
                             old.subtitles_satisfied &= value.subtitles_satisfied;
                             old.audio_satisfied &= value.audio_satisfied;
+                            old.present_target_audio &= value.present_target_audio;
                         })
                         .or_insert(value);
                 }
@@ -541,6 +608,7 @@ mod tests {
             resolution,
             subtitles_satisfied,
             audio_satisfied: true,
+            present_target_audio: 0,
             duration_seconds: None,
         }
     }
@@ -980,6 +1048,34 @@ mod tests {
                 .await
                 .contains_key(&1)
         );
+    }
+
+    #[test]
+    fn a_resolution_gain_cannot_drop_an_already_present_target_language() {
+        let p = Policy::from_config(&Config {
+            media_requirements_enabled: true,
+            required_audio_languages: "ja".into(),
+            target_audio_languages: "ja,en,de".into(),
+            ..Default::default()
+        });
+        let current = Observed {
+            present_target_audio: 0b011,
+            ..observed(Resolution::R720p, true)
+        };
+        let japanese_only = Observed {
+            present_target_audio: 0b001,
+            ..observed(Resolution::R1080p, true)
+        };
+        let keeps_english = Observed {
+            present_target_audio: 0b011,
+            ..japanese_only
+        };
+        assert_eq!(
+            p.validate_replacement(&current, &japanese_only),
+            Err(TARGET_AUDIO_REJECTION.into())
+        );
+        assert!(p.validate_replacement(&current, &keeps_english).is_ok());
+        assert!(!p.target_met(&keeps_english));
     }
 
     #[test]

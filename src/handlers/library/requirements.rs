@@ -1,4 +1,7 @@
 //! Authenticated, scoped requirement forms. Saving never starts acquisition.
+use std::collections::HashMap;
+
+use super::languages::{CHOICES, LanguageOption};
 use crate::{
     AppState,
     models::{
@@ -7,7 +10,7 @@ use crate::{
         series,
         series_language_preferences::LanguagePreferences,
     },
-    services::language_preferences,
+    services::{language_preferences, media_info},
 };
 use askama::Template;
 use axum::{
@@ -30,14 +33,23 @@ pub struct RequirementField {
     pub origin: String,
 }
 #[derive(Clone, Default)]
+pub struct RequirementLanguagePicker {
+    pub options: Vec<LanguageOption>,
+    pub other: String,
+}
+
+#[derive(Clone, Default)]
 pub struct RequirementsView {
     pub enabled: bool,
     pub scope: String,
     pub id: String,
     pub return_to: String,
     pub fields: Vec<RequirementField>,
-    pub audio: String,
-    pub subtitles: String,
+    pub audio: RequirementLanguagePicker,
+    pub subtitles: RequirementLanguagePicker,
+    pub target_audio: RequirementLanguagePicker,
+    pub target_audio_effective: String,
+    pub target_audio_origin: String,
     pub audio_match: String,
     pub subtitle_match: String,
     pub error: String,
@@ -132,6 +144,7 @@ pub async fn franchise_view(
         target_resolution: p.target_resolution,
         minimum_subtitle_check: p.minimum_subtitle_check,
         target_subtitle_check: p.target_subtitle_check,
+        target_audio_languages: None,
     };
     let effective = language_preferences::overlay_quality(
         &language_preferences::overlay_languages(cfg, &l),
@@ -163,6 +176,45 @@ pub fn brief(cfg: &config::Config) -> String {
 fn languages(raw: &str, match_mode: &str) -> String {
     super::languages::summary(raw, match_mode, "No language requirement")
 }
+// Keep frequent selections compact. The adjacent input accepts all supported
+// language names and codes, including languages already saved by older forms.
+const COMMON_LANGUAGES: &[&str] = &["ja", "en", "de", "es", "zh", "ko", "fr"];
+
+fn language_picker(scope: &str, raw: &str) -> RequirementLanguagePicker {
+    if scope != "release" {
+        return RequirementLanguagePicker {
+            other: raw.into(),
+            ..Default::default()
+        };
+    }
+    let mut selected = Vec::new();
+    let mut other = Vec::new();
+    for part in raw
+        .split([',', ';', '\n'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        match media_info::normalize_language(part) {
+            Some(code) if COMMON_LANGUAGES.contains(&code.as_str()) => selected.push(code),
+            _ => other.push(part),
+        }
+    }
+    RequirementLanguagePicker {
+        options: COMMON_LANGUAGES
+            .iter()
+            .filter_map(|&code| {
+                let (_, name) = CHOICES.iter().find(|(known, _)| *known == code)?;
+                Some(LanguageOption {
+                    code,
+                    name,
+                    selected: selected.iter().any(|s| s == code),
+                })
+            })
+            .collect(),
+        other: other.join(", "),
+    }
+}
+
 fn view(
     scope: &str,
     id: &str,
@@ -175,7 +227,11 @@ fn view(
     for (name, label, value, current, inherited) in [
         (
             "audio_mode",
-            "Audio language requirement",
+            if scope == "release" {
+                "Minimum audio"
+            } else {
+                "Audio language requirement"
+            },
             l.audio_languages.as_deref(),
             languages(
                 &effective.required_audio_languages,
@@ -185,7 +241,11 @@ fn view(
         ),
         (
             "subtitle_mode",
-            "Subtitle language requirement",
+            if scope == "release" {
+                "Subtitle languages"
+            } else {
+                "Subtitle language requirement"
+            },
             l.subtitle_languages.as_deref(),
             languages(
                 &effective.required_subtitle_languages,
@@ -240,7 +300,12 @@ fn view(
             &base.target_resolution,
         ),
     ] {
-        let mut options = vec![(String::new(), format!("Use inherited: {inherited}p"))];
+        let inherit = if scope == "release" {
+            format!("Inherit ({inherited}p)")
+        } else {
+            format!("Use inherited: {inherited}p")
+        };
+        let mut options = vec![(String::new(), inherit)];
         options.extend(["480", "576", "720", "1080", "2160"].map(|v| (v.into(), format!("{v}p"))));
         fields.push(RequirementField {
             name,
@@ -317,15 +382,66 @@ fn view(
             .into(),
         });
     }
+    let (inherited_audio, inherited_subtitles) = if scope == "release" {
+        fields.sort_by_key(|field| match field.name {
+            "minimum_resolution" => 0,
+            "target_resolution" => 1,
+            "audio_mode" => 2,
+            "subtitle_mode" => 3,
+            "minimum_subtitle_check" => 4,
+            _ => 5,
+        });
+        (
+            base.required_audio_languages.as_str(),
+            base.required_subtitle_languages.as_str(),
+        )
+    } else {
+        ("", "")
+    };
+    let extra_audio = q.target_audio_languages.as_deref().unwrap_or_default();
+    let (target_audio_effective, target_audio_origin) = if extra_audio.is_empty() {
+        (
+            languages(
+                &effective.required_audio_languages,
+                &effective.audio_language_match,
+            ),
+            "Minimum audio",
+        )
+    } else {
+        (languages(extra_audio, "all"), "Release")
+    };
     RequirementsView {
         enabled: effective.media_requirements_enabled,
         scope: scope.into(),
         id: id.into(),
         fields,
-        audio: l.audio_languages.clone().unwrap_or_default(),
-        subtitles: l.subtitle_languages.clone().unwrap_or_default(),
-        audio_match: l.audio_match.clone().unwrap_or_else(|| "all".into()),
-        subtitle_match: l.subtitle_match.clone().unwrap_or_else(|| "all".into()),
+        audio: language_picker(
+            scope,
+            l.audio_languages.as_deref().unwrap_or(inherited_audio),
+        ),
+        subtitles: language_picker(
+            scope,
+            l.subtitle_languages
+                .as_deref()
+                .unwrap_or(inherited_subtitles),
+        ),
+        target_audio: language_picker(scope, extra_audio),
+        target_audio_effective,
+        target_audio_origin: target_audio_origin.into(),
+        audio_match: l.audio_match.clone().unwrap_or_else(|| {
+            if scope == "release" {
+                base.audio_language_match.clone()
+            } else {
+                "all".into()
+            }
+        }),
+        subtitle_match: l.subtitle_match.clone().unwrap_or_else(|| {
+            if scope == "release" {
+                base.subtitle_language_match.clone()
+            } else {
+                "all".into()
+            }
+        }),
         ..Default::default()
     }
 }
@@ -340,13 +456,47 @@ struct RequirementForm {
     subtitle_mode: String,
     audio_languages: String,
     subtitle_languages: String,
+    target_audio_languages: Option<String>,
     audio_match: String,
     subtitle_match: String,
     minimum_resolution: String,
     target_resolution: String,
     minimum_subtitle_check: String,
     target_subtitle_check: String,
+    #[serde(flatten)]
+    choices: HashMap<String, String>,
 }
+
+impl RequirementForm {
+    fn language_input(&self, prefix: &str, other: &str) -> String {
+        let mut picked = Vec::new();
+        if self.scope == "release" {
+            for code in COMMON_LANGUAGES {
+                if self.choices.contains_key(&format!("{prefix}_lang_{code}")) {
+                    picked.push(*code);
+                }
+            }
+        }
+        if !other.trim().is_empty() {
+            picked.push(other);
+        }
+        picked.join(",")
+    }
+
+    fn target_audio_input(&self) -> Option<String> {
+        if self.scope != "release" {
+            return None;
+        }
+        let input = self.language_input(
+            "target_audio",
+            self.target_audio_languages.as_deref().unwrap_or_default(),
+        );
+        // Older forms can omit the entire target field. An empty submitted
+        // input, with every checkbox clear, deliberately resets the target.
+        (self.target_audio_languages.is_some() || !input.is_empty()).then_some(input)
+    }
+}
+
 fn language(
     mode: &str,
     value: &str,
@@ -402,27 +552,102 @@ async fn save(
         Ok(v) => v,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
-    let outcome=async {
-        let (audio_languages,audio_match)=language(&form.audio_mode,&form.audio_languages,&form.audio_match)?;
-        let (subtitle_languages,subtitle_match)=language(&form.subtitle_mode,&form.subtitle_languages,&form.subtitle_match)?;
-        let l=LanguagePreferences{audio_languages,audio_match,subtitle_languages,subtitle_match};
-        let q=QualityPreferences{minimum_resolution:(!form.minimum_resolution.is_empty()).then(||form.minimum_resolution.clone()),target_resolution:(!form.target_resolution.is_empty()).then(||form.target_resolution.clone()),minimum_subtitle_check:flag(&form.minimum_subtitle_check)?,target_subtitle_check:flag(&form.target_subtitle_check)?};
-        let base=if form.scope=="release" {
-            let id=form.id.parse::<i64>().map_err(|e|e.to_string())?;
-            let row=series::get_by_id(&state.db,id).await.map_err(|e|e.to_string())?.ok_or("Release not found.")?;
-            if let Some(p)=language_preferences::franchise_for_release(&state.db,row.id).await? {language_preferences::franchise_config(&state.db,&cfg,&p).await?} else {cfg.clone()}
-        } else {cfg.clone()};
-        language_preferences::apply_quality(&language_preferences::apply(&base,&l)?,&q)?;
-        if form.scope=="release" {
-            sqlx::query("INSERT INTO series_language_preferences(series_id,audio_languages,audio_match,subtitle_languages,subtitle_match,minimum_resolution,target_resolution,minimum_subtitle_check,target_subtitle_check) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(series_id) DO UPDATE SET audio_languages=excluded.audio_languages,audio_match=excluded.audio_match,subtitle_languages=excluded.subtitle_languages,subtitle_match=excluded.subtitle_match,minimum_resolution=excluded.minimum_resolution,target_resolution=excluded.target_resolution,minimum_subtitle_check=excluded.minimum_subtitle_check,target_subtitle_check=excluded.target_subtitle_check")
-                .bind(form.id.parse::<i64>().map_err(|e|e.to_string())?).bind(&l.audio_languages).bind(&l.audio_match).bind(&l.subtitle_languages).bind(&l.subtitle_match).bind(&q.minimum_resolution).bind(&q.target_resolution).bind(q.minimum_subtitle_check).bind(q.target_subtitle_check).execute(&state.db).await.map_err(|e|e.to_string())?;
-        } else {requirement_preferences::save_franchise(&state.db,&FranchisePreferences{page_id:v.id.clone(),audio_languages:l.audio_languages,audio_match:l.audio_match,subtitle_languages:l.subtitle_languages,subtitle_match:l.subtitle_match,minimum_resolution:q.minimum_resolution,target_resolution:q.target_resolution,minimum_subtitle_check:q.minimum_subtitle_check,target_subtitle_check:q.target_subtitle_check}).await.map_err(|e|e.to_string())?;}
-        Ok::<(),String>(())
+    let audio_input = form.language_input("audio", &form.audio_languages);
+    let subtitle_input = form.language_input("subtitle", &form.subtitle_languages);
+    let target_audio_input = form.target_audio_input();
+    let outcome = async {
+        let (audio_languages, audio_match) =
+            language(&form.audio_mode, &audio_input, &form.audio_match)?;
+        let (subtitle_languages, subtitle_match) =
+            language(&form.subtitle_mode, &subtitle_input, &form.subtitle_match)?;
+        let target_audio_languages = target_audio_input
+            .as_deref()
+            .map(|input| language_preferences::normalize_languages(input, "good enough audio"))
+            .transpose()?
+            .filter(|value| !value.is_empty());
+        let l = LanguagePreferences {
+            audio_languages,
+            audio_match,
+            subtitle_languages,
+            subtitle_match,
+        };
+        let q = QualityPreferences {
+            minimum_resolution: (!form.minimum_resolution.is_empty()).then(|| form.minimum_resolution.clone()),
+            target_resolution: (!form.target_resolution.is_empty()).then(|| form.target_resolution.clone()),
+            minimum_subtitle_check: flag(&form.minimum_subtitle_check)?,
+            target_subtitle_check: flag(&form.target_subtitle_check)?,
+            target_audio_languages,
+        };
+        let base = if form.scope == "release" {
+            let id = form.id.parse::<i64>().map_err(|e| e.to_string())?;
+            let row = series::get_by_id(&state.db, id)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("Release not found.")?;
+            if let Some(p) = language_preferences::franchise_for_release(&state.db, row.id).await? {
+                language_preferences::franchise_config(&state.db, &cfg, &p).await?
+            } else {
+                cfg.clone()
+            }
+        } else {
+            cfg.clone()
+        };
+        language_preferences::apply_quality(&language_preferences::apply(&base, &l)?, &q)?;
+        if form.scope == "release" {
+            sqlx::query(
+                "INSERT INTO series_language_preferences(
+                    series_id,audio_languages,audio_match,subtitle_languages,subtitle_match,
+                    minimum_resolution,target_resolution,minimum_subtitle_check,target_subtitle_check,
+                    target_audio_languages
+                 ) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(series_id) DO UPDATE SET
+                    audio_languages=excluded.audio_languages,audio_match=excluded.audio_match,
+                    subtitle_languages=excluded.subtitle_languages,subtitle_match=excluded.subtitle_match,
+                    minimum_resolution=excluded.minimum_resolution,target_resolution=excluded.target_resolution,
+                    minimum_subtitle_check=excluded.minimum_subtitle_check,target_subtitle_check=excluded.target_subtitle_check,
+                    target_audio_languages=CASE WHEN ? THEN excluded.target_audio_languages
+                        ELSE series_language_preferences.target_audio_languages END",
+            )
+            .bind(form.id.parse::<i64>().map_err(|e| e.to_string())?)
+            .bind(&l.audio_languages)
+            .bind(&l.audio_match)
+            .bind(&l.subtitle_languages)
+            .bind(&l.subtitle_match)
+            .bind(&q.minimum_resolution)
+            .bind(&q.target_resolution)
+            .bind(q.minimum_subtitle_check)
+            .bind(q.target_subtitle_check)
+            .bind(&q.target_audio_languages)
+            .bind(target_audio_input.is_some())
+            .execute(&state.db)
+            .await
+            .map_err(|e| e.to_string())?;
+        } else {
+            requirement_preferences::save_franchise(
+                &state.db,
+                &FranchisePreferences {
+                    page_id: v.id.clone(),
+                    audio_languages: l.audio_languages,
+                    audio_match: l.audio_match,
+                    subtitle_languages: l.subtitle_languages,
+                    subtitle_match: l.subtitle_match,
+                    minimum_resolution: q.minimum_resolution,
+                    target_resolution: q.target_resolution,
+                    minimum_subtitle_check: q.minimum_subtitle_check,
+                    target_subtitle_check: q.target_subtitle_check,
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+        Ok::<(), String>(())
     }.await;
     if let Err(error) = outcome {
         v.error = error;
-        v.audio = form.audio_languages;
-        v.subtitles = form.subtitle_languages;
+        v.audio = language_picker(&v.scope, &audio_input);
+        v.subtitles = language_picker(&v.scope, &subtitle_input);
+        if let Some(input) = &target_audio_input {
+            v.target_audio = language_picker(&v.scope, input);
+        }
         v.audio_match = form.audio_match;
         v.subtitle_match = form.subtitle_match;
         for f in &mut v.fields {

@@ -24,6 +24,9 @@ pub fn overlay_quality(cfg: &Config, p: &QualityPreferences) -> Config {
     if let Some(v) = &p.target_resolution {
         cfg.target_resolution = v.clone();
     }
+    if let Some(v) = &p.target_audio_languages {
+        cfg.target_audio_languages = v.clone();
+    }
     if let Some(v) = p.minimum_subtitle_check {
         cfg.minimum_subtitle_check = v;
     }
@@ -34,7 +37,9 @@ pub fn overlay_quality(cfg: &Config, p: &QualityPreferences) -> Config {
 }
 
 pub fn apply_quality(cfg: &Config, p: &QualityPreferences) -> Result<Config, String> {
-    let cfg = overlay_quality(cfg, p);
+    let mut cfg = overlay_quality(cfg, p);
+    cfg.target_audio_languages =
+        normalize_languages(&cfg.target_audio_languages, "good enough audio")?;
     let minimum = super::source::Resolution::from_str(&cfg.minimum_resolution);
     let target = super::source::Resolution::from_str(&cfg.target_resolution);
     if minimum == super::source::Resolution::Unknown
@@ -61,6 +66,7 @@ pub fn apply_franchise(cfg: &Config, p: &FranchisePreferences) -> Result<Config,
         &QualityPreferences {
             minimum_resolution: p.minimum_resolution.clone(),
             target_resolution: p.target_resolution.clone(),
+            target_audio_languages: None,
             minimum_subtitle_check: p.minimum_subtitle_check,
             target_subtitle_check: p.target_subtitle_check,
         },
@@ -101,7 +107,7 @@ pub async fn resolve_snapshot(
     let languages = series_language_preferences::get_all(db)
         .await
         .map_err(|e| e.to_string())?;
-    let qualities = sqlx::query("SELECT series_id,minimum_resolution,target_resolution,minimum_subtitle_check,target_subtitle_check FROM series_language_preferences").fetch_all(db).await.map_err(|e| e.to_string())?;
+    let qualities = sqlx::query("SELECT series_id,minimum_resolution,target_resolution,target_audio_languages,minimum_subtitle_check,target_subtitle_check FROM series_language_preferences").fetch_all(db).await.map_err(|e| e.to_string())?;
     let qualities: HashMap<i64, QualityPreferences> = qualities
         .into_iter()
         .map(|r| {
@@ -110,6 +116,7 @@ pub async fn resolve_snapshot(
                 QualityPreferences {
                     minimum_resolution: r.get("minimum_resolution"),
                     target_resolution: r.get("target_resolution"),
+                    target_audio_languages: r.get("target_audio_languages"),
                     minimum_subtitle_check: r.get("minimum_subtitle_check"),
                     target_subtitle_check: r.get("target_subtitle_check"),
                 },
@@ -203,6 +210,14 @@ pub async fn resolve_snapshot(
                     },
                 );
             }
+            origins.insert(
+                "target_audio",
+                if q.target_audio_languages.is_some() {
+                    "Release"
+                } else {
+                    "Minimum audio"
+                },
+            );
             Ok(EffectivePolicy {
                 config: effective,
                 origins,
@@ -372,7 +387,15 @@ pub fn audio_hint_bonus(cfg: &Config, title: &str) -> i32 {
         .split(',')
         .filter_map(super::media_info::normalize_language)
         .collect();
-    if wanted.is_empty() {
+    let target: std::collections::HashSet<_> = if cfg.media_requirements_enabled {
+        cfg.target_audio_languages
+            .split(',')
+            .filter_map(super::media_info::normalize_language)
+            .collect()
+    } else {
+        Default::default()
+    };
+    if wanted.is_empty() && target.is_empty() {
         return 0;
     }
     let tokens: Vec<_> = title
@@ -405,18 +428,37 @@ pub fn audio_hint_bonus(cfg: &Config, title: &str) -> i32 {
         {
             continue;
         }
-        if wanted.contains(&language) {
+        if wanted.contains(&language) || target.contains(&language) {
             matched.insert(language);
         }
     }
+    let wanted_matches = wanted.intersection(&matched).count();
     let count = if cfg.audio_language_match == "any" {
-        usize::from(!matched.is_empty())
+        usize::from(wanted_matches > 0)
     } else {
-        matched.len()
+        wanted_matches
     };
-    // Explicit CF floors are applied before this hint. Resolution target
-    // ordering remains above scores, and actual audio is checked at import.
-    2_000 * i32::try_from(count.min(16)).unwrap_or(16)
+    // A named target match should also name the minimum audio. A
+    // dual-audio label suggests more tracks without proving their languages.
+    let minimum_named = wanted.is_empty()
+        || if cfg.audio_language_match == "any" {
+            wanted_matches > 0
+        } else {
+            wanted.is_subset(&matched)
+        };
+    let target_bonus = if target.is_empty() {
+        0
+    } else if minimum_named && target.is_subset(&matched) {
+        4_000
+    } else if (target.len() > 1 || (!wanted.is_empty() && !target.is_subset(&wanted)))
+        && tokens.windows(2).any(|pair| pair == ["dual", "audio"])
+    {
+        3_000
+    } else {
+        0
+    };
+    // Explicit CF floors and target resolution ordering still take priority.
+    2_000 * i32::try_from(count.min(16)).unwrap_or(16) + target_bonus
 }
 
 pub fn apply_audio_hint(cfg: &Config, result: &mut super::nyaa::SearchResult) {
@@ -506,6 +548,27 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn target_audio_hints_favor_dialogue_over_subtitle_labels() {
+        for target in ["ja,en", "en"] {
+            let cfg = Config {
+                media_requirements_enabled: true,
+                required_audio_languages: "ja".into(),
+                target_audio_languages: target.into(),
+                ..Default::default()
+            };
+            let japanese = audio_hint_bonus(&cfg, "Overgeared [JPN Audio] [ENG Subs]");
+            let english = audio_hint_bonus(&cfg, "Overgeared [ENG Dub]");
+            let dual = audio_hint_bonus(&cfg, "Overgeared [Dual Audio]");
+            let both_named = audio_hint_bonus(&cfg, "Overgeared [JPN Audio] [ENG Dub]");
+            assert_eq!(japanese, audio_hint_bonus(&cfg, "Overgeared [JPN Audio]"));
+            assert!(
+                english < japanese && japanese < dual && dual < both_named,
+                "{target}"
+            );
+        }
     }
 
     #[test]
