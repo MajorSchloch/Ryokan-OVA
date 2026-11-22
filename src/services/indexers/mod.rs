@@ -40,16 +40,11 @@
 //!   AnimeTosho via Prowlarr historically mis-tagged anime as
 //!   `5999` (Other) — title-parse fallback is required if the cat
 //!   doesn't include 5070.
-//! - **Per-indexer rate limits live inside Prowlarr/Jackett,** not
-//!   the indexer itself. They surface as `429 Retry-After`. The
-//!   torznab client honors them via the per-id [`cooldown`] table
-//!   in this module: on 429 it stamps `until = now + Retry-After`
-//!   (capped at [`cooldown::COOLDOWN_MAX`], defaulted to
-//!   [`cooldown::COOLDOWN_DEFAULT`] when the header is missing) and
-//!   subsequent calls for that indexer short-circuit at the top of
-//!   `fetch()` until the window lifts. Per-id rather than global
-//!   so a 429 on AB doesn't silence a healthy NZBGeek for the same
-//!   window — each Prowlarr-fronted indexer has its own budget.
+//! - **HTTP 429 rate limits apply to the endpoint and API key.**
+//!   The Torznab client uses [`cooldown`] to share a deadline across
+//!   RSS, search, and test clients with the same configuration.
+//!   Delay seconds and HTTP dates are supported. The upper bound is
+//!   24 hours, with a 60-second default for unusable headers.
 //! - **`tvsearch` with `cat=5070&q=<title>` is the right anime
 //!   path.** `season`/`ep` params don't translate cleanly because
 //!   anime trackers key on absolute episode numbers in titles.

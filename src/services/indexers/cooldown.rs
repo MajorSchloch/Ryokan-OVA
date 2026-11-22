@@ -1,180 +1,166 @@
-//! Per-indexer 429 cooldown table.
-//!
-//! Mirrors `services::jikan::JIKAN_COOLDOWN_UNTIL` in shape, but
-//! keyed by `indexer_id` because each Prowlarr-fronted indexer has
-//! its own per-tracker rate-limit budget. A single shared cooldown
-//! would make AB's 429 silence a healthy NZBGeek for the same
-//! window, which is wrong.
-//!
-//! When the torznab client sees a 429:
-//!   1. Read `Retry-After` (capped at [`COOLDOWN_MAX`], defaulted
-//!      to [`COOLDOWN_DEFAULT`] when the header is missing /
-//!      unparseable).
-//!   2. Stamp `until = now + dur` in the table under that indexer's
-//!      id.
-//!   3. Subsequent calls for that id short-circuit at the top of
-//!      `fetch()` with a "rate-limited (cooldown Ns remaining)"
-//!      error so a 429-storm doesn't pile up more 429s and so
-//!      [`crate::services::auto_search`] fan-outs skip the indexer
-//!      entirely while the cooldown is active.
-//!
-//! Per-id (not global) so a 429 on AB doesn't suppress NZBGeek.
-//! 60s default / 300s max — same envelope as Jikan's machine since
-//! Prowlarr-fronted upstreams typically publish "wait a minute"
-//! retry windows, not "wait an hour."
+//! Shared HTTP 429 cooldown for each Torznab/Newznab endpoint and API key.
+//! A client reconstructed from the same configuration observes the same deadline.
 
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex as StdMutex};
-use std::time::{Duration, Instant};
+use std::hash::{BuildHasher, RandomState};
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
-/// Default cooldown applied when a 429 lands without a parseable
-/// `Retry-After` header.
-pub const COOLDOWN_DEFAULT: Duration = Duration::from_secs(60);
+use chrono::{DateTime, SecondsFormat, Utc};
 
-/// Hard ceiling on cooldown duration. Honors upstream `Retry-After`
-/// up to this cap so a misconfigured indexer claiming a 24h backoff
-/// doesn't quarantine itself for a day.
-pub const COOLDOWN_MAX: Duration = Duration::from_secs(300);
+const DEFAULT_WAIT_SECONDS: u64 = 60;
+pub(crate) const MAX_WAIT_SECONDS: u64 = 24 * 60 * 60;
+const RATE_LIMIT: &str = "Indexer rate-limited ";
+const DEFERRED: &str = "Indexer rate-limited (cooldown)";
 
-static COOLDOWN_UNTIL: LazyLock<StdMutex<HashMap<i64, Instant>>> =
-    LazyLock::new(|| StdMutex::new(HashMap::new()));
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct Endpoint(u64);
 
-/// How long until the indexer's cooldown lifts. `None` = no active
-/// cooldown (or the prior one already expired). Lazy-cleans expired
-/// entries off the read path so the map doesn't grow indefinitely on
-/// long-lived processes.
-pub fn remaining(indexer_id: i64) -> Option<Duration> {
-    let mut guard = COOLDOWN_UNTIL.lock().ok()?;
-    let until = *guard.get(&indexer_id)?;
-    let now = Instant::now();
-    if now < until {
-        Some(until - now)
+impl Endpoint {
+    pub(super) fn new(url: &str, api_key: &str) -> Self {
+        // The keyed hash stays in memory. The shared table does not retain keys or URLs.
+        static ROUTE_KEYS: LazyLock<RandomState> = LazyLock::new(RandomState::new);
+        Self(ROUTE_KEYS.hash_one((url, api_key)))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Window {
+    until: Instant,
+    retry_at: DateTime<Utc>,
+}
+
+static WINDOWS: LazyLock<Mutex<HashMap<Endpoint, Window>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub(crate) fn is_rate_limit(error: &str) -> bool {
+    error.starts_with(RATE_LIMIT)
+}
+
+pub(crate) fn is_deferred(error: &str) -> bool {
+    error.starts_with(DEFERRED)
+}
+
+/// Retry-After permits delay seconds or an HTTP date. A zero, past, or
+/// malformed value uses the default wait to avoid a tight retry loop.
+pub(super) fn retry_after_seconds(value: &str, now: SystemTime) -> Option<u64> {
+    let value = value.trim();
+    let seconds = value.parse::<u64>().ok().or_else(|| {
+        let date = httpdate::parse_http_date(value).ok()?;
+        let delay = date.duration_since(now).ok()?;
+        Some(
+            delay
+                .as_secs()
+                .saturating_add(u64::from(delay.subsec_nanos() > 0)),
+        )
+    })?;
+    (seconds > 0).then_some(seconds)
+}
+
+pub(super) fn deferred(endpoint: Endpoint) -> Option<String> {
+    active_until(endpoint, Instant::now()).map(|retry_at| {
+        format!(
+            "{DEFERRED}. Request deferred. Retry after {}.",
+            utc_stamp(retry_at)
+        )
+    })
+}
+
+fn active_until(endpoint: Endpoint, now: Instant) -> Option<DateTime<Utc>> {
+    let mut windows = WINDOWS.lock().ok()?;
+    let window = *windows.get(&endpoint)?;
+    if now < window.until {
+        Some(window.retry_at)
     } else {
-        guard.remove(&indexer_id);
+        windows.remove(&endpoint);
         None
     }
 }
 
-/// Stamp a cooldown for this indexer. `retry_after_secs = None`
-/// applies [`COOLDOWN_DEFAULT`]; any value above [`COOLDOWN_MAX`]
-/// is clamped. Idempotent — repeated 429s during an active window
-/// just re-set the deadline (a later, longer Retry-After replaces
-/// an earlier shorter one).
-pub fn record_429(indexer_id: i64, retry_after_secs: Option<u64>) {
-    let dur = retry_after_secs
-        .map(Duration::from_secs)
-        .unwrap_or(COOLDOWN_DEFAULT)
-        .min(COOLDOWN_MAX);
-    if let Ok(mut guard) = COOLDOWN_UNTIL.lock() {
-        guard.insert(indexer_id, Instant::now() + dur);
-    }
+pub(super) fn record_429(endpoint: Endpoint, retry_after: Option<u64>) -> String {
+    let requested = retry_after
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_WAIT_SECONDS);
+    let delay = requested.min(MAX_WAIT_SECONDS);
+    let now = Instant::now();
+    let window = Window {
+        until: now + Duration::from_secs(delay),
+        retry_at: Utc::now() + chrono::TimeDelta::seconds(delay as i64),
+    };
+    let retry_at = if let Ok(mut windows) = WINDOWS.lock() {
+        windows.retain(|_, existing| existing.until > now);
+        let active = windows.entry(endpoint).or_insert(window);
+        // Overlapping queries can return 429 out of order. Keep the later deadline.
+        if window.until > active.until {
+            *active = window;
+        }
+        active.retry_at
+    } else {
+        window.retry_at
+    };
+
+    let hint = match retry_after {
+        Some(seconds) if seconds > MAX_WAIT_SECONDS => {
+            format!("Retry-After requested {seconds}s, capped at {MAX_WAIT_SECONDS}s")
+        }
+        Some(seconds) if seconds > 0 => format!("Retry-After requested {seconds}s"),
+        _ => format!("No usable Retry-After, default wait {DEFAULT_WAIT_SECONDS}s"),
+    };
+    format!(
+        "{RATE_LIMIT}(429). Retry after {}. {hint}.",
+        utc_stamp(retry_at)
+    )
 }
 
-/// Test-only: drop the cooldown stamp for a single id. **Prefer
-/// this over [`clear_all_for_tests`]** — the global table is
-/// process-static, and `clear_all` racing under nextest's default
-/// parallelism can blow away another test's freshly-stamped row
-/// between the stamp and its read. Per-id cleanup limits each
-/// test to mutating only the ids it owns.
-#[cfg(any(test, feature = "test-support"))]
-pub fn remove_for_tests(indexer_id: i64) {
-    if let Ok(mut guard) = COOLDOWN_UNTIL.lock() {
-        guard.remove(&indexer_id);
-    }
-}
-
-/// Test-only: drop every cooldown stamp. **Race-prone under
-/// nextest** because the cooldown table is process-static and
-/// tests share the binary; prefer [`remove_for_tests`] which
-/// isolates each test to its own id. Kept only as a last-resort
-/// reset for callers that genuinely don't know which ids got
-/// stamped.
-#[cfg(any(test, feature = "test-support"))]
-pub fn clear_all_for_tests() {
-    if let Ok(mut guard) = COOLDOWN_UNTIL.lock() {
-        guard.clear();
-    }
+fn utc_stamp(retry_at: DateTime<Utc>) -> String {
+    retry_at.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Each test below uses a unique id range and `remove_for_tests`
-    // for cleanup so concurrent tests under nextest's default
-    // parallelism can't race on the process-global cooldown table.
-    // The torznab wiremock_tests fixture uses id=7 — pick a non-7
-    // base in this module so cross-module concurrency stays safe.
-    // Bases: 7100/7101 (clamp), 7200 (default), 7900 (none),
-    // 7300/7301 (per-id), 7400 (replace).
+    use std::time::UNIX_EPOCH;
 
     #[test]
-    fn record_429_with_retry_after_sets_clamped_cooldown() {
-        let id = 7100;
-        remove_for_tests(id);
-        // 600s upstream Retry-After is clamped to COOLDOWN_MAX (300s).
-        record_429(id, Some(600));
-        let r = remaining(id).expect("cooldown active immediately");
-        assert!(
-            r <= COOLDOWN_MAX && r > COOLDOWN_MAX - Duration::from_secs(1),
-            "expected ~{}s, got {:?}",
-            COOLDOWN_MAX.as_secs(),
-            r
+    fn retry_after_accepts_delay_and_http_date() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let date = httpdate::fmt_http_date(now + Duration::from_secs(71_018));
+        assert_eq!(retry_after_seconds(&date, now), Some(71_018));
+        assert_eq!(retry_after_seconds("71018", now), Some(71_018));
+        assert_eq!(retry_after_seconds("0", now), None);
+        assert_eq!(retry_after_seconds("malformed", now), None);
+        assert_eq!(
+            retry_after_seconds(&date, now + Duration::from_secs(71_019)),
+            None
         );
-        remove_for_tests(id);
     }
 
     #[test]
-    fn record_429_without_retry_after_uses_default() {
-        let id = 7200;
-        remove_for_tests(id);
-        record_429(id, None);
-        let r = remaining(id).expect("cooldown active immediately");
-        assert!(
-            r <= COOLDOWN_DEFAULT && r > COOLDOWN_DEFAULT - Duration::from_secs(1),
-            "expected ~{}s default, got {:?}",
-            COOLDOWN_DEFAULT.as_secs(),
-            r
-        );
-        remove_for_tests(id);
+    fn honors_multi_hour_retry_and_keeps_the_later_deadline() {
+        let route = Endpoint::new("https://long.example.invalid/api", "key");
+        let before = Instant::now();
+        let first = record_429(route, Some(71_018));
+        assert!(first.contains("71018s"));
+        assert!(deferred(Endpoint::new("https://other.example.invalid/api", "key")).is_none());
+        let deadline = active_until(route, before + Duration::from_secs(300)).unwrap();
+        let smaller = record_429(route, Some(60));
+        assert!(smaller.contains(&utc_stamp(deadline)), "{smaller}");
+        assert!(active_until(route, before + Duration::from_secs(71_017)).is_some());
+        assert!(active_until(route, Instant::now() + Duration::from_secs(71_018)).is_none());
     }
 
     #[test]
-    fn remaining_returns_none_for_unstamped_indexer() {
-        let id = 7900;
-        remove_for_tests(id);
-        assert!(remaining(id).is_none());
-    }
-
-    #[test]
-    fn record_429_is_per_id_not_global() {
-        let a = 7300;
-        let b = 7301;
-        remove_for_tests(a);
-        remove_for_tests(b);
-        record_429(a, Some(60));
-        assert!(remaining(a).is_some(), "id {a} should be cooled down");
+    fn bounds_long_values_and_uses_a_default_for_missing_dates() {
+        let long = Endpoint::new("https://capped.example.invalid/api", "");
+        let before = Instant::now();
+        assert!(record_429(long, Some(u64::MAX)).contains("capped at 86400s"));
+        assert!(active_until(long, before + Duration::from_secs(MAX_WAIT_SECONDS - 1)).is_some());
         assert!(
-            remaining(b).is_none(),
-            "id {b} must NOT inherit id {a}'s cooldown — per-tracker rate-limit budget"
+            active_until(long, Instant::now() + Duration::from_secs(MAX_WAIT_SECONDS)).is_none()
         );
-        remove_for_tests(a);
-    }
-
-    #[test]
-    fn later_429_replaces_earlier_cooldown_window() {
-        let id = 7400;
-        remove_for_tests(id);
-        record_429(id, Some(30));
-        let first = remaining(id).expect("first cooldown active");
-        // A second 429 with a longer Retry-After should extend the
-        // window, not be ignored.
-        record_429(id, Some(120));
-        let second = remaining(id).expect("second cooldown active");
-        assert!(
-            second > first,
-            "second cooldown ({second:?}) must extend past the first ({first:?})"
-        );
-        remove_for_tests(id);
+        let default = Endpoint::new("https://default.example.invalid/api", "");
+        assert!(record_429(default, None).contains("default wait 60s"));
+        assert!(deferred(default).is_some());
+        assert!(active_until(default, Instant::now() + Duration::from_secs(60)).is_none());
     }
 }

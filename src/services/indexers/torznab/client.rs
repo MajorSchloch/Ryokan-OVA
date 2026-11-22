@@ -8,12 +8,13 @@
 //! fan-out is safe.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use reqwest::Client;
 
 use super::super::{
     DEFAULT_REQUEST_TIMEOUT_SECS, Indexer, IndexerCaps, Release, SearchQuery, TORZNAB_CAT_ANIME,
+    cooldown,
 };
 use super::parser::{TorznabError, parse_caps_response, parse_search_response};
 use crate::models::indexers as model;
@@ -37,6 +38,7 @@ pub struct TorznabIndexer {
     /// parse or reconstruct the prefix.
     base_url: String,
     api_key: String,
+    cooldown_endpoint: cooldown::Endpoint,
     priority: i32,
     is_private_tracker: bool,
     /// Pre-grab seeder filter. Releases below this threshold
@@ -73,12 +75,16 @@ impl TorznabIndexer {
             .timeout(Duration::from_secs(timeout_secs))
             .build()
             .map_err(|e| format!("reqwest client build failed: {}", e.without_url()))?;
+        let base_url = row.url.trim_end_matches('/').to_string();
+        let api_key = row.api_key.trim().to_string();
+        let cooldown_endpoint = cooldown::Endpoint::new(&base_url, &api_key);
         Ok(Self {
             id: row.id,
             name: row.name.clone(),
             kind: row.kind.clone(),
-            base_url: row.url.trim_end_matches('/').to_string(),
-            api_key: row.api_key.trim().to_string(),
+            base_url,
+            api_key,
+            cooldown_endpoint,
             priority: row.priority,
             is_private_tracker: row.is_private_tracker,
             min_seeders: row.min_seeders,
@@ -118,15 +124,11 @@ impl TorznabIndexer {
     /// plus Retry-After. Doesn't try to parse — that's the caller's
     /// job since caps and search have different schemas.
     ///
-    /// Short-circuits at the top with the active per-id cooldown
-    /// from `super::super::cooldown` if a prior 429 stamped one;
-    /// the cooldown's lifecycle is documented there.
+    /// A saved or test client for the same endpoint and key shares the
+    /// cooldown. A deferred request never contacts the endpoint.
     async fn fetch(&self, url: &str, cap: usize) -> Result<String, String> {
-        if let Some(remaining) = super::super::cooldown::remaining(self.id) {
-            return Err(format!(
-                "Indexer rate-limited (cooldown {}s remaining)",
-                remaining.as_secs()
-            ));
+        if let Some(reason) = cooldown::deferred(self.cooldown_endpoint) {
+            return Err(reason);
         }
         let resp = self
             .http
@@ -136,23 +138,13 @@ impl TorznabIndexer {
             .map_err(|e| format!("indexer request failed: {}", e.without_url()))?;
         let status = resp.status();
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            // Surface the upstream Retry-After so the caller can
-            // apply a cooldown. Mirroring AniList's pattern, the
-            // header value is in seconds; 0 / missing → fall back
-            // to a default cooldown.
             let retry = resp
                 .headers()
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok());
-            super::super::cooldown::record_429(self.id, retry);
-            // Only an excerpt is shown, so only an excerpt is read.
-            let body_excerpt = read_excerpt(resp).await;
-            return Err(format!(
-                "Indexer rate-limited (429); retry_after={:?}s; body: {}",
-                retry,
-                truncate_body(&body_excerpt)
-            ));
+                .and_then(|value| cooldown::retry_after_seconds(value, SystemTime::now()));
+            // The upstream error body can contain credentials or query URLs.
+            return Err(cooldown::record_429(self.cooldown_endpoint, retry));
         }
         if !status.is_success() {
             // Prowlarr returns 401 on bad apikey BEFORE the

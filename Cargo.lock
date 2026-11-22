@@ -2637,6 +2637,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac",
+ "httpdate",
  "insta",
  "nix",
  "proptest",

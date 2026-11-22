@@ -328,6 +328,7 @@ utoipa-swagger-ui = { version = "10", features = ["axum", "vendored"] }
 
 # Misc
 chrono = { version = "0.4", features = ["serde"] }
+httpdate = "1"
 urlencoding = "2"
 regex-lite = "0.1"
 # fancy-regex is used only by the Custom Formats parser (Sonarr-v4

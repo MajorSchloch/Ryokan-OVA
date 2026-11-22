@@ -1,116 +1,82 @@
-//! 429 + Retry-After handling. Prowlarr enforces per-indexer
-//! rate limits and surfaces them as 429 with a Retry-After
-//! header. Ryokan's torznab client captures both, stamps a
-//! per-id cooldown via `services::indexers::cooldown`, and
-//! short-circuits subsequent calls for that indexer until the
-//! window lifts.
-//!
-//! Each test calls `cooldown::remove_for_tests(7)` before
-//! exercising the client because the cooldown table is process-
-//! global static state and the fixture hardcodes `id=7`. Per-id
-//! cleanup (vs. the legacy `clear_all_for_tests`) avoids racing
-//! against the cooldown::tests module that runs in the same
-//! binary under nextest's default parallelism.
+use wiremock::matchers::{method, path, query_param};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, ResponseTemplate};
-
-use super::fixture::new_fixture;
+use super::fixture::{new_fixture_with_row, sample_row_for};
+use crate::models::indexers::KIND_NEWZNAB;
+use crate::services::indexers::torznab::TorznabIndexer;
 use crate::services::indexers::{Indexer, SearchQuery, cooldown};
 
-/// Fixture id — kept in sync with `super::fixture::new_fixture_with_kind`.
-const FIXTURE_INDEXER_ID: i64 = 7;
-
 #[tokio::test]
-async fn http_429_with_retry_after_surfaces_seconds_in_error() {
-    cooldown::remove_for_tests(FIXTURE_INDEXER_ID);
-    let (server, client) = new_fixture().await;
+async fn http_429_defers_search_and_caps_for_rebuilt_clients_on_the_same_endpoint() {
+    let server = MockServer::start().await;
+    let mut row = sample_row_for(&server, KIND_NEWZNAB, "Rate limit fixture");
+    row.api_key = "rate-limited-account".into();
+    let client = TorznabIndexer::from_row(&row).unwrap();
     Mock::given(method("GET"))
         .and(path("/api"))
+        .and(query_param("apikey", &row.api_key))
         .respond_with(
             ResponseTemplate::new(429)
-                .insert_header("retry-after", "120")
-                .set_body_string("Too Many Requests"),
-        )
-        .mount(&server)
-        .await;
-
-    let result = client.search(&SearchQuery::default()).await;
-    let err = result.expect_err("must be Err");
-    // Surface "rate-limited" + retry_after for log + cooldown.
-    assert!(
-        err.contains("rate-limited"),
-        "must mention rate-limit: {err}"
-    );
-    assert!(
-        err.contains("120"),
-        "must surface retry_after seconds: {err}"
-    );
-}
-
-#[tokio::test]
-async fn http_429_without_retry_after_surfaces_unknown_retry() {
-    cooldown::remove_for_tests(FIXTURE_INDEXER_ID);
-    // Some indexers return 429 without Retry-After. The client
-    // must still surface it as a rate-limit error rather than a
-    // generic HTTP failure, so the caller's cooldown logic can
-    // pick a default.
-    let (server, client) = new_fixture().await;
-    Mock::given(method("GET"))
-        .and(path("/api"))
-        .respond_with(ResponseTemplate::new(429).set_body_string("Slow down"))
-        .mount(&server)
-        .await;
-
-    let result = client.search(&SearchQuery::default()).await;
-    let err = result.expect_err("must be Err");
-    assert!(err.contains("rate-limited"), "must surface 429: {err}");
-    // retry_after surfaces as `None` in the error message.
-    assert!(err.contains("None"), "no retry-after → None: {err}");
-}
-
-#[tokio::test]
-async fn http_429_stamps_cooldown_and_subsequent_call_short_circuits_without_upstream_hit() {
-    cooldown::remove_for_tests(FIXTURE_INDEXER_ID);
-    let (server, client) = new_fixture().await;
-    // `expect(1)` — the wiremock will fail the test if it gets
-    // hit a second time. After the first 429 the cooldown is
-    // stamped, so the second `search()` must short-circuit
-    // BEFORE issuing the request.
-    Mock::given(method("GET"))
-        .and(path("/api"))
-        .respond_with(
-            ResponseTemplate::new(429)
-                .insert_header("retry-after", "60")
-                .set_body_string("Too Many Requests"),
+                .insert_header("retry-after", "71018")
+                .set_body_string("Non-public proxy detail"),
         )
         .expect(1)
         .mount(&server)
         .await;
 
-    let first = client.search(&SearchQuery::default()).await;
+    let err = client.search(&SearchQuery::default()).await.unwrap_err();
+    assert!(cooldown::is_rate_limit(&err) && !cooldown::is_deferred(&err));
+    assert!(err.contains("Retry-After requested 71018s"), "{err}");
+    assert!(!err.contains("Non-public proxy detail"), "{err}");
+    assert!(!err.contains(&row.api_key), "{err}");
+    let retry = err
+        .split_once("Retry after ")
+        .unwrap()
+        .1
+        .split('.')
+        .next()
+        .unwrap();
+    assert!(retry.ends_with('Z'), "{retry}");
+
+    row.id = 0; // An otherwise identical Settings test client.
+    let test_client = TorznabIndexer::from_row(&row).unwrap();
+    let search = test_client
+        .search(&SearchQuery::default())
+        .await
+        .unwrap_err();
+    let caps = test_client.caps().await.unwrap_err();
+    assert_eq!(search, caps);
     assert!(
-        first
-            .as_ref()
-            .err()
-            .map(|e| e.contains("rate-limited"))
-            .unwrap_or(false),
-        "first call must surface 429: {first:?}"
+        cooldown::is_deferred(&search) && search.contains(retry),
+        "{search}"
     );
 
-    // Second call: same client, same query. The cooldown table
-    // should short-circuit before the HTTP layer. Error message
-    // shape mirrors Jikan's "Jikan rate-limited (cooldown Ns
-    // remaining)" so log scanners that already group on
-    // "rate-limited (cooldown" continue to work.
-    let second = client.search(&SearchQuery::default()).await;
-    let err = second.expect_err("second call must surface cooldown error");
-    assert!(
-        err.contains("cooldown") && err.contains("rate-limited"),
-        "expected cooldown short-circuit error, got: {err}"
-    );
-    // Wiremock's `expect(1)` is verified on Drop — if the second
-    // call leaked through to the wire, the MockServer's drop
-    // handler would panic. Reaching this line means the gate
-    // worked.
+    row.api_key = "different-account".into();
+    let other_client = TorznabIndexer::from_row(&row).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("apikey", &row.api_key))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<rss><channel></channel></rss>"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(other_client.search(&SearchQuery::default()).await.is_ok());
+}
+
+#[tokio::test]
+async fn http_429_without_usable_retry_after_reports_the_default() {
+    let (server, client) =
+        new_fixture_with_row(|row| row.api_key = "missing-retry-after".into()).await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .respond_with(ResponseTemplate::new(429))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let err = client.search(&SearchQuery::default()).await.unwrap_err();
+    assert!(cooldown::is_rate_limit(&err) && !cooldown::is_deferred(&err));
+    assert!(err.contains("default wait 60s"), "{err}");
+    let deferred = client.search(&SearchQuery::default()).await.unwrap_err();
+    assert!(cooldown::is_deferred(&deferred), "{deferred}");
 }
