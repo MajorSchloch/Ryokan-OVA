@@ -259,6 +259,7 @@ async fn release_requirement_choices_save_and_clear_additional_target_audio() {
     assert!(saved.contains("name=\"subtitle_lang_en\" checked"));
     assert!(saved.contains("name=\"target_audio_lang_ja\" checked"));
     assert!(saved.contains("name=\"target_audio_languages\" value=\"th\""));
+    assert!(saved.contains("Effective target audio: German + Japanese, TH (all)"));
 
     let invalid = submit(format!(
         "{requirements}&target_audio_lang_ja=on&target_audio_languages=wronglanguage"
@@ -280,7 +281,7 @@ async fn release_requirement_choices_save_and_clear_additional_target_audio() {
     );
     let reset = submit(format!("{requirements}&target_audio_languages=")).await;
     assert!(reset.contains("Requirements saved"));
-    assert!(reset.contains("Effective: German · Minimum audio"));
+    assert!(reset.contains("Effective target audio: German"));
     let quality = requirement_preferences::quality(&db, id).await.unwrap();
     assert_eq!(quality.target_audio_languages, None);
     assert_eq!(quality.target_resolution.as_deref(), Some("1080"));
@@ -297,6 +298,50 @@ async fn release_requirement_choices_save_and_clear_additional_target_audio() {
             .unwrap(),
         0
     );
+}
+
+#[tokio::test]
+async fn franchise_requirements_save_shared_picker_values_and_keep_target_audio_release_scoped() {
+    let db = in_memory_pool().await;
+    let id = seed_series(&db, 7001, "Test").await;
+    let page = parent(&db, 7001).await;
+    config::save_config(&db, &policy()).await.unwrap();
+    let response = requirements::routes()
+        .with_state(build_test_app_state(db.clone(), None))
+        .oneshot(
+            Request::post("/library/requirements")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("HX-Request", "true")
+                .body(Body::from(format!(
+                    "scope=franchise&id={page}&audio_mode=require&audio_match=all&audio_lang_de=on&\
+                    subtitle_mode=require&subtitle_match=any&subtitle_lang_en=on&subtitle_languages=Thai&\
+                    minimum_resolution=720&target_resolution=1080&minimum_subtitle_check=1&\
+                    target_subtitle_check=0&target_audio_lang_ja=on"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html.contains("Requirements saved"));
+    assert!(html.contains("name=\"audio_lang_de\" checked"));
+    assert!(html.contains("name=\"subtitle_lang_en\" checked"));
+    assert!(html.contains("Effective: Uses minimum subtitle rule"));
+    assert!(!html.contains("name=\"target_audio_lang_ja\""));
+    let cfg = language_preferences::effective_config(&db, &policy(), id)
+        .await
+        .unwrap();
+    assert_eq!(cfg.required_audio_languages, "de");
+    assert_eq!(cfg.required_subtitle_languages, "en,th");
+    assert_eq!(cfg.subtitle_language_match, "any");
+    assert!(cfg.target_audio_languages.is_empty());
 }
 
 #[tokio::test]
