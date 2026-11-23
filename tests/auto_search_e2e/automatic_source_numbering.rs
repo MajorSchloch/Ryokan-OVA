@@ -1018,6 +1018,111 @@ async fn automatic_source_numbering_daily_upgrade_narrows_the_pack_and_stops_at_
     unset_nyaa_base();
 }
 
+#[tokio::test]
+async fn daily_upgrades_share_batch_queries_across_below_target_episodes() {
+    let _gate = ENV_LOCK.lock().await;
+    let title = "Code Geass: Lelouch of the Rebellion R2";
+    let source = Source {
+        hash: String::new(),
+        view: 0,
+        title: title.into(),
+        files: Vec::new(),
+        entries: vec![(2904, title.into(), 25, 0)],
+        root: 2904,
+        description: "",
+    };
+    let episodes = [1, 2, 3];
+    let (temp, state, sid, _) = fixture(&source, 2904, &episodes, &[]).await;
+    let mut config = ryokan::models::config::get_config(&state.db)
+        .await
+        .unwrap()
+        .unwrap();
+    config.media_requirements_enabled = true;
+    config.minimum_resolution = "720".into();
+    config.target_resolution = "1080".into();
+    config.required_audio_languages = "ja".into();
+    config.required_subtitle_languages = "en".into();
+    config.minimum_subtitle_check = true;
+    config.target_subtitle_check = true;
+    config.allow_non_english = false;
+    ryokan::models::config::save_config(&state.db, &config)
+        .await
+        .unwrap();
+    let folder: String =
+        sqlx::query_scalar("UPDATE series SET allow_upgrades=1 WHERE id=? RETURNING folder_name")
+            .bind(sid)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    for episode in episodes {
+        let path = temp.path().join("library").join(&folder).join(format!(
+            "Season 01/Code Geass R2 - S01E{episode:02} [1080p BluRay].mkv"
+        ));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"fixture").unwrap();
+        seed_probe(
+            &state,
+            &path,
+            &serde_json::json!({"streams":[
+                {"index":0,"codec_type":"video","codec_name":"h264","width":1920,"height":1080},
+                {"index":1,"codec_type":"audio","codec_name":"aac","tags":{"language":"jpn"}}
+            ]}),
+        )
+        .await;
+    }
+
+    let server = MockServer::start().await;
+    let failed_query = Arc::new(std::sync::Mutex::new(None::<String>));
+    let observed_failure = Arc::clone(&failed_query);
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(move |request: &wiremock::Request| {
+            let mut first_failure = observed_failure.lock().unwrap();
+            if first_failure.is_none()
+                && let Some((_, query)) = request
+                    .url
+                    .query_pairs()
+                    .find(|(key, query)| key == "q" && query.ends_with(" batch"))
+            {
+                *first_failure = Some(query.into_owned());
+                return ResponseTemplate::new(503);
+            }
+            ResponseTemplate::new(200).set_body_string(nyaa_results_page(""))
+        })
+        .mount(&server)
+        .await;
+    set_nyaa_base(&server.uri());
+    let summary = ryokan::services::upgrade::run_once(&state).await.unwrap();
+    unset_nyaa_base();
+    assert_eq!(summary.episodes_checked, episodes.len());
+    assert_eq!(summary.upgrades_grabbed, 0);
+    let batch_queries: Vec<_> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|request| {
+            request
+                .url
+                .query_pairs()
+                .find(|(key, _)| key == "q")
+                .map(|(_, value)| value.into_owned())
+        })
+        .filter(|query| query.ends_with(" batch") || query.ends_with(" complete"))
+        .collect();
+    let failed_query = failed_query.lock().unwrap().clone().unwrap();
+    let mut counts = std::collections::HashMap::new();
+    for query in batch_queries {
+        *counts.entry(query).or_insert(0) += 1;
+    }
+    assert_eq!(counts.remove(&failed_query), Some(2));
+    assert!(
+        !counts.is_empty(),
+        "expected other successful batch queries"
+    );
+    assert!(counts.values().all(|&count| count == 1));
+}
+
 async fn rss_source_setup(
     state: &AppState,
     server: &MockServer,

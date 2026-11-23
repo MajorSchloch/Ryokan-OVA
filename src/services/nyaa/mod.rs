@@ -242,7 +242,7 @@ impl SearchResult {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct SearchOptions {
     pub query: String,
     pub category: String,
@@ -312,6 +312,7 @@ pub async fn search(opts: &SearchOptions, page: i32) -> Result<SearchResponse, S
         .get(&url)
         .send()
         .await
+        .and_then(reqwest::Response::error_for_status)
         .map_err(|e| format!("Nyaa request failed: {}", e.without_url()))?;
     let body = crate::services::http_body::read_capped(resp, SEARCH_BODY_CAP).await?;
     let html = String::from_utf8_lossy(&body);

@@ -19,6 +19,7 @@ use crate::services::{
 // ── Pre-compiled regexes for parse_release_numbers ─────────────────────────
 
 mod aliases;
+mod batch_lookups;
 mod episode_pack_fallback;
 mod numeric_title;
 mod pack_detection;
@@ -37,6 +38,7 @@ pub use aliases::{
     matches_target, names_more_than_the_series, normalize_title, sequel_variant_aliases,
     token_overlap_ratio, token_set, with_alternate_titles,
 };
+pub(crate) use batch_lookups::BatchLookups;
 pub(crate) use episode_pack_fallback::find_single_episode_batch_fallback;
 pub(crate) use numeric_title::TitleNumberEvidence;
 pub use pack_detection::{
@@ -527,6 +529,7 @@ pub async fn find_best_for_target_with_filter(
             indexers_cache,
             BatchSearchMode::Automatic,
             eligible,
+            None,
         )
         .await;
         let mut diagnostics = fuzzy_only;
@@ -781,6 +784,7 @@ pub async fn collect_scored_batches_for_target_with_diag(
             BatchSearchMode::Interactive
         },
         None,
+        None,
     )
     .await
 }
@@ -809,6 +813,7 @@ async fn collect_scored_batches_for_target_filtered(
     indexers_cache: &crate::IndexerCache,
     mode: BatchSearchMode,
     eligible: Option<CandidateFilter<'_>>,
+    lookups: Option<&BatchLookups>,
 ) -> (Vec<SearchResult>, Vec<String>) {
     let require_verbatim = mode != BatchSearchMode::Interactive;
     let allow_single_episode_pack = mode != BatchSearchMode::Automatic;
@@ -917,6 +922,7 @@ async fn collect_scored_batches_for_target_filtered(
         crate::services::indexers::search_categories(&detail.format, detail.is_adult);
     let automatic_sources = crate::services::source_numbering::loader::Resolver::default();
     let ctx = AutoQueryCtx {
+        batch_lookups: lookups,
         provider_numbering: None,
         allow_single_episode_pack,
         automatic_sources: &automatic_sources,
@@ -1415,6 +1421,7 @@ async fn collect_scored_for_target_filtered(
     let provider_numbering =
         crate::services::release_numbering::ProviderNumbering::load(db, detail, target).await;
     let ctx = AutoQueryCtx {
+        batch_lookups: None,
         provider_numbering: provider_numbering.as_ref(),
         allow_single_episode_pack: false,
         automatic_sources: &automatic_sources,
@@ -1843,6 +1850,7 @@ impl AutoQueryCtx<'_> {
 
 #[derive(Clone, Copy)]
 struct AutoQueryCtx<'a> {
+    batch_lookups: Option<&'a BatchLookups>,
     provider_numbering: Option<&'a crate::services::release_numbering::ProviderNumbering>,
     allow_single_episode_pack: bool,
     automatic_sources: &'a crate::services::source_numbering::loader::Resolver,
@@ -2016,7 +2024,14 @@ async fn run_queries(
         .collect();
 
     let nyaa_responses = stream::iter(opts_list)
-        .map(|opts| async move { nyaa::search(&opts, 1).await })
+        .map(|opts| async move {
+            match ctx.batch_lookups {
+                Some(lookups) => lookups.nyaa(opts).await,
+                None => nyaa::search(&opts, 1)
+                    .await
+                    .map(|response| response.results),
+            }
+        })
         .buffer_unordered(nyaa::NYAA_BUFFER)
         .collect::<Vec<_>>();
 
@@ -2032,10 +2047,13 @@ async fn run_queries(
                     limit: None,
                     offset: None,
                 };
-                (
-                    query,
-                    crate::services::indexers::fan_out_search(ctx.indexers, &search_query).await,
-                )
+                let outcomes = match ctx.batch_lookups {
+                    Some(lookups) => lookups.indexers(ctx.indexers, &search_query).await,
+                    None => {
+                        crate::services::indexers::fan_out_search(ctx.indexers, &search_query).await
+                    }
+                };
+                (query, outcomes)
             })
             .buffer_unordered(nyaa::NYAA_BUFFER)
             .collect()
@@ -2077,7 +2095,7 @@ async fn run_queries(
     let mut rejected_here: HashSet<String> = HashSet::new();
     for resp in responses {
         let results = match resp {
-            Ok(v) => v.results,
+            Ok(results) => results,
             Err(_) => continue,
         };
         for mut result in results {
