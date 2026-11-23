@@ -49,7 +49,6 @@ pub struct RequirementsView {
     pub subtitles: RequirementLanguagePicker,
     pub target_audio: RequirementLanguagePicker,
     pub target_audio_effective: String,
-    pub target_audio_origin: String,
     pub audio_match: String,
     pub subtitle_match: String,
     pub error: String,
@@ -180,13 +179,7 @@ fn languages(raw: &str, match_mode: &str) -> String {
 // language names and codes, including languages already saved by older forms.
 const COMMON_LANGUAGES: &[&str] = &["ja", "en", "de", "es", "zh", "ko", "fr"];
 
-fn language_picker(scope: &str, raw: &str) -> RequirementLanguagePicker {
-    if scope != "release" {
-        return RequirementLanguagePicker {
-            other: raw.into(),
-            ..Default::default()
-        };
-    }
+fn language_picker(raw: &str) -> RequirementLanguagePicker {
     let mut selected = Vec::new();
     let mut other = Vec::new();
     for part in raw
@@ -227,11 +220,7 @@ fn view(
     for (name, label, value, current, inherited) in [
         (
             "audio_mode",
-            if scope == "release" {
-                "Minimum audio"
-            } else {
-                "Audio language requirement"
-            },
+            "Audio languages",
             l.audio_languages.as_deref(),
             languages(
                 &effective.required_audio_languages,
@@ -241,11 +230,7 @@ fn view(
         ),
         (
             "subtitle_mode",
-            if scope == "release" {
-                "Subtitle languages"
-            } else {
-                "Subtitle language requirement"
-            },
+            "Subtitle languages",
             l.subtitle_languages.as_deref(),
             languages(
                 &effective.required_subtitle_languages,
@@ -300,12 +285,7 @@ fn view(
             &base.target_resolution,
         ),
     ] {
-        let inherit = if scope == "release" {
-            format!("Inherit ({inherited}p)")
-        } else {
-            format!("Use inherited: {inherited}p")
-        };
-        let mut options = vec![(String::new(), inherit)];
+        let mut options = vec![(String::new(), format!("Inherit ({inherited}p)"))];
         options.extend(["480", "576", "720", "1080", "2160"].map(|v| (v.into(), format!("{v}p"))));
         fields.push(RequirementField {
             name,
@@ -325,13 +305,14 @@ fn view(
             .into(),
         });
     }
-    for (name, label, value, current, inherited) in [
+    for (name, label, value, current, inherited, unchecked) in [
         (
             "minimum_subtitle_check",
             "Minimum subtitle check",
             q.minimum_subtitle_check,
             effective.minimum_subtitle_check,
             base.minimum_subtitle_check,
+            "Allow import without these subtitles",
         ),
         (
             "target_subtitle_check",
@@ -339,8 +320,10 @@ fn view(
             q.target_subtitle_check,
             effective.target_subtitle_check,
             base.target_subtitle_check,
+            "Use the minimum subtitle rule",
         ),
     ] {
+        let target = name == "target_subtitle_check";
         fields.push(RequirementField {
             name,
             label,
@@ -355,19 +338,23 @@ fn view(
                         if inherited {
                             "Selectable subtitles"
                         } else {
-                            "No additional check"
+                            unchecked
                         }
                     ),
                 ),
                 ("1".into(), "Require selectable full subtitles".into()),
-                ("0".into(), "No additional subtitle check".into()),
+                ("0".into(), unchecked.into()),
             ],
             effective: if effective.required_subtitle_languages.is_empty() {
                 "No required subtitle languages"
-            } else if current {
+            } else if !effective.media_requirements_enabled && target {
+                "Uses the quality cutoff"
+            } else if current || !effective.media_requirements_enabled {
                 "Selectable full subtitles"
+            } else if target && effective.minimum_subtitle_check {
+                "Uses minimum subtitle rule"
             } else {
-                "No additional check"
+                "No subtitle check"
             }
             .into(),
             origin: if value.is_some() {
@@ -382,33 +369,22 @@ fn view(
             .into(),
         });
     }
-    let (inherited_audio, inherited_subtitles) = if scope == "release" {
-        fields.sort_by_key(|field| match field.name {
-            "minimum_resolution" => 0,
-            "target_resolution" => 1,
-            "audio_mode" => 2,
-            "subtitle_mode" => 3,
-            "minimum_subtitle_check" => 4,
-            _ => 5,
-        });
-        (
-            base.required_audio_languages.as_str(),
-            base.required_subtitle_languages.as_str(),
-        )
-    } else {
-        ("", "")
-    };
+    fields.sort_by_key(|field| match field.name {
+        "minimum_resolution" | "target_resolution" => 0,
+        "audio_mode" | "subtitle_mode" => 1,
+        _ => 2,
+    });
     let extra_audio = q.target_audio_languages.as_deref().unwrap_or_default();
-    let (target_audio_effective, target_audio_origin) = if extra_audio.is_empty() {
-        (
-            languages(
-                &effective.required_audio_languages,
-                &effective.audio_language_match,
-            ),
-            "Minimum audio",
-        )
+    let minimum_audio = languages(
+        &effective.required_audio_languages,
+        &effective.audio_language_match,
+    );
+    let target_audio_effective = if extra_audio.is_empty() {
+        minimum_audio
+    } else if effective.required_audio_languages.is_empty() {
+        languages(extra_audio, "all")
     } else {
-        (languages(extra_audio, "all"), "Release")
+        format!("{minimum_audio} + {}", languages(extra_audio, "all"))
     };
     RequirementsView {
         enabled: effective.media_requirements_enabled,
@@ -416,32 +392,25 @@ fn view(
         id: id.into(),
         fields,
         audio: language_picker(
-            scope,
-            l.audio_languages.as_deref().unwrap_or(inherited_audio),
+            l.audio_languages
+                .as_deref()
+                .unwrap_or(&base.required_audio_languages),
         ),
         subtitles: language_picker(
-            scope,
             l.subtitle_languages
                 .as_deref()
-                .unwrap_or(inherited_subtitles),
+                .unwrap_or(&base.required_subtitle_languages),
         ),
-        target_audio: language_picker(scope, extra_audio),
+        target_audio: language_picker(extra_audio),
         target_audio_effective,
-        target_audio_origin: target_audio_origin.into(),
-        audio_match: l.audio_match.clone().unwrap_or_else(|| {
-            if scope == "release" {
-                base.audio_language_match.clone()
-            } else {
-                "all".into()
-            }
-        }),
-        subtitle_match: l.subtitle_match.clone().unwrap_or_else(|| {
-            if scope == "release" {
-                base.subtitle_language_match.clone()
-            } else {
-                "all".into()
-            }
-        }),
+        audio_match: l
+            .audio_match
+            .clone()
+            .unwrap_or_else(|| base.audio_language_match.clone()),
+        subtitle_match: l
+            .subtitle_match
+            .clone()
+            .unwrap_or_else(|| base.subtitle_language_match.clone()),
         ..Default::default()
     }
 }
@@ -470,11 +439,9 @@ struct RequirementForm {
 impl RequirementForm {
     fn language_input(&self, prefix: &str, other: &str) -> String {
         let mut picked = Vec::new();
-        if self.scope == "release" {
-            for code in COMMON_LANGUAGES {
-                if self.choices.contains_key(&format!("{prefix}_lang_{code}")) {
-                    picked.push(*code);
-                }
+        for code in COMMON_LANGUAGES {
+            if self.choices.contains_key(&format!("{prefix}_lang_{code}")) {
+                picked.push(*code);
             }
         }
         if !other.trim().is_empty() {
@@ -643,10 +610,10 @@ async fn save(
     }.await;
     if let Err(error) = outcome {
         v.error = error;
-        v.audio = language_picker(&v.scope, &audio_input);
-        v.subtitles = language_picker(&v.scope, &subtitle_input);
+        v.audio = language_picker(&audio_input);
+        v.subtitles = language_picker(&subtitle_input);
         if let Some(input) = &target_audio_input {
-            v.target_audio = language_picker(&v.scope, input);
+            v.target_audio = language_picker(input);
         }
         v.audio_match = form.audio_match;
         v.subtitle_match = form.subtitle_match;
