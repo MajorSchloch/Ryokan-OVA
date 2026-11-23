@@ -220,7 +220,7 @@ pub const CAPS_TTL_SECONDS: i64 = 7 * 24 * 60 * 60;
 /// format. `q` is the only free-text input — `season`/`ep` are
 /// deliberately omitted because anime trackers key on absolute
 /// episode numbers in release titles, not season+ep.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct SearchQuery {
     pub q: String,
     /// Torznab category ids. Defaults to `[5070]` (anime) when

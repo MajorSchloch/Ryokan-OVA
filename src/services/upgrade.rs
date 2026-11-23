@@ -412,6 +412,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
         )
         .await;
 
+        let batch_lookups = auto_search::BatchLookups::default();
         for target in targets {
             let label = auto_search::target_label(&target);
             // Keep the library slot for every upgrade/protection decision and
@@ -479,6 +480,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                     &cfs,
                     &state.indexers,
                     Some(&eligible),
+                    Some(&batch_lookups),
                 )
                 .await;
             }

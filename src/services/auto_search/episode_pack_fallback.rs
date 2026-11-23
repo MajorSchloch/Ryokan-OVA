@@ -1,7 +1,7 @@
 use sqlx::SqlitePool;
 
 use super::{
-    BatchSearchMode, CandidateFilter, MatchPhase, MatchProvenance, SearchTarget,
+    BatchLookups, BatchSearchMode, CandidateFilter, MatchPhase, MatchProvenance, SearchTarget,
     collect_scored_batches_for_target_filtered, entry_pack_proof, published_packs, source,
 };
 use crate::models::{config::Config, grabbed_torrents};
@@ -16,6 +16,7 @@ const PUBLICATION_LIMIT: usize = 3;
 /// Search with the batch query shape but return only one proven video.
 /// Call after the eligible standalone search misses. The returned mapping
 /// requires the strict metadata-only torrent dispatch and import checks.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn find_single_episode_batch_fallback(
     db: &SqlitePool,
     detail: &AnimeDetail,
@@ -24,6 +25,7 @@ pub(crate) async fn find_single_episode_batch_fallback(
     cfs: &[CompiledCustomFormat],
     indexers_cache: &crate::IndexerCache,
     eligible: Option<CandidateFilter<'_>>,
+    lookups: Option<&BatchLookups>,
 ) -> (Option<SearchResult>, Vec<String>) {
     let SearchTarget::Episode(episode) = *target else {
         return (None, Vec::new());
@@ -40,6 +42,7 @@ pub(crate) async fn find_single_episode_batch_fallback(
         indexers_cache,
         BatchSearchMode::EpisodeFallback,
         None,
+        lookups,
     )
     .await;
 

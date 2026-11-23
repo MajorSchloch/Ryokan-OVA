@@ -804,6 +804,7 @@ async fn run_auto_search_targets_with_upgrades(
                 &cfs,
                 &state.indexers,
                 Some(&eligible),
+                None,
             )
             .await;
             used_batch_fallback = best_pick.is_some();
