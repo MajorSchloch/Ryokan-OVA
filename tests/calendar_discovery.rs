@@ -157,10 +157,7 @@ async fn discover_filter_add_and_serve_the_last_complete_snapshot_on_429() {
         assert!(announced.contains(label), "{label}");
     }
     assert!(!html.contains("2099-01-01"));
-    assert_eq!(
-        doc.select(&select("[data-anilist-id='12'] button")).count(),
-        1
-    );
+    assert_setup_link(&doc, 12);
     let filtered = fetch(&app, "/calendar/upcoming?format=OVA", None).await;
     assert!(filtered.contains("Native 13") && !filtered.contains("Native 12"));
     assert_eq!(server.received_requests().await.unwrap().len(), 4);
@@ -228,10 +225,7 @@ async fn discover_filter_add_and_serve_the_last_complete_snapshot_on_429() {
         link.value().attr("href"),
         Some(format!("/series/{}", library[0].id).as_str())
     );
-    assert_eq!(
-        doc.select(&select("[data-anilist-id='13'] button")).count(),
-        1
-    );
+    assert_setup_link(&doc, 13);
     let filtered = fetch(&app, "/calendar/upcoming?hide_tracked=true", None).await;
     assert!(!filtered.contains("Native 12") && filtered.contains("Native 13"));
     let mut other = form.clone();
@@ -253,13 +247,27 @@ async fn discover_filter_add_and_serve_the_last_complete_snapshot_on_429() {
     assert!(!feed.contains("20990406"));
 }
 
-// Use the entry payload rendered on the calendar button, just as library_add.js does.
-fn add_form(html: &str, id: i64) -> Value {
-    let doc = Html::parse_document(html);
-    let selector =
-        Selector::parse(&format!("[data-anilist-id='{id}'] button[data-entry]")).unwrap();
-    let button = doc.select(&selector).next().expect("Add to library button");
-    let entry: Value = serde_json::from_str(button.value().attr("data-entry").unwrap()).unwrap();
+fn assert_setup_link(doc: &Html, id: i64) {
+    let selector = Selector::parse(&format!("[data-anilist-id='{id}'] a.btn")).unwrap();
+    let link = doc.select(&selector).next().expect("Add anime setup link");
+    assert_eq!(link.text().collect::<String>(), "Set up");
+    assert_eq!(
+        link.value().attr("href"),
+        Some(format!("/library/add?provider_id={id}").as_str())
+    );
+}
+
+// Older clients can still submit the JSON request from a saved discovery entry.
+async fn legacy_add_form(db: &sqlx::SqlitePool, id: i64) -> Value {
+    let entry: String = sqlx::query_scalar(
+        "SELECT item.value -> '$.entry' FROM premiere_discovery, json_each(entries) item
+         WHERE item.value ->> '$.entry.id'=?",
+    )
+    .bind(id)
+    .fetch_one(db)
+    .await
+    .unwrap();
+    let entry: Value = serde_json::from_str(&entry).unwrap();
     json!({"anilist_id":entry["id"],"mal_id":entry["id_mal"],"title":entry["title_english"],
         "title_english":entry["title_english"],"title_romaji":entry["title_romaji"],
         "title_native":entry["title_native"],"cover_url":entry["cover_url"],"format":entry["format"],
@@ -282,7 +290,8 @@ async fn ambiguous_calendar_add(
         .bind(original).execute(db).await.unwrap();
     let path = "/calendar/upcoming";
     let html = fetch(app, path, None).await;
-    let form = add_form(&html, 13);
+    assert_setup_link(&Html::parse_document(&html), 13);
+    let form = legacy_add_form(db, 13).await;
     if stale {
         // Entry 12 leaves the bounded snapshot between rendering and clicking.
         server.reset().await;
@@ -293,7 +302,8 @@ async fn ambiguous_calendar_add(
         )
         .await;
         discovery::refresh(db).await.unwrap();
-        assert_eq!(add_form(&fetch(app, path, None).await, 13), form);
+        assert_setup_link(&Html::parse_document(&fetch(app, path, None).await), 13);
+        assert_eq!(legacy_add_form(db, 13).await, form);
     }
     // Known siblings settle the match locally even after one leaves the page.
     Mock::given(method("POST"))
@@ -419,7 +429,9 @@ async fn manual_add_promotes_a_verified_unique_mal_match() {
         .route("/api/library/add", post(crud::add_series))
         .with_state(test_support::build_test_app_state(db.clone(), None));
     // A single result on a bounded discovery page still needs verification.
-    let form = add_form(&fetch(&app, "/calendar/upcoming", None).await, 14);
+    let html = fetch(&app, "/calendar/upcoming", None).await;
+    assert_setup_link(&Html::parse_document(&html), 14);
+    let form = legacy_add_form(&db, 14).await;
     let response: Value =
         serde_json::from_str(&fetch(&app, "/api/library/add", Some(&form)).await).unwrap();
     assert_eq!(response["id"], original);

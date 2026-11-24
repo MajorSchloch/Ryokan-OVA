@@ -532,8 +532,32 @@ pub(crate) async fn upsert_with_promotion(
     core: SeriesCore<'_>,
     allow_unconfirmed_match: bool,
 ) -> Result<(i64, bool), sqlx::Error> {
+    save_series(db, core, allow_unconfirmed_match, None).await
+}
+
+pub(crate) async fn add_with_monitoring(
+    db: &SqlitePool,
+    core: SeriesCore<'_>,
+    allow_unconfirmed_match: bool,
+    mode: MonitorMode,
+) -> Result<(i64, bool), sqlx::Error> {
+    save_series(db, core, allow_unconfirmed_match, Some(mode)).await
+}
+
+pub(crate) const AMBIGUOUS_MAL_ADD: &str = "This MyAnimeList entry matches several library releases. Search AniList to choose the exact release.";
+
+async fn save_series(
+    db: &SqlitePool,
+    core: SeriesCore<'_>,
+    allow_unconfirmed_match: bool,
+    initial_mode: Option<MonitorMode>,
+) -> Result<(i64, bool), sqlx::Error> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     if let Some(existing) = get_by_anilist_id(&mut *tx, core.anilist_id).await? {
+        if initial_mode.is_some() {
+            tx.commit().await?;
+            return Ok((existing.id, false));
+        }
         sqlx::query(
             r#"
             UPDATE series
@@ -571,11 +595,23 @@ pub(crate) async fn upsert_with_promotion(
         return Ok((existing.id, false));
     }
 
+    if initial_mode.is_some()
+        && core.anilist_id < 0
+        && let Some(mid) = core.mal_id
+        && sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM series WHERE mal_id=?")
+            .bind(mid)
+            .fetch_one(&mut *tx)
+            .await?
+            > 1
+    {
+        return Err(sqlx::Error::Protocol(AMBIGUOUS_MAL_ADD.into()));
+    }
+
     if let Some(mid) = core.mal_id
         && let Some(existing) =
             find_mal_match(&mut *tx, core.anilist_id, mid, allow_unconfirmed_match).await?
     {
-        if core.anilist_id <= 0 {
+        if core.anilist_id <= 0 || initial_mode.is_some() {
             tx.commit().await?;
             return Ok((existing.id, false));
         }
@@ -619,8 +655,14 @@ pub(crate) async fn upsert_with_promotion(
         return Ok((existing.id, false));
     }
 
-    let mode = default_monitor_mode(core.status);
+    let mode = initial_mode.unwrap_or_else(|| default_monitor_mode(core.status));
     let id = insert_new(&mut tx, core, mode).await?;
+    if initial_mode.is_some() {
+        sqlx::query("UPDATE series SET monitor_mode_manual_override=1 WHERE id=?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
     Ok((id, true))
 }

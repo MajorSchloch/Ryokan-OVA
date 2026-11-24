@@ -77,7 +77,10 @@ async fn provider_detail_browses_relations_without_creating_library_or_download_
     ] {
         let html = body(request(&db, uri, false).await).await;
         assert!(html.contains(title));
-        assert!(html.contains("+ Add to Library"));
+        let provider_id = uri.rsplit('/').next().unwrap();
+        assert!(html.contains(&format!(
+            "id=\"btn-track\" href=\"/library/add?provider_id={provider_id}\""
+        )));
         assert!(html.contains("Explore franchise"));
         assert!(!html.contains("id=\"btn-auto-search\""));
         assert!(!html.contains("Remove from Library"));
@@ -126,7 +129,7 @@ async fn provider_url_keeps_identity_before_and_after_tracking_despite_internal_
     series::remove(&db, local).await.unwrap();
     let removed = body(request(&db, "/anime/anilist/1", false).await).await;
     assert!(removed.contains("data-db-id=\"\""));
-    assert!(removed.contains("+ Add to Library"));
+    assert!(removed.contains("id=\"btn-track\" href=\"/library/add?provider_id=1\""));
 }
 
 #[tokio::test]
@@ -164,6 +167,7 @@ async fn mal_page_uses_its_own_namespace_and_survives_a_unique_anilist_promotion
     let html = body(request(&db, "/anime/mal/5680", false).await).await;
     assert!(html.contains("data-provider-id=\"-5680\""));
     assert!(html.contains("data-db-id=\"\""));
+    assert!(html.contains("id=\"btn-track\" href=\"/library/add?provider_id=-5680\""));
     let local = seed_series(&db, 5081, "Promoted release").await;
     sqlx::query("UPDATE series SET mal_id=5680 WHERE id=?")
         .bind(local)

@@ -90,7 +90,8 @@ pub use auto_search::{
     auto_search_series, run_auto_search_targets,
 };
 pub(crate) use auto_search::{
-    auto_search_series_with_retry, run_failed_download_search, run_recent_missing_target,
+    auto_search_newly_added, auto_search_series_with_retry, run_failed_download_search,
+    run_recent_missing_target,
 };
 pub use grab::{
     __path_grab_batch_result, __path_grab_interactive_result, grab_batch_result,
@@ -222,8 +223,7 @@ pub(crate) async fn queue_shim_search(
 /// Pre-computed display fields for one search result row. Built by
 /// `build_search_results_partial` from a raw `AnimeEntry` so the Askama
 /// template stays simple — title-language picking, status-class
-/// flattening, external-link selection, and the JSON-in-attribute
-/// `data-entry` payload that `addSeries(...)` reads all happen in Rust.
+/// flattening, and link selection all happen in Rust.
 struct SearchResultRow {
     entry: anilist::AnimeEntry,
     title: String,
@@ -233,12 +233,10 @@ struct SearchResultRow {
     status_class: String,
     status_label: String,
     detail_href: String,
+    setup_href: String,
     external_href: Option<String>,
     source_label: &'static str,
-    /// Pre-serialized JSON of `entry`. Embedded into the `data-entry`
-    /// attribute on the Add button; `static/js/library_add.js::addSeries`
-    /// reads it back via `JSON.parse(btn.dataset.entry)` to seed the
-    /// monitor-mode modal without re-querying.
+    /// Retained for callers of the existing HTMX results endpoint.
     data_entry_json: String,
 }
 
@@ -248,9 +246,7 @@ struct AnilistSearchResultsPartial {
     entries: Vec<SearchResultRow>,
 }
 
-/// Pick the user-facing title for a result given a language hint. Mirrors
-/// `getTitleByLang` in `static/js/library_add.js`: native and romaji fall back
-/// through the same chain JS used; anything unknown coerces to english.
+/// Pick a display title, falling back to the other languages if needed.
 fn pick_title<'a>(entry: &'a anilist::AnimeEntry, lang: &str) -> &'a str {
     let pick_first_non_empty = |a: &'a str, b: &'a str, c: &'a str| -> &'a str {
         if !a.is_empty() {
@@ -331,6 +327,7 @@ fn build_search_results_partial(
             // `"` inside the attribute — no manual escAttr needed.
             let data_entry_json = serde_json::to_string(&entry).unwrap_or_else(|_| "{}".into());
             let detail_href = super::detail::path(entry.id);
+            let setup_href = format!("/library/add?provider_id={}", entry.id);
             SearchResultRow {
                 entry,
                 title,
@@ -340,6 +337,7 @@ fn build_search_results_partial(
                 status_class,
                 status_label,
                 detail_href,
+                setup_href,
                 external_href,
                 source_label,
                 data_entry_json,

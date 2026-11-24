@@ -1,16 +1,7 @@
-//! Browser-e2e for the library's add-series "Monitor Episodes" dialog.
-//!
-//! 65b545e changed `/api/library/monitoring` to answer htmx with a
-//! `ryokan-monitoring-changed` event instead of `HX-Refresh`, so the
-//! series page could update in place. The add flow's dialog relied on
-//! the refresh: Confirm saved the mode, but the dialog stayed open over
-//! a library that still read "0 series". The handler test can't see
-//! this; only a browser runs the button's `hx-on` wiring.
-//!
-//! Skips gracefully when WebDriver/geckodriver is unreachable.
+//! Browser coverage for saving monitoring from the dedicated Add Anime page.
 
-use ryokan::test_support::{build_test_app_state, in_memory_pool, seed_series};
-use std::time::Duration;
+use ryokan::test_support::{build_test_app_state, in_memory_pool};
+use serde_json::json;
 
 #[path = "common/browser_e2e.rs"]
 mod browser_e2e;
@@ -19,7 +10,7 @@ use browser_e2e::{
 };
 
 #[tokio::test]
-async fn confirming_the_monitor_dialog_saves_and_closes_it() {
+async fn adding_from_the_setup_page_saves_monitoring_and_opens_the_release() {
     let client = match try_connect_browser().await {
         Ok(c) => c,
         Err(msg) => {
@@ -29,95 +20,74 @@ async fn confirming_the_monitor_dialog_saves_and_closes_it() {
     };
 
     let db = in_memory_pool().await;
-    let series_id = seed_series(&db, 154587, "Frieren").await;
-    sqlx::query("UPDATE series SET monitor_mode = 'none' WHERE id = ?")
-        .bind(series_id)
-        .execute(&db)
+    let provider_id = 911_023;
+    let detail = serde_json::from_value(json!({
+        "id": provider_id,
+        "title_romaji": "Orbit Archive",
+        "title_english": "Orbit Archive",
+        "title_native": "",
+        "cover_url": "",
+        "banner_url": "",
+        "format": "TV",
+        "status": "FINISHED",
+        "status_display": "Finished",
+        "episodes": 2,
+        "season": "FALL",
+        "season_year": 2023,
+        "description": "",
+        "genres": [],
+        "score_is_ten_point": false,
+        "score_class": "",
+        "synonyms": [],
+        "streaming_episodes": [],
+        "relations": []
+    }))
+    .expect("valid provider detail");
+    ryokan::models::metadata_cache::upsert_provider(&db, provider_id, None, &detail)
         .await
-        .expect("seed monitor mode");
-    let state = build_test_app_state(db.clone(), None);
+        .expect("cache provider detail");
     let session = seed_user_session(&db).await;
-    let addr = spawn_app(state).await;
+    let addr = spawn_app(build_test_app_state(db.clone(), None)).await;
 
-    open_with_session(&client, addr, &session, "/")
-        .await
-        .expect("open library");
+    open_with_session(
+        &client,
+        addr,
+        &session,
+        &format!("/library/add?provider_id={provider_id}"),
+    )
+    .await
+    .expect("open Add Anime setup");
     assert_htmx_loaded(&client).await.expect("htmx loaded");
-    // index.js is deferred; it declares `_pendingSeriesId = null`, so
-    // setting it before the script ran would be overwritten.
-    let mut page_script_ready = false;
-    for _ in 0..50 {
-        page_script_ready = client
-            .execute(
-                "return typeof confirmMonitoringVals === 'function';",
-                vec![],
-            )
-            .await
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if page_script_ready {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert!(page_script_ready, "index.js never loaded");
+    assert_eq!(ryokan::test_support::count_series(&db).await, 0);
 
-    // The state `addSeries` leaves behind before it shows the dialog:
-    // the new series' id pending, "All Episodes" selected. Set through
-    // an injected <script>, which runs in the page: geckodriver runs
-    // `execute` in a sandbox whose global assignments the page's own
-    // functions never see. A marker on `window` survives until the
-    // page reloads.
     client
         .execute(
             r#"
-            const s = document.createElement('script');
-            s.textContent = '_pendingSeriesId = ' + Number(arguments[0])
-                + '; _selectedMonitorMode = "all";';
-            document.head.appendChild(s);
-            document.getElementById('monitor-modal').style.display = 'flex';
-            window.__beforeConfirm = true;
-            document.getElementById('monitor-confirm-btn').click();
-            return true;
+            document.querySelector('input[name=monitor_mode][value=none]').click();
+            document.querySelector('.add-anime-actions button[type=submit]').click();
             "#,
-            vec![serde_json::json!(series_id)],
+            vec![],
         )
         .await
-        .expect("confirm the dialog");
+        .expect("submit Add Anime setup");
 
-    let mut closed_by_reload = false;
-    for _ in 0..50 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let done = client
-            .execute(
-                r#"
-                return document.readyState === 'complete'
-                    && window.__beforeConfirm === undefined
-                    && getComputedStyle(document.getElementById('monitor-modal')).display === 'none';
-                "#,
-                vec![],
-            )
-            .await
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if done {
-            closed_by_reload = true;
-            break;
-        }
-    }
-    assert!(
-        closed_by_reload,
-        "Confirm must reload the library so the dialog closes and the new series shows"
-    );
-
-    let mode: String = sqlx::query_scalar("SELECT monitor_mode FROM series WHERE id = ?")
-        .bind(series_id)
-        .fetch_one(&db)
+    client
+        .wait()
+        .for_url(
+            &format!("http://{addr}/anime/anilist/{provider_id}")
+                .parse()
+                .expect("valid release URL"),
+        )
         .await
-        .expect("read monitor mode");
-    assert_eq!(mode, "all", "the chosen mode is saved");
+        .expect("save opens the canonical release page");
+    let settings: (String, bool) = sqlx::query_as(
+        "SELECT monitor_mode, monitor_mode_manual_override FROM series WHERE anilist_id = ?",
+    )
+    .bind(provider_id)
+    .fetch_one(&db)
+    .await
+    .expect("read monitoring choice");
+    assert_eq!(settings, ("none".into(), true));
 
     let _ = client.close().await;
 }

@@ -7,6 +7,6 @@
     {% if let Some(id) = card.library_id %}
     <a class="btn btn-secondary btn-sm" href="/series/{{ id }}">Open in library</a>
     {% else %}
-    <button type="button" class="btn btn-primary btn-sm" onclick="addSeries({{ card.id }}, this)" data-entry="{{ card.add_json }}">Add to library</button>
+    <a class="btn btn-primary btn-sm" href="/library/add?provider_id={{ card.id }}" aria-label="Set up {{ card.title }}">Set up</a>
     {% endif %}
 </li>

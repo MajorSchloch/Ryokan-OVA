@@ -45,7 +45,7 @@
                    oninput="liveLibrarySearch(this)"
                    onkeydown="if(event.key==='Enter'){event.preventDefault();}">
         </form>
-        <button class="btn btn-primary library-add-btn" onclick="openAddModal()">+ Add Series</button>
+        <a class="btn btn-primary library-add-btn" href="/library/add">Add anime</a>
     </div>
     {# ── Row 2: scope + presentation. Custom-list chips make the
        active scope visible at a glance (the old closed dropdown hid
@@ -165,7 +165,7 @@
     <p>Your library is empty.</p>
     <p class="form-hint">Add your first series to get Ryokan watching for new episodes. You can also browse releases directly on Nyaa via the Search tab.</p>
     <div class="empty-state-actions">
-        <button class="btn btn-primary" onclick="openAddModal()">Search AniList to add anime</button>
+        <a class="btn btn-primary" href="/library/add">Add anime</a>
         <a class="btn btn-secondary" href="/search">Browse Nyaa</a>
     </div>
     {% endif %}
@@ -403,46 +403,6 @@
     </div>
 </div>
 
-<div class="modal-backdrop" id="add-modal" style="display:none" onclick="closeAddModal(event)">
-    <div class="modal" onclick="event.stopPropagation()">
-        <div class="modal-header">
-            <h3>Add Series</h3>
-            <button class="btn-icon" onclick="closeAddModal()">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-            </button>
-        </div>
-        <div class="modal-body">
-            {# Issue #166 — search-as-you-type. The input fires `hx-get`
-               with a 400ms debounce; the source toggle reuses the same
-               handler by triggering a synthetic `ryokan:search` event
-               on the input from `setSearchSource`. `hx-vals='js:'` pulls
-               the user's localStorage `titleLanguage` so the server
-               renders titles in the same language the rest of the page
-               is using (the JSON path ignores it for back-compat). #}
-            <div class="search-bar anilist-search-bar" style="margin-bottom:16px">
-                <input type="text" id="anilist-query" name="q"
-                    placeholder="Search AniList / MAL..."
-                    autofocus
-                    hx-get="/api/anilist/search"
-                    hx-trigger="keyup changed delay:400ms, ryokan:search"
-                    hx-target="#anilist-results"
-                    hx-swap="innerHTML"
-                    hx-vals='js:{source: window.currentSearchSource || "al", lang: localStorage.getItem("titleLanguage") || ""}'
-                    hx-indicator="#anilist-search-indicator">
-                <span id="anilist-search-indicator" class="anilist-search-spinner htmx-indicator" aria-hidden="true"></span>
-            </div>
-            <div class="search-source-toggle" role="group" aria-label="Search source" style="display:flex;gap:6px;margin-bottom:16px;font-size:12px;align-items:center">
-                <span style="color:var(--text-dim)">Source:</span>
-                <button type="button" class="btn btn-pill active" data-source="al" onclick="setSearchSource(this)">AniList</button>
-                <button type="button" class="btn btn-pill" data-source="mal" onclick="setSearchSource(this)">MAL</button>
-            </div>
-            <div id="anilist-results" class="anilist-results"></div>
-        </div>
-    </div>
-</div>
-
-{% include "partials/library/monitor_picker.html" %}
 {% endblock %}
 
-{% block page_js %}<script src="/static/js/library_add.js?v={{ crate::asset_version() }}" defer></script>
-<script src="/static/js/index.js?v={{ crate::asset_version() }}" defer></script>{% endblock %}
+{% block page_js %}<script src="/static/js/index.js?v={{ crate::asset_version() }}" defer></script>{% endblock %}

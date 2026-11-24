@@ -1424,3 +1424,63 @@ a.franchise-status:hover { border-color: currentColor; text-decoration: underlin
     .follow-editor-advanced-body { padding: 0 16px 16px; }
     .follow-editor-submit > .btn-primary { width: 100%; }
 }
+
+/* Add Anime shares the Library's cover rows and form controls. */
+.add-anime {
+    max-width: 860px;
+    margin-inline: auto;
+}
+
+.add-anime-query {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(9rem, auto) auto;
+    align-items: end;
+    gap: 12px;
+    margin-block: 20px;
+}
+
+.add-anime-query .form-group { margin: 0; }
+.add-anime-query input, .add-anime-query select { width: 100%; }
+.add-anime-results { list-style: none; padding: 0; }
+.add-anime-results .anilist-result { align-items: center; gap: 12px; }
+.add-anime-results .anilist-info { min-width: 0; overflow-wrap: anywhere; }
+.add-anime-results .btn { flex-shrink: 0; }
+.add-anime-results .anilist-meta { margin-block: 3px 0; }
+
+.add-anime-panel {
+    padding: clamp(16px, 4vw, 28px);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg-card);
+}
+
+.add-anime-release { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }
+.add-anime-release img { flex-shrink: 0; border-radius: 8px; object-fit: cover; }
+.add-anime-release h3 { margin-block: 0 8px; overflow-wrap: anywhere; }
+.add-anime-release .series-meta { margin-bottom: 8px; }
+
+.add-anime-monitor { border: 0; padding: 0; margin: 0 0 20px; min-inline-size: 0; }
+.add-anime-monitor legend { padding: 0; margin-bottom: 10px; font-weight: 600; }
+.add-anime-monitor label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    cursor: pointer;
+}
+.add-anime-monitor label:has(input:checked) { border-color: var(--accent); }
+.add-anime-monitor label:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.add-anime-monitor small { display: block; color: var(--text-dim); margin-top: 2px; }
+.add-anime-search-toggle { margin-top: 8px; }
+.add-anime-actions { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; margin-top: 22px; }
+
+@media (max-width: 560px) {
+    .add-anime-query { grid-template-columns: minmax(0, 1fr) auto; }
+    .add-anime-query .form-group:first-child { grid-column: 1 / -1; }
+    .add-anime-results .anilist-result { flex-wrap: wrap; }
+    .add-anime-results .anilist-info { flex: 1 1 calc(100% - 70px); }
+    .add-anime-results .chip { margin-inline-start: auto; }
+}

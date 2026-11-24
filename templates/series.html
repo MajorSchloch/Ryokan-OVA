@@ -92,7 +92,7 @@
                 <button class="btn btn-secondary" id="btn-track" onclick="removeSeries({{ id }})">Remove from Library</button>
                 {% endif %}
             {% else %}
-            <button class="btn btn-primary" id="btn-track" onclick="addSeries()">+ Add to Library</button>
+            <a class="btn btn-primary" id="btn-track" href="/library/add?provider_id={{ detail.id }}">Add anime</a>
             {% endif %}
             {% if let Some((parent_id, parent_title)) = parent_franchise %}
             <a href="/franchises/{{ parent_id }}" class="btn btn-secondary">Part of {{ parent_title }}</a>
@@ -762,13 +762,8 @@
     data-title-english="{{ detail.title_english }}"
     data-title-native="{{ detail.title_native }}"
     data-title-language="{{ title_language }}"
-    data-cover-url="{{ detail.cover_url }}"
-    data-format="{{ detail.format }}"
-    data-status="{{ detail.status }}"
-    data-episodes="{% if let Some(eps) = detail.episodes %}{{ eps }}{% endif %}"
     data-db-id="{% if let Some(id) = db_id %}{{ id }}{% endif %}"
     data-provider-id="{{ detail.id }}"
-    data-mal-id="{% if let Some(id) = detail.id_mal %}{{ id }}{% endif %}"
     data-media-root="{{ media_root }}"
     data-folder-name="{{ folder_name }}"
 ></div>

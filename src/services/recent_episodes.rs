@@ -65,6 +65,20 @@ pub fn enabled(cfg: &config::Config) -> bool {
     cfg.rss_master_enabled && cfg.recent_episode_search_enabled && cfg.post_processing_enabled
 }
 
+pub(crate) async fn monitored_aired_episodes(
+    db: &SqlitePool,
+    series_id: i64,
+    provider_id: i64,
+) -> Result<Vec<i32>, sqlx::Error> {
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "{AIRED_TARGETS} SELECT episode FROM aired WHERE series_id=? AND provider_id=?"
+    )))
+    .bind(series_id)
+    .bind(provider_id)
+    .fetch_all(db)
+    .await
+}
+
 /// Latest recorded check for each episode of the current release identity.
 pub(crate) async fn last_checks(
     db: &SqlitePool,
