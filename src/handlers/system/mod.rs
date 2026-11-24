@@ -1578,6 +1578,8 @@ pub async fn api_force_upgrade_search(
                     "series_checked": summary.series_checked,
                     "episodes_checked": summary.episodes_checked,
                     "upgrades_grabbed": summary.upgrades_grabbed,
+                    "upgrades_submitted": summary.upgrades_submitted,
+                    "episodes_with_duplicate_skips": summary.episodes_with_duplicate_skips,
                 })))
             }
             Err(err) => {

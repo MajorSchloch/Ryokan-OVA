@@ -4237,11 +4237,13 @@ pub async fn run_once(state: &AppState) {
         };
 
         if torrent.state_kind == DownloadItemState::Removed {
-            if grab.hash.eq_ignore_ascii_case(&torrent.hash)
-                && let Err(e) = grabbed_torrents::cancel_pending_grab(&state.db, grab).await
-            {
-                tracing::warn!(grab_id = grab.id, error = %e, "could not reconcile cancelled grab");
-            }
+            let duplicate = grab.download_client_id == Some(grab_client_id)
+                && crate::services::download_client::nzbget::is_duplicate_copy(
+                    client.as_ref(),
+                    grab_client_id,
+                    torrent,
+                );
+            reconcile_client_removal(state, grab, torrent, duplicate).await;
             continue;
         }
 
@@ -4777,6 +4779,39 @@ fn is_skipped_nzbget_fetch(client: &dyn DownloadClient, item: &DownloadItem) -> 
         && item.state == "WARNING/SKIPPED"
 }
 
+async fn reconcile_client_removal(
+    state: &AppState,
+    grab: &grabbed_torrents::GrabbedTorrent,
+    item: &DownloadItem,
+    duplicate: bool,
+) {
+    if !grab.hash.eq_ignore_ascii_case(&item.hash) {
+        return;
+    }
+    let result = if duplicate {
+        grabbed_torrents::record_nzbget_duplicate(&state.db, grab).await
+    } else {
+        grabbed_torrents::cancel_pending_grab(&state.db, grab)
+            .await
+            .map(|_| false)
+    };
+    match result {
+        Ok(true) => {
+            logger::info(
+                &state.db,
+                LogCategory::PostProcess,
+                "NZBGet discarded a duplicate submission",
+                &format!("series_id={}, grab_id={}", grab.series_id, grab.id),
+            )
+            .await
+        }
+        Ok(false) => (),
+        Err(error) => {
+            tracing::warn!(grab_id = grab.id, %error, "could not reconcile cancelled grab")
+        }
+    }
+}
+
 async fn record_skipped_fetch(state: &AppState, grab: &grabbed_torrents::GrabbedTorrent) -> bool {
     match grabbed_torrents::fail_pending_fetch(&state.db, grab).await {
         Ok(failed) => failed,
@@ -4825,6 +4860,7 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
     }
     let mut all_torrents = Vec::new();
     let mut skipped_fetches = HashSet::new();
+    let mut duplicate_copies = HashSet::new();
     for (id, c) in &pool.clients {
         if let Ok(items) = c.list_scoped().await {
             skipped_fetches.extend(
@@ -4832,6 +4868,18 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
                     .iter()
                     .filter(|item| is_skipped_nzbget_fetch(c.as_ref(), item))
                     .flat_map(|item| [(Some(*id), item.hash.clone()), (None, item.hash.clone())]),
+            );
+            duplicate_copies.extend(
+                items
+                    .iter()
+                    .filter(|item| {
+                        crate::services::download_client::nzbget::is_duplicate_copy(
+                            c.as_ref(),
+                            *id,
+                            item,
+                        )
+                    })
+                    .map(|item| (Some(*id), item.hash.clone())),
             );
             all_torrents.extend(items.into_iter().map(|item| (*id, item)));
         }
@@ -4885,11 +4933,9 @@ async fn advance_state_without_import(state: &AppState) -> Result<(), ()> {
         let Some(torrent) = matched else { continue };
 
         if torrent.state_kind == DownloadItemState::Removed {
-            if grab.hash.eq_ignore_ascii_case(&torrent.hash)
-                && let Err(e) = grabbed_torrents::cancel_pending_grab(&state.db, grab).await
-            {
-                tracing::warn!(grab_id = grab.id, error = %e, "could not reconcile cancelled grab");
-            }
+            let duplicate =
+                duplicate_copies.contains(&(grab.download_client_id, torrent.hash.clone()));
+            reconcile_client_removal(state, grab, torrent, duplicate).await;
             continue;
         }
 
