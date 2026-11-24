@@ -245,6 +245,10 @@ async fn cold_search_groups_releases_and_saves_the_selected_mode() {
 #[tokio::test]
 async fn mocked_provider_results_and_save() {
     let db = in_memory_pool().await;
+    sqlx::query("UPDATE library_path_policy SET enabled=1 WHERE id=1")
+        .execute(&db)
+        .await
+        .unwrap();
     let tracked = seed_series(&db, TRACKED, ORIGINAL).await;
     sqlx::query("UPDATE series SET folder_name=? WHERE id=?")
         .bind(format!("{ORIGINAL}/{ORIGINAL}"))
