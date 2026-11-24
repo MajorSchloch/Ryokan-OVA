@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::AppState;
 use crate::models::log::LogCategory;
@@ -7,6 +8,8 @@ use crate::services::media_requirements::{self, Observed, Policy as Requirements
 use crate::services::source::{self, ClassificationResult, Resolution};
 use crate::services::{auto_search, logger, media};
 
+mod nzbget_duplicates;
+
 static UPGRADE_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
@@ -14,6 +17,8 @@ pub struct UpgradeSummary {
     pub series_checked: usize,
     pub episodes_checked: usize,
     pub upgrades_grabbed: usize,
+    pub upgrades_submitted: usize,
+    pub episodes_with_duplicate_skips: usize,
     pub detail: String,
 }
 
@@ -202,6 +207,8 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             series_checked: 0,
             episodes_checked: 0,
             upgrades_grabbed: 0,
+            upgrades_submitted: 0,
+            episodes_with_duplicate_skips: 0,
             detail: "No quality cutoff configured; skipping upgrade search".into(),
         });
     }
@@ -218,6 +225,8 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             series_checked: 0,
             episodes_checked: 0,
             upgrades_grabbed: 0,
+            upgrades_submitted: 0,
+            episodes_with_duplicate_skips: 0,
             detail: "Download client not configured; skipping upgrade search".to_string(),
         });
     }
@@ -225,6 +234,9 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
     let mut total_series_checked: usize = 0;
     let mut total_episodes_checked: usize = 0;
     let mut total_upgrades_grabbed: usize = 0;
+    let mut upgrades_submitted = 0;
+    let mut episodes_with_duplicate_skips = 0;
+    let duplicates = nzbget_duplicates::Duplicates::load(state).await?;
 
     // One compiled-CF snapshot for the whole upgrade pass. The background
     // scheduler can't race a CF edit during this run — if the user edits
@@ -415,6 +427,11 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
         let batch_lookups = auto_search::BatchLookups::default();
         for target in targets {
             let label = auto_search::target_label(&target);
+            let slot = match target {
+                auto_search::SearchTarget::Episode(ep) => ep,
+                auto_search::SearchTarget::Single => 1,
+            };
+            let skipped_duplicate = AtomicBool::new(false);
             // Keep the library slot for every upgrade/protection decision and
             // for persistence. A standalone release still needs
             // a numberless provider search, as the episode controls do.
@@ -427,6 +444,10 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             let eligible = |result: &crate::services::nyaa::SearchResult,
                             incoming: &ClassificationResult| {
                 if release_covers_multiple(result) {
+                    return false;
+                }
+                if duplicates.contains(row.id, slot, result) {
+                    skipped_duplicate.store(true, Ordering::Relaxed);
                     return false;
                 }
                 if !requirements.enabled {
@@ -481,6 +502,18 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                     &state.indexers,
                     Some(&eligible),
                     Some(&batch_lookups),
+                )
+                .await;
+            }
+
+            let skipped_duplicate = skipped_duplicate.load(Ordering::Relaxed);
+            if skipped_duplicate {
+                episodes_with_duplicate_skips += 1;
+                logger::info(
+                    &state.db,
+                    LogCategory::AutoSearch,
+                    "Upgrade skipped a previous NZBGet duplicate",
+                    &format!("series={title}, target={label}"),
                 )
                 .await;
             }
@@ -616,35 +649,43 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 continue;
             }
 
-            // Serialize single-file pack dispatch with RSS, recovery, and
-            // interactive acquisition, after the indexer search is complete.
-            let batch_dispatch_guard = if used_batch_fallback {
+            // Check current ownership before a pack or duplicate fallback.
+            let dispatch_guard = if used_batch_fallback || skipped_duplicate {
                 let rss = crate::services::rss::RSS_SYNC_LOCK.lock().await;
                 let processing = crate::services::post_processing::POST_PROC_LOCK
                     .lock()
                     .await;
                 let settings = crate::handlers::settings::CONFIG_WRITE_LOCK.lock().await;
-                let auto_search::SearchTarget::Episode(ep) = target else {
-                    continue;
-                };
                 let current = series::get_by_id(&state.db, row.id)
                     .await
                     .map_err(|error| error.to_string())?;
                 if current.is_none_or(|current| {
                     current.anilist_id != row.anilist_id || !current.allow_upgrades
-                }) || crate::services::recent_episodes::has_pending(&state.db, row.id, ep)
+                }) || crate::services::recent_episodes::has_pending(&state.db, row.id, slot)
                     .await?
                 {
                     continue;
                 }
-                if let Err(reason) =
-                    crate::models::grabbed_torrents::ensure_automatic_compatibility(
-                        &state.db,
-                        &result.info_hash,
-                        detail.id,
-                        result.release_mapping.as_ref(),
-                    )
-                    .await
+                if skipped_duplicate
+                    && let Some(id) = result.indexer_id
+                    && !state
+                        .indexers
+                        .read()
+                        .await
+                        .iter()
+                        .any(|indexer| indexer.id() == id)
+                {
+                    continue;
+                }
+                if used_batch_fallback
+                    && let Err(reason) =
+                        crate::models::grabbed_torrents::ensure_automatic_compatibility(
+                            &state.db,
+                            &result.info_hash,
+                            detail.id,
+                            result.release_mapping.as_ref(),
+                        )
+                        .await
                 {
                     logger::info(&state.db, LogCategory::Grab, "Upgrade batch held", &reason).await;
                     continue;
@@ -711,18 +752,25 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                     if used_batch_fallback && !prepared.newly_added {
                         return Err("Batch is already in the client; its file selection and ownership were preserved".into());
                     }
+                    let submitted = prepared.newly_added;
                     let id = prepared.info_hash.clone();
                     prepared_bound = Some(prepared);
-                    Ok(id)
+                    Ok((submitted, id))
                 })
             } else {
                 client
                     .add_torrent_returning_id(&url, &result.info_hash)
                     .await
-                    .map(|(_, id)| id)
+                    .map(|(outcome, id)| {
+                        (
+                            matches!(outcome, crate::services::download_client::AddOutcome::Added),
+                            id,
+                        )
+                    })
             };
             match dispatch {
-                Ok(canonical_id) => {
+                Ok((submitted, canonical_id)) => {
+                    upgrades_submitted += usize::from(submitted);
                     if used_batch_fallback
                         && let Some(mapping) = &result.release_mapping
                         && let Err(reason) =
@@ -882,7 +930,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                     .await;
                 }
             }
-            drop(batch_dispatch_guard);
+            drop(dispatch_guard);
 
             // Rate-limit between searches to avoid hammering Nyaa.
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -893,8 +941,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
     }
 
     let detail = format!(
-        "Checked {} series, {} episodes, grabbed {} upgrades",
-        total_series_checked, total_episodes_checked, total_upgrades_grabbed
+        "Checked {total_series_checked} series, {total_episodes_checked} episodes, submitted {upgrades_submitted} upgrades, skipped NZBGet duplicates for {episodes_with_duplicate_skips} episodes",
     );
     logger::info(
         &state.db,
@@ -908,6 +955,8 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
         series_checked: total_series_checked,
         episodes_checked: total_episodes_checked,
         upgrades_grabbed: total_upgrades_grabbed,
+        upgrades_submitted,
+        episodes_with_duplicate_skips,
         detail,
     })
 }

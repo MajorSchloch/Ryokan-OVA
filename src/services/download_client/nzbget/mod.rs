@@ -22,6 +22,21 @@ pub struct NzbgetClient {
     add_lock: tokio::sync::Mutex<()>,
 }
 
+/// A native duplicate discard of an owned job, distinct from a failure or a manual deletion.
+pub(crate) fn is_duplicate_copy(
+    client: &dyn DownloadClient,
+    client_id: i64,
+    item: &DownloadItem,
+) -> bool {
+    client.sonarr_impl_name() == "Nzbget"
+        && item.state_kind == DownloadItemState::Removed
+        && item.state == "DELETED/COPY"
+        && item
+            .hash
+            .strip_prefix(&format!("nzbget-{client_id}-"))
+            .is_some_and(|key| key.len() == 96 && key.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 #[derive(Default, Deserialize)]
 #[serde(default, rename_all = "PascalCase")]
 struct Job {

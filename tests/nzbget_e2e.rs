@@ -527,7 +527,14 @@ async fn check_deleted_history(
             .await
             .unwrap();
     assert_eq!(grab.0, "removed");
-    assert!(grab.1.unwrap_or_default().is_empty());
+    assert_eq!(
+        grab.1.unwrap_or_default(),
+        if status == "DELETED/COPY" {
+            "nzbget_duplicate_copy"
+        } else {
+            ""
+        }
+    );
     let tag: Option<(String, String, bool, String, String, String)> = sqlx::query_as(tag_query)
         .fetch_optional(&f.app.db)
         .await
@@ -713,4 +720,172 @@ async fn check_skipped_fetch_polled_after_retry(import_enabled: bool) {
     } else {
         assert!(daemon.edits.is_empty());
     }
+}
+
+#[tokio::test]
+async fn scheduled_upgrade_retries_a_different_source_after_confirmed_copy() {
+    let f = fixture(false).await;
+    f.daemon
+        .lock()
+        .unwrap()
+        .finish(&f.hash, "NZB", "DELETED/COPY");
+    tick(&f.app).await;
+
+    // Reproduce a cancellation saved by a release that did not retain COPY.
+    sqlx::query("UPDATE grabbed_torrents SET failure_reason='' WHERE hash=? AND state='removed'")
+        .bind(&f.hash)
+        .execute(&f.app.db)
+        .await
+        .unwrap();
+
+    let old = f
+        .tmp
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("library/Space Brothers/Season 01/Space Brothers - S01E07.mkv");
+    fs::create_dir_all(old.parent().unwrap()).unwrap();
+    fs::write(&old, b"existing episode").unwrap();
+    seed_upgrade_probe(&f.app.db, &old, 1280, 720).await;
+    sqlx::query(
+        "UPDATE config SET post_processing_mode='hardlink', nyaa_enabled=0,
+        media_requirements_enabled=1, minimum_resolution='720', target_resolution='1080',
+        required_audio_languages='ja', required_subtitle_languages='en',
+        minimum_subtitle_check=1, target_subtitle_check=1, preferred_groups='Fixture',
+        season_folder_format='Season {season.number:00}',
+        episode_file_format='{series.title} - S{season.number:00}E{episode.number:00}{ext}'",
+    )
+    .execute(&f.app.db)
+    .await
+    .unwrap();
+    let sid: i64 = sqlx::query_scalar(
+        "UPDATE series SET allow_upgrades=1, episodes=12, format='TV' WHERE anilist_id=42 RETURNING id"
+    ).fetch_one(&f.app.db).await.unwrap();
+    let detail = serde_json::from_value(json!({
+        "id":42, "title_romaji":"Space Brothers", "title_english":"Space Brothers",
+        "title_native":"", "cover_url":"", "banner_url":"", "format":"TV", "status":"FINISHED",
+        "status_display":"Finished", "episodes":12, "duration":24, "season":"",
+        "description":"", "genres":[], "score_is_ten_point":false, "score_class":"",
+        "synonyms":[], "streaming_episodes":[], "relations":[]
+    }))
+    .unwrap();
+    ryokan::models::metadata_cache::upsert(&f.app.db, sid, 42, None, &detail)
+        .await
+        .unwrap();
+
+    download_clients::insert(
+        &f.app.db,
+        download_clients::DownloadClientForm {
+            name: "Unused torrent client",
+            kind: "qbittorrent",
+            url: &f._server.uri(),
+            username: "",
+            password: "",
+            label: "ryokan",
+            download_path: "",
+            enabled: true,
+            is_default: true,
+        },
+    )
+    .await
+    .unwrap();
+    download_client::rebuild_clients_cache(&f.app.download_clients, &f.app.db).await;
+    sqlx::query("UPDATE indexers SET enabled=0 WHERE id=2")
+        .execute(&f.app.db)
+        .await
+        .unwrap();
+    let only_indexer = indexers::rebuild_cache(&f.app.db)
+        .await
+        .read()
+        .await
+        .clone();
+    *f.app.indexers.write().await = only_indexer;
+
+    // Current search supplies the same GUID at a new proxy URL and a different source.
+    let alternative_url = format!("{}/alternative.nzb", f._server.uri());
+    let changed_url = format!("{}/rotated.nzb", f._server.uri());
+    let alternative = "[Other] Space Brothers - 07 [1080p]";
+    let rss = format!(
+        "<rss><channel>
+         <item><title>{TITLE}</title><guid>release-7</guid><link>{changed_url}</link><enclosure url=\"{changed_url}\" length=\"1200000000\" type=\"application/x-nzb\"/></item>
+         <item><title>{alternative}</title><guid>alternative-7</guid><link>{alternative_url}</link><enclosure url=\"{alternative_url}\" length=\"1100000000\" type=\"application/x-nzb\"/></item>
+         </channel></rss>"
+    );
+    f._server.reset().await;
+    Mock::given(method("GET"))
+        .and(query_param("t", "tvsearch"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rss))
+        .mount(&f._server)
+        .await;
+    let daemon = f.daemon.clone();
+    Mock::given(method("POST"))
+        .and(path("/jsonrpc"))
+        .and(basic_auth("test", "fixture"))
+        .respond_with(move |req: &Request| daemon.lock().unwrap().rpc(req))
+        .mount(&f._server)
+        .await;
+
+    let run = ryokan::services::upgrade::run_once(&f.app).await.unwrap();
+    assert_eq!(run.episodes_checked, 1);
+    assert_eq!(run.episodes_with_duplicate_skips, 1);
+    assert_eq!(run.upgrades_submitted, 1);
+    assert!(!grabbed_torrents::is_blocklisted_release(&f.app.db, sid, &f.hash, TITLE).await);
+    let pending = grabbed_torrents::get_all_pending(&f.app.db).await.unwrap();
+    let [grab] = pending.as_slice() else {
+        panic!("expected one pending alternative");
+    };
+    assert_eq!(grab.episode_numbers, [7]);
+    assert_eq!(grab.torrent_name, alternative);
+    assert_eq!(grab.source_url, alternative_url);
+
+    let during_download = ryokan::services::upgrade::run_once(&f.app).await.unwrap();
+    assert_eq!(during_download.upgrades_submitted, 0);
+    assert_eq!(fs::read(&old).unwrap(), b"existing episode");
+
+    let source = f
+        .tmp
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("completed")
+        .join(TITLE)
+        .join("Space Brothers - 07.mkv");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, b"verified replacement").unwrap();
+    seed_upgrade_probe(&f.app.db, &source, 1920, 1080).await;
+    f.daemon
+        .lock()
+        .unwrap()
+        .finish(&grab.hash, "NZB", "SUCCESS/UNPACK");
+    tick(&f.app).await;
+    let outcome: String = sqlx::query_scalar("SELECT state FROM grabbed_torrents WHERE id=?")
+        .bind(grab.id)
+        .fetch_one(&f.app.db)
+        .await
+        .unwrap();
+    assert_eq!(outcome, "imported");
+    assert_eq!(fs::read(&old).unwrap(), b"verified replacement");
+    let d = f.daemon.lock().unwrap();
+    assert_eq!(d.queue, f.foreign);
+    assert_eq!(d.adds, 2);
+    assert!(d.edits.is_empty());
+}
+
+async fn seed_upgrade_probe(db: &SqlitePool, file: &Path, width: i32, height: i32) {
+    let identity =
+        ryokan::services::media_info::FileIdentity::from_metadata(&file.metadata().unwrap())
+            .unwrap();
+    let probe = json!({"format":{"duration":"1440"},"streams":[
+        {"index":0,"codec_type":"video","codec_name":"h264","width":width,"height":height},
+        {"index":1,"codec_type":"audio","codec_name":"aac","tags":{"language":"jpn"}},
+        {"index":2,"codec_type":"subtitle","codec_name":"ass","tags":{"language":"eng"}}
+    ]});
+    ryokan::models::media_probe_cache::upsert_identified(
+        db,
+        file.to_str().unwrap(),
+        &identity.cache_key(),
+        identity.size as i64,
+        &probe.to_string(),
+    )
+    .await;
 }

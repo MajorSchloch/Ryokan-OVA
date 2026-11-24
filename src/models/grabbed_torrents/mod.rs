@@ -1404,16 +1404,36 @@ pub async fn cancel_pending_grab(
     db: &SqlitePool,
     grab: &GrabbedTorrent,
 ) -> Result<(), sqlx::Error> {
+    finish_cancelled_grab(db, grab, None).await.map(|_| ())
+}
+
+pub(crate) const NZBGET_DUPLICATE_REASON: &str = "nzbget_duplicate_copy";
+
+pub(crate) async fn record_nzbget_duplicate(
+    db: &SqlitePool,
+    grab: &GrabbedTorrent,
+) -> Result<bool, sqlx::Error> {
+    finish_cancelled_grab(db, grab, Some(NZBGET_DUPLICATE_REASON)).await
+}
+
+async fn finish_cancelled_grab(
+    db: &SqlitePool,
+    grab: &GrabbedTorrent,
+    reason: Option<&str>,
+) -> Result<bool, sqlx::Error> {
     let mut tx = db.begin().await?;
     let cancelled = sqlx::query(
-        "UPDATE grabbed_torrents SET state = 'removed' WHERE id = ? AND hash = ? AND state = 'pending'",
+        "UPDATE grabbed_torrents SET state='removed', failure_reason=COALESCE(?,failure_reason)
+         WHERE id=? AND hash=? AND grabbed_at=? AND state='pending'",
     )
+    .bind(reason)
     .bind(grab.id)
     .bind(&grab.hash)
+    .bind(&grab.grabbed_at)
     .execute(&mut *tx)
     .await?;
     if cancelled.rows_affected() == 0 {
-        return Ok(());
+        return Ok(false);
     }
     let routes = get_series_routes(&mut *tx, grab.id).await?;
     let slots = std::iter::once((grab.series_id, &grab.episode_numbers))
@@ -1441,7 +1461,8 @@ pub async fn cancel_pending_grab(
             .await?;
         }
     }
-    tx.commit().await
+    tx.commit().await?;
+    Ok(true)
 }
 
 pub async fn mark_removed(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
