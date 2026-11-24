@@ -177,6 +177,43 @@ fn can_retry_one_episode(result: &crate::services::nyaa::SearchResult, episode: 
         }
 }
 
+async fn recheck_add_search(
+    db: &SqlitePool,
+    (id, provider_id): (i64, i64),
+    episode: i32,
+    media_root: &str,
+) -> Result<(), &'static str> {
+    let aired = crate::services::recent_episodes::monitored_aired_episodes(db, id, provider_id)
+        .await
+        .map_err(|_| "Episode eligibility could not be checked")?;
+    if !aired.contains(&episode) {
+        return Err("Episode identity, airing, or monitoring changed");
+    }
+    let release = series::get_by_id(db, id)
+        .await
+        .ok()
+        .flatten()
+        .filter(|release| release.anilist_id == provider_id)
+        .ok_or("Release identity changed")?;
+    let live_config = config::get_config(db)
+        .await
+        .map_err(|_| "Settings could not be checked")?
+        .unwrap_or_default();
+    if !live_config.auto_grab_on_add || live_config.media_root != media_root {
+        return Err("Automatic search or library settings changed");
+    }
+    let slots = media::library_slots(
+        live_config.media_root,
+        std::collections::HashSet::from([release.folder_name.clone()]),
+    )
+    .await;
+    match slots.get(&release.folder_name) {
+        Some(have) if !have.contains(&episode) => Ok(()),
+        Some(_) => Err("Episode is already on disk"),
+        None => Err("Release folder could not be checked"),
+    }
+}
+
 pub(crate) async fn run_failed_download_search(
     state: &AppState,
     sid: i64,
@@ -720,7 +757,9 @@ async fn run_auto_search_targets_with_upgrades(
         let eligible =
             |result: &crate::services::nyaa::SearchResult,
              incoming: &crate::services::source::ClassificationResult| {
-                if retry_series.is_some() && !can_retry_one_episode(result, target_episode) {
+                if (retry_series.is_some() || upgrades.added_release.is_some())
+                    && !can_retry_one_episode(result, target_episode)
+                {
                     return false;
                 }
                 if let Some(sources) = &trial_sources
@@ -972,34 +1011,20 @@ async fn run_auto_search_targets_with_upgrades(
                     && let Some(sid) = series_id
                 {
                     if let Some((id, provider_id)) = upgrades.added_release {
-                        let wanted = crate::services::recent_episodes::monitored_aired_episodes(
-                            &state.db,
-                            id,
-                            provider_id,
-                        )
-                        .await
-                        .is_ok_and(|episodes| episodes.contains(&target_episode));
-                        if !wanted || sid != id || detail.id != provider_id {
-                            skipped.push(format!(
-                                "{label}: episode identity, airing, or monitoring changed"
-                            ));
+                        if sid != id || detail.id != provider_id {
+                            skipped.push(format!("{label}: release identity changed"));
                             continue;
                         }
-                        if let Some(release) = &tracked {
-                            let slots = media::library_slots(
-                                cfg.media_root.clone(),
-                                std::collections::HashSet::from([release.folder_name.clone()]),
-                            )
-                            .await;
-                            if slots
-                                .get(&release.folder_name)
-                                .is_none_or(|have| have.contains(&target_episode))
-                            {
-                                skipped.push(format!(
-                                    "{label}: episode is on disk or its folder could not be checked"
-                                ));
-                                continue;
-                            }
+                        if let Err(reason) = recheck_add_search(
+                            &state.db,
+                            (id, provider_id),
+                            target_episode,
+                            &cfg.media_root,
+                        )
+                        .await
+                        {
+                            skipped.push(format!("{label}: {reason}"));
+                            continue;
                         }
                     }
                     match crate::services::recent_episodes::has_pending(

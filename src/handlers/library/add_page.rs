@@ -246,11 +246,11 @@ pub(super) async fn page(
             }
             Err(_) => view.error = "Could not load this anime. Search again or try later.",
         }
-    } else if !view.q.is_empty() {
-        if let Err(error) = find_results(&state, &mut view).await {
-            tracing::warn!(%error, "Add Anime search failed");
-            view.error = "Could not load search results. Try again or choose the other provider.";
-        }
+    } else if !view.q.is_empty()
+        && let Err(error) = find_results(&state, &mut view).await
+    {
+        tracing::warn!(%error, "Add Anime search failed");
+        view.error = "Could not load search results. Try again or choose the other provider.";
     }
     view.into_response()
 }
