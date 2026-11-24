@@ -196,8 +196,7 @@ async fn cold_search_groups_releases_and_saves_the_selected_mode() {
     sequel["idMal"] = json!(SHARED_MAL_ID);
     let mut unrelated = provider_entry(OTHER, UNRELATED);
     unrelated["idMal"] = json!(SHARED_MAL_ID);
-    let mut sequel_hit = sequel.clone();
-    sequel_hit["relations"] = json!({
+    sequel["relations"] = json!({
         "edges": [{"relationType": "PREQUEL", "node": original.clone()}]
     });
 
@@ -205,7 +204,7 @@ async fn cold_search_groups_releases_and_saves_the_selected_mode() {
         .and(body_partial_json(json!({"variables": {"search": QUERY}})))
         .and(body_string_contains("relations"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": {"Page": {"media": [sequel_hit, original.clone(), unrelated.clone()]}}
+            "data": {"Page": {"media": [sequel.clone(), original.clone(), unrelated.clone()]}}
         })))
         .expect(1)
         .mount(&server)
