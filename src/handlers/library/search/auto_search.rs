@@ -255,6 +255,7 @@ pub(crate) async fn run_recent_missing_target(
 #[derive(Default)]
 pub(crate) struct UpgradeContext {
     pub recent_demand: Option<crate::services::recent_episodes::Demand>,
+    added_release: Option<(i64, i64)>,
     pub automatic_retry: bool,
     /// The existing classification per upgrade-target episode.
     pub classifications:
@@ -970,6 +971,37 @@ async fn run_auto_search_targets_with_upgrades(
                 } else if (!is_upgrade || used_batch_fallback)
                     && let Some(sid) = series_id
                 {
+                    if let Some((id, provider_id)) = upgrades.added_release {
+                        let wanted = crate::services::recent_episodes::monitored_aired_episodes(
+                            &state.db,
+                            id,
+                            provider_id,
+                        )
+                        .await
+                        .is_ok_and(|episodes| episodes.contains(&target_episode));
+                        if !wanted || sid != id || detail.id != provider_id {
+                            skipped.push(format!(
+                                "{label}: episode identity, airing, or monitoring changed"
+                            ));
+                            continue;
+                        }
+                        if let Some(release) = &tracked {
+                            let slots = media::library_slots(
+                                cfg.media_root.clone(),
+                                std::collections::HashSet::from([release.folder_name.clone()]),
+                            )
+                            .await;
+                            if slots
+                                .get(&release.folder_name)
+                                .is_none_or(|have| have.contains(&target_episode))
+                            {
+                                skipped.push(format!(
+                                    "{label}: episode is on disk or its folder could not be checked"
+                                ));
+                                continue;
+                            }
+                        }
+                    }
                     match crate::services::recent_episodes::has_pending(
                         &state.db,
                         sid,
@@ -1667,6 +1699,34 @@ pub(crate) async fn auto_search_series_with_retry(
     q: AutoSearchQuery,
     automatic_retry: bool,
 ) -> Result<Json<auto_search::AutoSearchReport>, (axum::http::StatusCode, String)> {
+    search_series(state, request_id, q, automatic_retry, None).await
+}
+
+pub(crate) async fn auto_search_newly_added(
+    state: AppState,
+    tracked: &series::Series,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    search_series(
+        state,
+        tracked.anilist_id,
+        AutoSearchQuery {
+            by: Some("anilist".into()),
+            ..Default::default()
+        },
+        false,
+        Some((tracked.id, tracked.anilist_id)),
+    )
+    .await
+    .map(|_| ())
+}
+
+async fn search_series(
+    state: AppState,
+    request_id: i64,
+    q: AutoSearchQuery,
+    automatic_retry: bool,
+    expected: Option<(i64, i64)>,
+) -> Result<Json<auto_search::AutoSearchReport>, (axum::http::StatusCode, String)> {
     let progress_handle = match progress::sanitize_progress_id(q.progress_id.as_deref()) {
         Some(id) => Some(state.progress.register(id).await),
         None => None,
@@ -1685,6 +1745,16 @@ pub(crate) async fn auto_search_series_with_retry(
         resolve_series_context_by(&state.db, request_id, by_anilist)
             .await
             .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+    if let Some(expected) = expected
+        && tracked_row
+            .as_ref()
+            .is_none_or(|row| (row.id, row.anilist_id) != expected || row.monitor_mode == "none")
+    {
+        return Err((
+            axum::http::StatusCode::CONFLICT,
+            "The added release is no longer monitored.".into(),
+        ));
+    }
 
     let tracked = if let Some(row) = tracked_row {
         Some(row)
@@ -1717,7 +1787,14 @@ pub(crate) async fn auto_search_series_with_retry(
     let existing_files = media::scan_series_folder(&cfg.media_root, &folder_name).await;
     let existing_eps: Vec<i32> = existing_files.iter().flat_map(|f| f.episodes()).collect();
 
-    let monitored_eps = if let Some(ref tracked_series) = tracked {
+    let monitored_eps = if let Some((id, provider_id)) = expected {
+        crate::services::recent_episodes::monitored_aired_episodes(&state.db, id, provider_id)
+            .await
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .into_iter()
+            .filter(|episode| !existing_eps.contains(episode))
+            .collect()
+    } else if let Some(ref tracked_series) = tracked {
         monitoring::get_monitored_episode_numbers(&state.db, tracked_series.id)
             .await
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -1725,7 +1802,9 @@ pub(crate) async fn auto_search_series_with_retry(
         Vec::new()
     };
 
-    let mut targets = if tracked.is_some() {
+    let mut targets = if expected.is_some() && monitored_eps.is_empty() {
+        Vec::new()
+    } else if tracked.is_some() {
         auto_search::build_monitored_targets(&detail, &existing_eps, &monitored_eps)
     } else {
         auto_search::build_missing_targets(&detail, &existing_eps)
@@ -1829,6 +1908,7 @@ pub(crate) async fn auto_search_series_with_retry(
     // policy gate reads the revision, group, and score from.
     let upgrades = UpgradeContext {
         recent_demand: None,
+        added_release: expected,
         automatic_retry,
         classifications: upgrade_targets
             .into_iter()
@@ -1855,7 +1935,7 @@ pub(crate) async fn auto_search_series_with_retry(
             request_id,
             by_anilist,
             targets,
-            true,
+            expected.is_none(),
             series_id_for_grab,
             upgrades,
         )

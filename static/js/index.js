@@ -149,44 +149,6 @@ function libraryPresentationSubmit(form) {
     } else if (field) { field.remove(); }
 }
 
-function openAddModal() {
-    document.getElementById('add-modal').style.display = 'flex';
-    document.getElementById('anilist-query').focus();
-}
-
-function closeAddModal(e) {
-    if (e && e.target !== document.getElementById('add-modal')) return;
-    document.getElementById('add-modal').style.display = 'none';
-    document.getElementById('anilist-results').innerHTML = '';
-    document.getElementById('anilist-query').value = '';
-}
-
-// Per-search provider override. Defaults to AniList; the user can flip
-// to MAL via the toggle in the Add Series modal. The selection is
-// remembered across modal opens within the page session, but resets on
-// a hard reload (no localStorage — explicit-each-session by design).
-// Issue #166 — AL/MAL search migrated to `hx-get` on the
-// `#anilist-query` input. The handler at `/api/anilist/search` returns
-// the rendered partial under HX-Request, JSON otherwise (preserving the
-// existing programmatic-caller contract). `currentSearchSource` lives on
-// `window` so the input's `hx-vals='js:...'` expression can read it
-// without grabbing module-scope identifiers across boost re-execute.
-window.currentSearchSource = window.currentSearchSource || 'al';
-
-function setSearchSource(btn) {
-    window.currentSearchSource = btn.dataset.source;
-    document.querySelectorAll('.search-source-toggle .btn-pill').forEach(b => {
-        b.classList.toggle('active', b === btn);
-    });
-    // Re-fire the HTMX search with the new source. `htmx.trigger` on a
-    // synthetic event name listed in the input's `hx-trigger` causes
-    // HTMX to re-issue the `hx-get` with the updated `hx-vals`.
-    var input = document.getElementById('anilist-query');
-    if (input && (input.value || '').trim() && window.htmx) {
-        window.htmx.trigger(input, 'ryokan:search');
-    }
-}
-
 // ── Bulk select (issue #125) ────────────────────────────────────────
 //
 // Sonarr-style "edit mode" pattern. The "Select" toggle in the filter

@@ -33,6 +33,41 @@ async fn fixture() -> (SqlitePool, config::Config, Target, tempfile::TempDir) {
     };
     (db, cfg, target, root)
 }
+
+#[tokio::test]
+async fn initial_search_uses_only_aired_monitored_slots_of_the_exact_release() {
+    let (db, _, target, _) = fixture().await;
+    sqlx::query("INSERT INTO episode_airings(series_id,episode,airing_at) VALUES(?,8,unixepoch('now')+86400)")
+        .bind(target.series_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    crate::models::monitoring::set_episode_monitored(&db, target.series_id, 8, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        monitored_aired_episodes(&db, target.series_id, target.provider_id)
+            .await
+            .unwrap(),
+        [7]
+    );
+    assert!(
+        monitored_aired_episodes(&db, target.series_id, target.provider_id + 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    crate::models::monitoring::set_episode_monitored(&db, target.series_id, 7, false)
+        .await
+        .unwrap();
+    assert!(
+        monitored_aired_episodes(&db, target.series_id, target.provider_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[tokio::test]
 async fn missing_demand_requires_current_airing_monitoring_and_complete_file_absence() {
     let (db, mut cfg, t, root) = fixture().await;

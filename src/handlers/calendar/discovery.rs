@@ -28,7 +28,6 @@ struct Card {
     cover: String,
     date: String,
     library_id: Option<i64>,
-    add_json: String,
 }
 
 struct Day {
@@ -114,7 +113,6 @@ async fn load(db: &SqlitePool, filters: Filters) -> Result<DiscoveryPage, String
                 String::new()
             },
             library_id: id,
-            add_json: serde_json::to_string(entry).map_err(|e| e.to_string())?,
         };
         match exact {
             Some(date) => dated.entry(date).or_default().push(card),

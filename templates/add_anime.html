@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+
+{% block title %} - Add Anime{% endblock %}
+
+{% block content %}
+<section class="add-anime" aria-labelledby="add-anime-title">
+    <nav class="detail-breadcrumb" aria-label="Breadcrumb">
+        <a href="/">Library</a>
+        {% if setup.is_some() %} · <a href="{{ back }}">Add Anime</a>{% endif %}
+    </nav>
+    <div class="page-header"><h2 id="add-anime-title">{% if setup.is_some() %}Set up release{% else %}Add Anime{% endif %}</h2></div>
+    {% if !error.is_empty() %}<p class="alert alert-warn" role="alert">{{ error }}</p>{% endif %}
+    {% if let Some(release) = setup %}
+    <section class="add-anime-panel">
+        <div class="add-anime-release">
+            {% if !release.cover.is_empty() %}<img src="{{ release.cover }}" alt="" width="92" height="138">{% endif %}
+            <div>
+                <h3>{{ release.title }}</h3>
+                {% if !release.facts.is_empty() %}<p class="series-meta">{{ release.facts }}</p>{% endif %}
+                <a href="{{ release.details_url }}">View release details</a>
+            </div>
+        </div>
+        <form action="/library/add" method="post" hx-boost="false">
+            <input type="hidden" name="provider_id" value="{{ release.id }}">
+            <input type="hidden" name="q" value="{{ q }}">
+            <input type="hidden" name="source" value="{{ source }}">
+            <fieldset class="add-anime-monitor">
+                <legend>Monitor episodes</legend>
+                <label><input type="radio" name="monitor_mode" value="all"{% if release.monitor_mode == "all" %} checked{% endif %}><span>All episodes <small>Aired and future episodes</small></span></label>
+                <label><input type="radio" name="monitor_mode" value="future"{% if release.monitor_mode == "future" %} checked{% endif %}><span>Future episodes only <small>Episodes that have yet to air</small></span></label>
+                <label><input type="radio" name="monitor_mode" value="none"{% if release.monitor_mode == "none" %} checked{% endif %}><span>No episodes</span></label>
+            </fieldset>
+            <label class="checkbox-row add-anime-search-toggle"><input type="checkbox" name="search_now" value="true" aria-describedby="add-anime-search-hint"{% if release.search_now %} checked{% endif %}{% if !release.can_search %} disabled{% endif %}><span>Search after adding</span></label>
+            <p class="form-hint" id="add-anime-search-hint">{{ release.search_hint }}</p>
+            <div class="add-anime-actions">
+                <a class="btn btn-secondary" href="{{ back }}">Back to search</a>
+                <button type="submit" class="btn btn-primary">Add to library</button>
+            </div>
+        </form>
+    </section>
+    {% else %}
+    <form class="add-anime-query" action="/library/add" method="get">
+        <div class="form-group">
+            <label for="add-anime-query">Anime title</label>
+            <input id="add-anime-query" type="search" name="q" value="{{ q }}" maxlength="200" required>
+        </div>
+        <div class="form-group">
+            <label for="add-anime-source">Provider</label>
+            <select id="add-anime-source" name="source">
+                <option value="al"{% if source == "al" %} selected{% endif %}>AniList</option>
+                <option value="mal"{% if source == "mal" %} selected{% endif %}>MyAnimeList</option>
+            </select>
+        </div>
+        <button class="btn btn-primary" type="submit">Search</button>
+    </form>
+    {% if !results.is_empty() %}
+    <ul class="add-anime-results" aria-label="Search results">
+        {% for result in results %}
+        <li class="anilist-result">
+            {% if !result.cover.is_empty() %}<img src="{{ result.cover }}" class="anilist-cover" alt="" width="44" height="64" loading="lazy">{% endif %}
+            <div class="anilist-info">
+                <a class="anilist-title-link" href="{{ result.href }}">{{ result.title }}</a>
+                {% if !result.subtitle.is_empty() %}<p class="anilist-subtitle">{{ result.subtitle }}</p>{% endif %}
+                {% if !result.facts.is_empty() %}<p class="anilist-meta">{{ result.facts }}</p>{% endif %}
+            </div>
+            {% if result.existing %}<span class="chip">In library</span><a href="{{ result.href }}" class="btn btn-secondary">Open</a>{% else %}<a href="{{ result.href }}" class="btn btn-primary">Set up</a>{% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+    {% else if !q.is_empty() && error.is_empty() %}
+    <p class="form-hint" role="status">No results found. Try a different title or provider.</p>
+    {% endif %}
+    {% endif %}
+</section>
+{% endblock %}

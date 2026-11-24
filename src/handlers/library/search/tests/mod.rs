@@ -1392,8 +1392,7 @@ mod handler_endpoints {
     ///   - title chosen by language (english here),
     ///   - external href shape (AL vs MAL → different host + id),
     ///   - format / episode / status badges,
-    ///   - the `data-entry` JSON parses back to the same `id`, which
-    ///     is what `addSeries(id, this)` in `static/js/library_add.js` reads.
+    ///   - setup links for both provider IDs and the compatible `data-entry` JSON.
     #[test]
     fn htmx_partial_renders_expected_markers_and_data_entry() {
         use crate::services::anilist::AnimeEntry;
@@ -1436,6 +1435,8 @@ mod handler_endpoints {
         let html = partial.render().expect("partial renders");
         assert_eq!(html.matches(r#"href="/anime/anilist/21""#).count(), 2);
         assert_eq!(html.matches(r#"href="/anime/mal/9876""#).count(), 2);
+        assert!(html.contains(r#"href="/library/add?provider_id=21""#));
+        assert!(html.contains(r#"href="/library/add?provider_id=-9876""#));
 
         // AL row: external link to anilist.co with the AL id, format
         // underscore replaced, episodes count rendered, status class
@@ -1466,8 +1467,8 @@ mod handler_endpoints {
             "empty format must fall back to TBA\n{html}"
         );
 
-        // The AL row's `data-entry` attribute must round-trip the JSON
-        // `addSeries` reads. Askama auto-escapes `"` to `&quot;`, so
+        // The AL row's `data-entry` attribute must round-trip the JSON.
+        // Askama auto-escapes `"` to `&quot;`, so
         // strip-then-parse to confirm the embedded payload is intact.
         let needle = r#"data-entry=""#;
         let start = html.find(needle).expect("data-entry attr present") + needle.len();

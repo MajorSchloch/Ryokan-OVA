@@ -76,6 +76,29 @@ pub async fn add_series(
     State(state): State<AppState>,
     Json(form): Json<AddSeriesForm>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let (id, created, monitor) = add_entry(state, form, None).await?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "id": id,
+        "created": created,
+        "monitor_mode": monitor.as_ref().map(|m| m.mode.as_str()).unwrap_or("future"),
+        "monitored_count": monitor.as_ref().map(|m| m.monitored_count).unwrap_or(0),
+        "total_count": monitor.as_ref().map(|m| m.total_count).unwrap_or(0),
+        "hydrating": true
+    })))
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct AddOptions {
+    pub mode: monitoring::MonitorMode,
+    pub search_now: bool,
+}
+
+pub(super) async fn add_entry(
+    state: AppState,
+    form: AddSeriesForm,
+    options: Option<AddOptions>,
+) -> Result<(i64, bool, Option<monitoring_service::MonitoringSummary>), (StatusCode, String)> {
     // A lone discovery card does not establish that AniList has only one part.
     // Check an unresolved legacy match before taking SQLite's writer lock.
     let mut verified = false;
@@ -88,30 +111,32 @@ pub async fn add_series(
     {
         verified = matches!(parts.as_slice(), [part] if part.id == form.anilist_id && part.id_mal == Some(mid));
     }
-    let (id, created) = series::upsert_with_promotion(
-        &state.db,
-        series::SeriesCore {
-            anilist_id: form.anilist_id,
-            mal_id: form.mal_id,
-            title: &form.title,
-            title_romaji: &form.title_romaji,
-            title_english: &form.title_english,
-            title_native: &form.title_native,
-            cover_url: &form.cover_url,
-            format: &form.format,
-            status: &form.status,
-            episodes: form.episodes,
-            season_year: form.season_year,
-            // AddSeriesForm comes from the search result card which doesn't
-            // carry an end date — leave null and let the metadata sync pass
-            // populate it via refresh_core_metadata when the full detail
-            // fetch lands.
-            end_year: None,
-        },
-        verified,
-    )
-    .await
+    let core = series::SeriesCore {
+        anilist_id: form.anilist_id,
+        mal_id: form.mal_id,
+        title: &form.title,
+        title_romaji: &form.title_romaji,
+        title_english: &form.title_english,
+        title_native: &form.title_native,
+        cover_url: &form.cover_url,
+        format: &form.format,
+        status: &form.status,
+        episodes: form.episodes,
+        season_year: form.season_year,
+        // AddSeriesForm comes from the search result card which doesn't
+        // carry an end date — leave null and let the metadata sync pass
+        // populate it via refresh_core_metadata when the full detail
+        // fetch lands.
+        end_year: None,
+    };
+    let (id, created) = match options {
+        Some(options) => series::add_with_monitoring(&state.db, core, verified, options.mode).await,
+        None => series::upsert_with_promotion(&state.db, core, verified).await,
+    }
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if options.is_some() && !created {
+        return Ok((id, false, None));
+    }
     // A series added back by hand is wanted again: drop any sync
     // exclusion recorded when it was removed.
     if let Ok(Some(row)) = series::get_by_id(&state.db, id).await {
@@ -138,6 +163,9 @@ pub async fn add_series(
     if let Ok(Some(tracked)) = series::get_by_id(&state.db, id).await {
         let db_clone = state.db.clone();
         let tracked_clone = tracked.clone();
+        let search_state = options
+            .filter(|options| options.search_now && options.mode != monitoring::MonitorMode::None)
+            .map(|_| state.clone());
         tokio::spawn(async move {
             let force_fallback = crate::models::config::get_config(&db_clone)
                 .await
@@ -169,11 +197,20 @@ pub async fn add_series(
                     // This catch-up pass — off the request path — picks up
                     // the real aired dates. Quiet on failure; the next
                     // monitor-mode change or series-page render recomputes.
-                    let _ = monitoring_service::recompute_series_monitoring(
+                    let monitor = monitoring_service::recompute_series_monitoring(
                         &db_clone,
                         tracked_clone.id,
                     )
                     .await;
+                    if let Some(state) = search_state
+                        && monitor.is_ok_and(|summary| summary.monitored_count > 0)
+                        && config::get_config(&state.db)
+                            .await
+                            .is_ok_and(|cfg| cfg.unwrap_or_default().auto_grab_on_add)
+                        && !state.download_clients.read().await.clients.is_empty()
+                    {
+                        let _ = super::search::auto_search_newly_added(state, &tracked_clone).await;
+                    }
                 }
                 Err(err) => {
                     logger::warn(
@@ -254,15 +291,7 @@ pub async fn add_series(
         .await
         .ok();
 
-    Ok(Json(serde_json::json!({
-        "ok": true,
-        "id": id,
-        "created": created,
-        "monitor_mode": monitor.as_ref().map(|m| m.mode.as_str()).unwrap_or("future"),
-        "monitored_count": monitor.as_ref().map(|m| m.monitored_count).unwrap_or(0),
-        "total_count": monitor.as_ref().map(|m| m.total_count).unwrap_or(0),
-        "hydrating": true
-    })))
+    Ok((id, created, monitor))
 }
 
 #[utoipa::path(

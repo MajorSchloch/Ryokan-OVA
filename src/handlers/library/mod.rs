@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::models::series;
 use crate::services::anilist;
 
+mod add_page;
 pub(crate) mod availability;
 pub mod bulk;
 pub mod cleanup;

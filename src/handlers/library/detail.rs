@@ -25,6 +25,10 @@ pub fn path(provider_id: impl std::borrow::Borrow<i64>) -> String {
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route(
+            "/library/add",
+            get(super::add_page::page).post(super::add_page::save),
+        )
         .merge(super::requirements::routes())
         .merge(super::management::routes())
         .route("/anime/anilist/{id}", get(anilist_detail))

@@ -774,8 +774,7 @@ window.addEventListener('DOMContentLoaded', function () {
                 get(crate::handlers::settings::setup_library::setup_library_page)
                     .post(crate::handlers::settings::setup_library::setup_library_submit),
             )
-            // The library's add-series Monitor Episodes dialog posts
-            // here (`tests/htmx_browser_e2e_add_series_monitor.rs`).
+            // Release-page monitoring controls.
             .route(
                 "/api/library/monitoring",
                 post(crate::handlers::library::crud::set_monitoring),
