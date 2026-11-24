@@ -284,8 +284,8 @@ pub async fn get_by_provider_id(
     }))
 }
 
-pub async fn upsert_provider(
-    db: &SqlitePool,
+pub async fn upsert_provider<'e>(
+    db: impl sqlx::SqliteExecutor<'e>,
     provider_id: i64,
     mal_id: Option<i64>,
     detail: &AnimeDetail,

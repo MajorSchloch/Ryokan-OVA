@@ -89,15 +89,16 @@ pub async fn add_series(
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct AddOptions {
+pub(super) struct AddOptions<'a> {
     pub mode: monitoring::MonitorMode,
     pub search_now: bool,
+    pub detail: &'a crate::services::anilist::AnimeDetail,
 }
 
 pub(super) async fn add_entry(
     state: AppState,
     form: AddSeriesForm,
-    options: Option<AddOptions>,
+    options: Option<AddOptions<'_>>,
 ) -> Result<(i64, bool, Option<monitoring_service::MonitoringSummary>), (StatusCode, String)> {
     // A lone discovery card does not establish that AniList has only one part.
     // Check an unresolved legacy match before taking SQLite's writer lock.
@@ -130,7 +131,16 @@ pub(super) async fn add_entry(
         end_year: None,
     };
     let (id, created) = match options {
-        Some(options) => series::add_with_monitoring(&state.db, core, verified, options.mode).await,
+        Some(options) => {
+            series::add_with_monitoring(
+                &state.db,
+                core,
+                verified,
+                options.mode,
+                Some(options.detail),
+            )
+            .await
+        }
         None => series::upsert_with_promotion(&state.db, core, verified).await,
     }
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

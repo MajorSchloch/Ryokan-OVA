@@ -12,13 +12,17 @@ use sqlx::SqlitePool;
 use tower::ServiceExt;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{body_partial_json, method},
+    matchers::{body_partial_json, body_string_contains, method},
 };
 
 const NEW: i64 = 910_021;
 const TRACKED: i64 = 910_022;
 const OTHER: i64 = 910_023;
 const QUERY: &str = "Fixture choices";
+const ORIGINAL: &str = "Ada Orbit";
+const SEQUEL: &str = "Ada Orbit Season 2";
+const UNRELATED: &str = "Separate fixture";
+const SHARED_MAL_ID: i64 = 610_024;
 
 fn provider_entry(id: i64, title: &str) -> Value {
     json!({
@@ -66,6 +70,30 @@ async fn html(response: Response) -> String {
             .to_vec(),
     )
     .unwrap()
+}
+
+fn add_links(page: &str, selector: &str) -> Vec<reqwest::Url> {
+    let document = scraper::Html::parse_document(page);
+    let links = scraper::Selector::parse(selector).unwrap();
+    let base = reqwest::Url::parse("http://localhost").unwrap();
+    document
+        .select(&links)
+        .map(|link| base.join(link.value().attr("href").unwrap()).unwrap())
+        .collect()
+}
+
+fn parameter<'a>(link: &'a reqwest::Url, name: &str) -> Option<std::borrow::Cow<'a, str>> {
+    link.query_pairs()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value)
+}
+
+fn link_id(link: &reqwest::Url, name: &str) -> Option<i64> {
+    parameter(link, name).map(|id| id.parse().unwrap())
+}
+
+fn request_uri(link: &reqwest::Url) -> String {
+    format!("{}?{}", link.path(), link.query().unwrap())
 }
 
 async fn assert_no_additions(db: &SqlitePool) {
@@ -160,18 +188,36 @@ async fn invalid_monitoring_mode_does_not_add_the_release() {
 }
 
 #[tokio::test]
-async fn results_distinguish_tracked_titles_and_save_the_selected_mode() {
+async fn cold_search_groups_releases_and_saves_the_selected_mode() {
     let server = MockServer::start().await;
+    let original = provider_entry(TRACKED, ORIGINAL);
+    let mut sequel = provider_entry(NEW, SEQUEL);
+    sequel["seasonYear"] = json!(2023);
+    sequel["idMal"] = json!(SHARED_MAL_ID);
+    let mut unrelated = provider_entry(OTHER, UNRELATED);
+    unrelated["idMal"] = json!(SHARED_MAL_ID);
+    sequel["relations"] = json!({
+        "edges": [{"relationType": "PREQUEL", "node": original.clone()}]
+    });
+
     Mock::given(method("POST"))
         .and(body_partial_json(json!({"variables": {"search": QUERY}})))
+        .and(body_string_contains("relations"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": {"Page": {"media": [
-                provider_entry(TRACKED, "Tracked fixture"),
-                provider_entry(NEW, "New fixture")
-            ]}}
+            "data": {"Page": {"media": [sequel.clone(), original.clone(), unrelated.clone()]}}
         })))
+        .expect(1)
         .mount(&server)
         .await;
+    for (id, detail) in [(NEW, sequel), (TRACKED, original), (OTHER, unrelated)] {
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"variables": {"id": id}})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"data": {"Media": detail}})),
+            )
+            .mount(&server)
+            .await;
+    }
 
     // A subprocess keeps the provider overrides local to this fixture.
     // The add endpoint starts metadata refreshes in background tasks.
@@ -194,20 +240,74 @@ async fn results_distinguish_tracked_titles_and_save_the_selected_mode() {
     );
 }
 
-#[ignore = "run by results_distinguish_tracked_titles_and_save_the_selected_mode"]
+#[ignore = "run by cold_search_groups_releases_and_saves_the_selected_mode"]
 #[tokio::test]
 async fn mocked_provider_results_and_save() {
     let db = in_memory_pool().await;
-    seed_series(&db, TRACKED, "Tracked fixture").await;
-    cache(&db, NEW, "New fixture").await;
-    cache(&db, OTHER, "Other fixture").await;
+    sqlx::query("UPDATE library_path_policy SET enabled=1 WHERE id=1")
+        .execute(&db)
+        .await
+        .unwrap();
+    let tracked = seed_series(&db, TRACKED, ORIGINAL).await;
+    sqlx::query("UPDATE series SET folder_name=? WHERE id=?")
+        .bind(format!("{ORIGINAL}/{ORIGINAL}"))
+        .bind(tracked)
+        .execute(&db)
+        .await
+        .unwrap();
     let state = build_test_app_state(db.clone(), None);
 
-    let page =
+    let results =
         html(request(&state, "/library/add?q=Fixture%20choices&source=al", None).await).await;
-    assert!(page.contains("In library"));
-    assert!(page.contains(&format!("href=\"/anime/anilist/{TRACKED}\"")));
-    assert!(page.contains(&format!("provider_id={NEW}\"")));
+    let result_links = add_links(
+        &results,
+        "[aria-label='Search results'] a.btn[href^='/library/add?']",
+    );
+    let franchise_links: Vec<_> = result_links
+        .iter()
+        .filter(|link| link_id(link, "franchise_id").is_some())
+        .collect();
+    assert_eq!(
+        franchise_links
+            .iter()
+            .filter_map(|link| link_id(link, "franchise_id"))
+            .collect::<Vec<_>>(),
+        [NEW, OTHER]
+    );
+    assert!(
+        result_links
+            .iter()
+            .all(|link| link_id(link, "provider_id").is_none())
+    );
+    assert!(results.contains(ORIGINAL));
+    assert!(results.contains(UNRELATED));
+    let franchise_link = franchise_links[0];
+    assert_eq!(parameter(franchise_link, "q").as_deref(), Some(QUERY));
+    assert_eq!(parameter(franchise_link, "source").as_deref(), Some("al"));
+
+    let franchise = html(request(&state, &request_uri(franchise_link), None).await).await;
+    assert!(franchise.contains(&format!("<h2 id=\"add-anime-title\">{ORIGINAL}</h2>")));
+    assert!(franchise.contains(SEQUEL));
+    assert!(!franchise.contains(UNRELATED));
+    assert!(franchise.contains("In library"));
+    assert!(franchise.contains("Open release"));
+    assert!(franchise.contains(&format!("href=\"/anime/anilist/{TRACKED}\"")));
+    let setup_links: Vec<_> = add_links(&franchise, "a.btn[href^='/library/add?']")
+        .into_iter()
+        .filter(|link| link_id(link, "provider_id").is_some())
+        .collect();
+    assert_eq!(setup_links.len(), 1);
+    let setup_link = &setup_links[0];
+    assert_eq!(link_id(setup_link, "provider_id"), Some(NEW));
+    assert_eq!(link_id(setup_link, "franchise_id"), Some(NEW));
+    assert_eq!(parameter(setup_link, "q").as_deref(), Some(QUERY));
+    assert_eq!(parameter(setup_link, "source").as_deref(), Some("al"));
+
+    let setup = html(request(&state, &request_uri(setup_link), None).await).await;
+    assert!(setup.contains("Set up release"));
+    assert!(setup.contains(SEQUEL));
+    let back_links = add_links(&setup, "a[href^='/library/add?']");
+    assert!(back_links.iter().any(|link| link == franchise_link));
     assert_eq!(crate::test_support::count_series(&db).await, 1);
 
     for (provider, requested, expected) in [
@@ -227,11 +327,73 @@ async fn mocked_provider_results_and_save() {
         );
         assert_eq!(row.monitor_mode_enum(), expected);
         assert!(row.monitor_mode_manual_override);
+        if provider == NEW {
+            assert_eq!(row.folder_name, format!("{ORIGINAL}/{SEQUEL}"));
+        }
         let states = monitoring::get_series_states(&db, row.id).await.unwrap();
         assert_eq!(states.len(), 2);
         assert!(states.iter().all(|state| !state.monitored));
     }
     assert_eq!(crate::test_support::count_series(&db).await, 3);
+}
+
+#[tokio::test]
+async fn split_mal_id_requires_exact_confirmation_to_open_legacy_franchise() {
+    let db = in_memory_pool().await;
+    let legacy = -SHARED_MAL_ID;
+    let series_id = seed_series(&db, legacy, ORIGINAL).await;
+    sqlx::query("UPDATE series SET mal_id=? WHERE id=?")
+        .bind(SHARED_MAL_ID)
+        .bind(series_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO discovery_media_ids (anilist_id, mal_id) VALUES (?, ?)")
+        .bind(OTHER)
+        .bind(SHARED_MAL_ID)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let mut original = provider_entry(TRACKED, ORIGINAL);
+    original["idMal"] = json!(SHARED_MAL_ID);
+    let mut sequel = provider_entry(NEW, SEQUEL);
+    sequel["seasonYear"] = json!(2023);
+    original["relations"] = json!({
+        "edges": [{"relationType": "SEQUEL", "node": sequel}]
+    });
+    let original = anilist::parse_media_node(&original).unwrap();
+    metadata_cache::upsert_provider(&db, TRACKED, Some(SHARED_MAL_ID), &original)
+        .await
+        .unwrap();
+    let state = build_test_app_state(db.clone(), None);
+    let view = AddPage::new(&config::Config::default(), String::new(), "al", None);
+
+    let group = discovery::open(&state, &view, TRACKED).await.unwrap();
+    assert_eq!(group.title, ORIGINAL);
+    assert_eq!(group.releases.len(), 2);
+    assert!(group.releases.iter().all(|release| !release.existing));
+    assert!(
+        group.releases[0]
+            .href
+            .ends_with(&format!("&provider_id={TRACKED}"))
+    );
+
+    metadata_cache::upsert(&db, series_id, TRACKED, Some(SHARED_MAL_ID), &original)
+        .await
+        .unwrap();
+    for seed in [TRACKED, legacy] {
+        let group = discovery::open(&state, &view, seed).await.unwrap();
+        assert_eq!(group.title, ORIGINAL);
+        assert_eq!(group.releases.len(), 2);
+        assert_eq!(group.releases[0].title, ORIGINAL);
+        assert!(group.releases[0].existing);
+        assert_eq!(group.releases[0].href, detail::path(legacy));
+        assert_eq!(group.releases[1].title, SEQUEL);
+        assert!(!group.releases[1].existing);
+    }
+    let row = series::get_by_id(&db, series_id).await.unwrap().unwrap();
+    assert_eq!(row.anilist_id, legacy);
 }
 
 #[tokio::test]
@@ -252,8 +414,8 @@ async fn concurrent_confirmation_pins_only_the_created_releases_monitoring() {
         end_year: None,
     };
     let (all, none) = tokio::join!(
-        series::add_with_monitoring(&db, core(), false, MonitorMode::All),
-        series::add_with_monitoring(&db, core(), false, MonitorMode::None),
+        series::add_with_monitoring(&db, core(), false, MonitorMode::All, None),
+        series::add_with_monitoring(&db, core(), false, MonitorMode::None, None),
     );
     let (all, none) = (all.unwrap(), none.unwrap());
     assert_eq!(all.0, none.0);
