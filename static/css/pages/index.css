@@ -1446,6 +1446,14 @@ a.franchise-status:hover { border-color: currentColor; text-decoration: underlin
 .add-anime-results .anilist-info { min-width: 0; overflow-wrap: anywhere; }
 .add-anime-results .btn { flex-shrink: 0; }
 .add-anime-results .anilist-meta { margin-block: 3px 0; }
+.add-anime-franchise {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 20px;
+    overflow-wrap: anywhere;
+}
+.add-anime-franchise img { border-radius: 8px; object-fit: cover; flex-shrink: 0; }
 
 .add-anime-panel {
     padding: clamp(16px, 4vw, 28px);

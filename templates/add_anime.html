@@ -6,9 +6,9 @@
 <section class="add-anime" aria-labelledby="add-anime-title">
     <nav class="detail-breadcrumb" aria-label="Breadcrumb">
         <a href="/">Library</a>
-        {% if setup.is_some() %} · <a href="{{ back }}">Add Anime</a>{% endif %}
+        {% if setup.is_some() || franchise.is_some() %} · <a href="{{ back }}">Add Anime</a>{% endif %}
     </nav>
-    <div class="page-header"><h2 id="add-anime-title">{% if setup.is_some() %}Set up release{% else %}Add Anime{% endif %}</h2></div>
+    <div class="page-header"><h2 id="add-anime-title">{% if setup.is_some() %}Set up release{% else if let Some(group) = franchise %}{{ group.title }}{% else %}Add Anime{% endif %}</h2></div>
     {% if !error.is_empty() %}<p class="alert alert-warn" role="alert">{{ error }}</p>{% endif %}
     {% if let Some(release) = setup %}
     <section class="add-anime-panel">
@@ -22,6 +22,7 @@
         </div>
         <form action="/library/add" method="post" hx-boost="false">
             <input type="hidden" name="provider_id" value="{{ release.id }}">
+            {% if let Some(id) = franchise_id %}<input type="hidden" name="franchise_id" value="{{ id }}">{% endif %}
             <input type="hidden" name="q" value="{{ q }}">
             <input type="hidden" name="source" value="{{ source }}">
             <fieldset class="add-anime-monitor">
@@ -33,10 +34,37 @@
             <label class="checkbox-row add-anime-search-toggle"><input type="checkbox" name="search_now" value="true" aria-describedby="add-anime-search-hint"{% if release.search_now %} checked{% endif %}{% if !release.can_search %} disabled{% endif %}><span>Search after adding</span></label>
             <p class="form-hint" id="add-anime-search-hint">{{ release.search_hint }}</p>
             <div class="add-anime-actions">
-                <a class="btn btn-secondary" href="{{ back }}">Back to search</a>
+                <a class="btn btn-secondary" href="{{ self.back_to_setup_parent() }}">{% if franchise_id.is_some() %}Back to franchise{% else %}Back to search{% endif %}</a>
                 <button type="submit" class="btn btn-primary">Add to library</button>
             </div>
         </form>
+    </section>
+    {% else if let Some(group) = franchise %}
+    <section aria-labelledby="add-anime-releases-title">
+        {% if !group.cover.is_empty() || !group.subtitle.is_empty() || group.library_url.is_some() %}
+        <div class="add-anime-franchise">
+            {% if !group.cover.is_empty() %}<img src="{{ group.cover }}" alt="" width="64" height="96">{% endif %}
+            <div>
+                {% if !group.subtitle.is_empty() %}<p class="anilist-subtitle">{{ group.subtitle }}</p>{% endif %}
+                {% if let Some(path) = group.library_url %}<a href="{{ path }}">Manage franchise in Library</a>{% endif %}
+            </div>
+        </div>
+        {% endif %}
+        <h3 id="add-anime-releases-title">Releases</h3>
+        <ul class="add-anime-results" aria-labelledby="add-anime-releases-title">
+            {% for release in group.releases %}
+            <li class="anilist-result">
+                {% if !release.cover.is_empty() %}<img src="{{ release.cover }}" class="anilist-cover" alt="" width="44" height="64" loading="lazy">{% endif %}
+                <div class="anilist-info">
+                    <a class="anilist-title-link" href="{{ release.href }}">{{ release.title }}</a>
+                    {% if !release.subtitle.is_empty() %}<p class="anilist-subtitle">{{ release.subtitle }}</p>{% endif %}
+                    {% if !release.facts.is_empty() %}<p class="anilist-meta">{{ release.facts }}</p>{% endif %}
+                </div>
+                {% if release.existing %}<span class="chip">In library</span><a href="{{ release.href }}" class="btn btn-secondary">Open release</a>{% else %}<a href="{{ release.href }}" class="btn btn-primary">Set up</a>{% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+        <a class="btn btn-secondary" href="{{ back }}">Back to search</a>
     </section>
     {% else %}
     <form class="add-anime-query" action="/library/add" method="get">
@@ -63,7 +91,8 @@
                 {% if !result.subtitle.is_empty() %}<p class="anilist-subtitle">{{ result.subtitle }}</p>{% endif %}
                 {% if !result.facts.is_empty() %}<p class="anilist-meta">{{ result.facts }}</p>{% endif %}
             </div>
-            {% if result.existing %}<span class="chip">In library</span><a href="{{ result.href }}" class="btn btn-secondary">Open</a>{% else %}<a href="{{ result.href }}" class="btn btn-primary">Set up</a>{% endif %}
+            {% if result.existing %}<span class="chip">In library</span>{% endif %}
+            <a href="{{ result.href }}" class="btn {% if result.existing %}btn-secondary{% else %}btn-primary{% endif %}">Open franchise</a>
         </li>
         {% endfor %}
     </ul>

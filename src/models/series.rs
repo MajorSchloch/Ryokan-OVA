@@ -532,7 +532,7 @@ pub(crate) async fn upsert_with_promotion(
     core: SeriesCore<'_>,
     allow_unconfirmed_match: bool,
 ) -> Result<(i64, bool), sqlx::Error> {
-    save_series(db, core, allow_unconfirmed_match, None).await
+    save_series(db, core, allow_unconfirmed_match, None, None).await
 }
 
 pub(crate) async fn add_with_monitoring(
@@ -540,8 +540,9 @@ pub(crate) async fn add_with_monitoring(
     core: SeriesCore<'_>,
     allow_unconfirmed_match: bool,
     mode: MonitorMode,
+    detail: Option<&crate::services::anilist::AnimeDetail>,
 ) -> Result<(i64, bool), sqlx::Error> {
-    save_series(db, core, allow_unconfirmed_match, Some(mode)).await
+    save_series(db, core, allow_unconfirmed_match, Some(mode), detail).await
 }
 
 pub(crate) const AMBIGUOUS_MAL_ADD: &str = "This MyAnimeList entry matches several library releases. Search AniList to choose the exact release.";
@@ -551,6 +552,7 @@ async fn save_series(
     core: SeriesCore<'_>,
     allow_unconfirmed_match: bool,
     initial_mode: Option<MonitorMode>,
+    detail: Option<&crate::services::anilist::AnimeDetail>,
 ) -> Result<(i64, bool), sqlx::Error> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     if let Some(existing) = get_by_anilist_id(&mut *tx, core.anilist_id).await? {
@@ -655,6 +657,11 @@ async fn save_series(
         return Ok((existing.id, false));
     }
 
+    if let Some(detail) = detail.filter(|detail| detail.id == core.anilist_id && detail.id > 0) {
+        // Let the existing folder planner see the chosen release's verified
+        // relations before it reserves a folder for a newly discovered sequel.
+        super::metadata_cache::upsert_provider(&mut *tx, detail.id, detail.id_mal, detail).await?;
+    }
     let mode = initial_mode.unwrap_or_else(|| default_monitor_mode(core.status));
     let id = insert_new(&mut tx, core, mode).await?;
     if initial_mode.is_some() {

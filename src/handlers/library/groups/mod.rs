@@ -60,7 +60,7 @@ pub(crate) async fn future_controls(
 use crate::{
     models::{config, local_metadata, series},
     services::{
-        anilist::{AnimeDetail, RelatedEntry},
+        anilist::{AnimeDetail, AnimeSearchHit, RelatedEntry},
         library_link::pick_title,
     },
 };
@@ -152,7 +152,7 @@ impl Entry {
 
 impl Catalog {
     fn remember(&mut self, id: i64, mal: Option<i64>, entry: Entry) {
-        if let Some(mal) = mal.filter(|m| *m > 0) {
+        if let Some(mal) = mal.filter(|m| *m > 0 && id > 0) {
             self.by_mal.entry(mal).or_default().insert(id);
         }
         let old = self.entries.entry(id).or_default();
@@ -219,7 +219,93 @@ impl Catalog {
             .insert((owner, target_label));
     }
 
-    fn group(mut self, follow_seed: Option<i64>) -> Vec<Group> {
+    fn remember_detail(&mut self, detail: &AnimeDetail, lang: &str) {
+        self.remember(
+            detail.id,
+            detail.id_mal,
+            Entry {
+                title: pick_title(
+                    lang,
+                    &detail.title_english,
+                    &detail.title_romaji,
+                    &detail.title_native,
+                )
+                .into(),
+                format: detail.format.clone(),
+                episodes: detail.episodes,
+                date: date_label(detail.release_date.as_deref(), detail.season_year),
+                season: match detail.season.as_str() {
+                    "WINTER" => "Winter",
+                    "SPRING" => "Spring",
+                    "SUMMER" => "Summer",
+                    "FALL" => "Fall",
+                    _ => "",
+                }
+                .into(),
+                ..Entry::default()
+            },
+        );
+        self.entries.get_mut(&detail.id).unwrap().related = Some(RelatedEntry {
+            id: detail.id,
+            id_mal: detail.id_mal,
+            title_romaji: detail.title_romaji.clone(),
+            title_english: detail.title_english.clone(),
+            title_native: detail.title_native.clone(),
+            cover_url: detail.cover_url.clone(),
+            format: detail.format.clone(),
+            status: detail.status.clone(),
+            status_display: detail.status_display.clone(),
+            episodes: detail.episodes,
+            season_year: detail.season_year,
+            release_date: detail.release_date.clone(),
+            start_date: None,
+            relation_type: String::new(),
+            media_type: "ANIME".into(),
+        });
+    }
+
+    fn remember_search_hit(&mut self, hit: &AnimeSearchHit, lang: &str) {
+        let e = &hit.entry;
+        let display_title = pick_title(lang, &e.title_english, &e.title_romaji, &e.title_native);
+        let own = self.entries.entry(e.id).or_default();
+        // Library names and metadata already attached to a library release win.
+        if own.title.is_empty() {
+            own.title = display_title.into();
+        }
+        if own.date.is_empty() {
+            own.date = date_label(hit.release_date.as_deref(), e.season_year);
+        }
+        if own.format.is_empty() {
+            own.format.clone_from(&e.format);
+        }
+        own.episodes = own.episodes.or(e.episodes);
+        own.related.get_or_insert_with(|| RelatedEntry {
+            id: e.id,
+            id_mal: e.id_mal,
+            title_romaji: e.title_romaji.clone(),
+            title_english: e.title_english.clone(),
+            title_native: e.title_native.clone(),
+            cover_url: e.cover_url.clone(),
+            format: e.format.clone(),
+            status: e.status.clone(),
+            status_display: e.status_display.clone(),
+            episodes: e.episodes,
+            season_year: e.season_year,
+            release_date: hit.release_date.clone(),
+            start_date: None,
+            relation_type: String::new(),
+            media_type: "ANIME".into(),
+        });
+        for rel in &hit.relations {
+            self.relation(e.id, rel, lang);
+        }
+    }
+
+    fn group(self, follow_seed: Option<i64>) -> Vec<Group> {
+        self.group_with_seeds(&follow_seed.into_iter().collect())
+    }
+
+    fn group_with_seeds(mut self, discovery_seeds: &HashSet<i64>) -> Vec<Group> {
         // An outside relation reachable from two saved parents is ambiguous.
         // Leave it discoverable on its own detail page rather than assigning
         // a crossover or shared extra to whichever parent sorts first.
@@ -251,11 +337,11 @@ impl Catalog {
         }
         let mut groups = Vec::new();
         let mut seen = HashSet::new();
-        // Start only at tracked entries. Provider caches can contain unrelated titles.
+        // Start at tracked entries and explicit seeds. Provider caches can contain unrelated titles.
         let mut seeds: Vec<_> = self
             .entries
             .iter()
-            .filter(|(id, e)| e.series_id.is_some() || follow_seed == Some(**id))
+            .filter(|(id, e)| e.series_id.is_some() || discovery_seeds.contains(id))
             .map(|(&id, _)| id)
             .collect();
         seeds.sort_by_key(|id| (self.entries[id].franchise_page_id.is_none(), *id));
@@ -377,48 +463,7 @@ async fn catalog(db: &SqlitePool, lang: &str) -> Result<Catalog, sqlx::Error> {
         if detail.id != id {
             continue;
         }
-        catalog.remember(
-            detail.id,
-            detail.id_mal,
-            Entry {
-                title: pick_title(
-                    lang,
-                    &detail.title_english,
-                    &detail.title_romaji,
-                    &detail.title_native,
-                )
-                .into(),
-                format: detail.format.clone(),
-                episodes: detail.episodes,
-                date: date_label(detail.release_date.as_deref(), detail.season_year),
-                season: match detail.season.as_str() {
-                    "WINTER" => "Winter",
-                    "SPRING" => "Spring",
-                    "SUMMER" => "Summer",
-                    "FALL" => "Fall",
-                    _ => "",
-                }
-                .into(),
-                ..Entry::default()
-            },
-        );
-        catalog.entries.get_mut(&id).unwrap().related = Some(RelatedEntry {
-            id,
-            id_mal: detail.id_mal,
-            title_romaji: detail.title_romaji,
-            title_english: detail.title_english,
-            title_native: detail.title_native,
-            cover_url: detail.cover_url,
-            format: detail.format,
-            status: detail.status,
-            status_display: detail.status_display,
-            episodes: detail.episodes,
-            season_year: detail.season_year,
-            release_date: detail.release_date,
-            start_date: None,
-            relation_type: String::new(),
-            media_type: "ANIME".into(),
-        });
+        catalog.remember_detail(&detail, lang);
         if !detail.relations.is_empty() {
             authoritative.insert(detail.id);
             for rel in &detail.relations {
@@ -486,9 +531,67 @@ pub(super) async fn load_groups(
     include_disk_status: bool,
     seed: Option<(i64, &str)>,
 ) -> Result<GroupsPage, sqlx::Error> {
+    load_catalog(db, include_disk_status, seed, None).await
+}
+
+struct Discovery<'a> {
+    hits: &'a [AnimeSearchHit],
+    detail: Option<&'a AnimeDetail>,
+}
+
+/// Project provider results against the same franchise boundaries as the Library.
+pub(super) async fn discover_groups(
+    db: &SqlitePool,
+    hits: &[AnimeSearchHit],
+    detail: Option<&AnimeDetail>,
+) -> Result<Vec<Group>, sqlx::Error> {
+    Ok(
+        load_catalog(db, false, None, Some(Discovery { hits, detail }))
+            .await?
+            .groups,
+    )
+}
+
+async fn discovery_mal_owners(db: &SqlitePool) -> Result<HashMap<i64, i64>, sqlx::Error> {
+    // Only an attached re-identification can turn an AniList release into an
+    // Open action for a MAL row. This matches the exact setup redirect.
+    let owners: Vec<(i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "{} SELECT h.series_id,h.anilist_id FROM local_anilist_ids h
+         JOIN series s ON s.id=h.series_id
+         JOIN series_metadata_cache m ON m.series_id=h.series_id AND m.provider_id=h.anilist_id
+         WHERE s.anilist_id<0",
+        series::LOCAL_ANILIST_IDS
+    )))
+    .fetch_all(db)
+    .await?;
+    Ok(owners.into_iter().collect())
+}
+
+async fn load_catalog(
+    db: &SqlitePool,
+    include_disk_status: bool,
+    seed: Option<(i64, &str)>,
+    discovery: Option<Discovery<'_>>,
+) -> Result<GroupsPage, sqlx::Error> {
     let cfg = config::get_config(db).await?.unwrap_or_default();
     let mut catalog = catalog(db, &cfg.title_language).await?;
+    if let Some(discovery) = &discovery {
+        for hit in discovery.hits {
+            catalog.remember_search_hit(hit, &cfg.title_language);
+        }
+        if let Some(detail) = discovery.detail {
+            catalog.remember_detail(detail, &cfg.title_language);
+            for rel in &detail.relations {
+                catalog.relation(detail.id, rel, &cfg.title_language);
+            }
+        }
+    }
     let library = series::get_all(db).await?;
+    let discovered_owners = if discovery.is_some() && library.iter().any(|s| s.anilist_id < 0) {
+        discovery_mal_owners(db).await?
+    } else {
+        HashMap::new()
+    };
     let inventory = if include_disk_status {
         super::inventory::load(db, &cfg.media_root, &library).await?
     } else {
@@ -502,8 +605,13 @@ pub(super) async fn load_groups(
     let mut library_ids = HashMap::new();
     for s in library {
         let mut id = s.anilist_id;
-        if id < 0
-            && let Some(ids) = s.mal_id.and_then(|mal| catalog.by_mal.get(&mal))
+        if let Some(&provider) = discovered_owners.get(&s.id) {
+            catalog.entries.remove(&id);
+            id = provider;
+        } else if discovery.is_none()
+            && id < 0
+            && let Some(mal) = s.mal_id
+            && let Some(ids) = catalog.by_mal.get(&mal)
             && ids.len() == 1
             && let Some(&al) = ids.first()
             && !positive.contains(&al)
@@ -611,7 +719,18 @@ pub(super) async fn load_groups(
     Ok(GroupsPage {
         page: "library",
         title_language: cfg.title_language,
-        groups: catalog.group(seed.map(|(id, _)| id)),
+        groups: if let Some(discovery) = discovery {
+            let seeds = discovery
+                .hits
+                .iter()
+                .map(|hit| hit.entry.id)
+                .chain(discovery.detail.map(|d| d.id))
+                .map(|id| library_ids.get(&id).copied().unwrap_or(id))
+                .collect();
+            catalog.group_with_seeds(&seeds)
+        } else {
+            catalog.group(seed.map(|(id, _)| id))
+        },
         media_root: cfg.media_root,
     })
 }

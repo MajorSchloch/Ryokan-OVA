@@ -103,7 +103,7 @@ static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
         .expect("building the AniList reqwest client should not fail")
 });
 
-type SearchCacheEntry = (Instant, Vec<AnimeEntry>);
+type SearchCacheEntry = (Instant, Vec<AnimeSearchHit>);
 
 /// Search result cache, keyed on (provider-mode, normalized query).
 /// Provider-mode is "al" for the normal AniList-first path and "mal" for the
@@ -121,7 +121,7 @@ fn normalize_search_key(force_fallback: bool, query: &str) -> String {
     format!("{}::{}", if force_fallback { "mal" } else { "al" }, folded)
 }
 
-fn search_cache_get(key: &str) -> Option<Vec<AnimeEntry>> {
+fn search_cache_get(key: &str) -> Option<Vec<AnimeSearchHit>> {
     let now = Instant::now();
     let mut cache = SEARCH_CACHE.lock().ok()?;
     if let Some((fetched_at, results)) = cache.get(key)
@@ -133,7 +133,7 @@ fn search_cache_get(key: &str) -> Option<Vec<AnimeEntry>> {
     None
 }
 
-fn search_cache_put(key: String, results: Vec<AnimeEntry>) {
+fn search_cache_put(key: String, results: Vec<AnimeSearchHit>) {
     // Skip caching empty results. The four call sites that feed this all
     // produce empty Vecs under user-visible failure modes — AL in cooldown
     // with Jikan also empty, AL network error, AL 403/429/5xx, and the
@@ -182,6 +182,23 @@ pub struct AnimeEntry {
     /// downstream conversion divides by 10.
     #[serde(default)]
     pub average_score: Option<i32>,
+}
+
+#[derive(Clone)]
+pub(crate) struct AnimeSearchHit {
+    pub entry: AnimeEntry,
+    pub release_date: Option<String>,
+    pub relations: Vec<RelatedEntry>,
+}
+
+impl From<AnimeEntry> for AnimeSearchHit {
+    fn from(entry: AnimeEntry) -> Self {
+        Self {
+            entry,
+            release_date: None,
+            relations: Vec::new(),
+        }
+    }
 }
 
 /// One entry from a user's AniList watch list, projected to the
@@ -545,6 +562,25 @@ pub async fn search_anime_with_options(
     query: &str,
     force_mal_fallback: bool,
 ) -> Result<Vec<AnimeEntry>, String> {
+    Ok(search_anime_hits(query, force_mal_fallback, false)
+        .await?
+        .into_iter()
+        .map(|hit| hit.entry)
+        .collect())
+}
+
+pub(crate) async fn search_anime_for_franchises(
+    query: &str,
+    force_mal_fallback: bool,
+) -> Result<Vec<AnimeSearchHit>, String> {
+    search_anime_hits(query, force_mal_fallback, true).await
+}
+
+async fn search_anime_hits(
+    query: &str,
+    force_mal_fallback: bool,
+    with_relations: bool,
+) -> Result<Vec<AnimeSearchHit>, String> {
     let query = query.trim();
     if query.is_empty() {
         return Ok(Vec::new());
@@ -552,6 +588,11 @@ pub async fn search_anime_with_options(
 
     // 1. Cache lookup — skip all upstream work for repeat queries within the TTL.
     let cache_key = normalize_search_key(force_mal_fallback, query);
+    let cache_key = if with_relations && !force_mal_fallback {
+        format!("franchises::{cache_key}")
+    } else {
+        cache_key
+    };
     if let Some(cached) = search_cache_get(&cache_key) {
         tracing::debug!(
             "anilist search cache hit for {:?} ({} results)",
@@ -562,7 +603,7 @@ pub async fn search_anime_with_options(
     }
 
     if force_mal_fallback {
-        let results = fallback_jikan(query, None).await?;
+        let results = fallback_search_hits(query, None).await?;
         search_cache_put(cache_key, results.clone());
         return Ok(results);
     }
@@ -577,7 +618,7 @@ pub async fn search_anime_with_options(
             "anilist search skipping AniList for {:?} (still in cooldown)",
             query
         );
-        let results = fallback_jikan(
+        let results = fallback_search_hits(
             query,
             Some("AniList rate-limited (skipped during cooldown)".to_string()),
         )
@@ -586,6 +627,22 @@ pub async fn search_anime_with_options(
         return Ok(results);
     }
 
+    let relation_fields = if with_relations {
+        r#"startDate { year month day }
+            relations {
+                edges {
+                    relationType(version: 2)
+                    node {
+                        id idMal type format status episodes seasonYear
+                        title { romaji english native }
+                        coverImage { large }
+                        startDate { year month day }
+                    }
+                }
+            }"#
+    } else {
+        ""
+    };
     let gql = serde_json::json!({
         "query": r#"
             query ($search: String) {
@@ -607,10 +664,11 @@ pub async fn search_anime_with_options(
                         isAdult
                         seasonYear
                         averageScore
+                        RELATED_FIELDS
                     }
                 }
             }
-        "#,
+        "#.replace("RELATED_FIELDS", relation_fields),
         "variables": { "search": query }
     });
 
@@ -629,7 +687,7 @@ pub async fn search_anime_with_options(
                 e
             );
             let results =
-                fallback_jikan(query, Some(format!("AniList unreachable: {}", e))).await?;
+                fallback_search_hits(query, Some(format!("AniList unreachable: {}", e))).await?;
             search_cache_put(cache_key, results.clone());
             return Ok(results);
         }
@@ -682,7 +740,7 @@ pub async fn search_anime_with_options(
             403 => "AniList blocked our request (Cloudflare challenge)".to_string(),
             code => format!("AniList upstream error (HTTP {})", code),
         };
-        let results = fallback_jikan(query, Some(reason)).await?;
+        let results = fallback_search_hits(query, Some(reason)).await?;
         search_cache_put(cache_key, results.clone());
         return Ok(results);
     }
@@ -736,7 +794,16 @@ pub async fn search_anime_with_options(
         }
     };
 
-    let entries: Vec<AnimeEntry> = media.iter().filter_map(parse_search_entry).collect();
+    let entries: Vec<_> = media
+        .iter()
+        .filter_map(|node| {
+            Some(AnimeSearchHit {
+                entry: parse_search_entry(node)?,
+                release_date: premiere_date(&node["startDate"]),
+                relations: parse_media_relations(node),
+            })
+        })
+        .collect();
 
     search_cache_put(cache_key, entries.clone());
     Ok(entries)
@@ -762,6 +829,17 @@ fn parse_search_entry(m: &serde_json::Value) -> Option<AnimeEntry> {
             .filter(|&n| n > 0)
             .map(|s| s as i32),
     })
+}
+
+async fn fallback_search_hits(
+    query: &str,
+    reason: Option<String>,
+) -> Result<Vec<AnimeSearchHit>, String> {
+    Ok(fallback_jikan(query, reason)
+        .await?
+        .into_iter()
+        .map(Into::into)
+        .collect())
 }
 
 /// Shared fallback helper used when AniList is unavailable or force_mal_fallback is set.
@@ -1302,29 +1380,8 @@ async fn fetch_media_detail(selector: MediaSelector) -> Result<Vec<AnimeDetail>,
     })
 }
 
-/// Convert a single Media node from the AniList GraphQL response into
-/// `AnimeDetail`. Used by both the single-id `fetch_media_detail` path
-/// and the batched `get_anime_details_batch` path so the field plucking
-/// logic only lives in one place. Returns `None` when the `id` field is
-/// missing or non-numeric — every downstream consumer requires `id > 0`,
-/// so a 0-id placeholder would just leak into caches and confuse later
-/// `id > 0` filters into thinking the entry is a Jikan-fallback row.
-pub(crate) fn parse_media_node(m: &serde_json::Value) -> Option<AnimeDetail> {
-    let streaming_episodes = m["streamingEpisodes"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .map(|ep| StreamingEpisode {
-                    title: ep["title"].as_str().unwrap_or("").to_string(),
-                    thumbnail: ep["thumbnail"].as_str().unwrap_or("").to_string(),
-                    url: ep["url"].as_str().unwrap_or("").to_string(),
-                    site: ep["site"].as_str().unwrap_or("").to_string(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let relations = m["relations"]["edges"]
+fn parse_media_relations(m: &serde_json::Value) -> Vec<RelatedEntry> {
+    m["relations"]["edges"]
         .as_array()
         .map(|arr| {
             arr.iter()
@@ -1350,6 +1407,29 @@ pub(crate) fn parse_media_node(m: &serde_json::Value) -> Option<AnimeDetail> {
                         start_date: relation_start_date(&node["startDate"]),
                         media_type: node["type"].as_str().unwrap_or("").to_string(),
                     })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Convert a single Media node from the AniList GraphQL response into
+/// `AnimeDetail`. Used by both the single-id `fetch_media_detail` path
+/// and the batched `get_anime_details_batch` path so the field plucking
+/// logic only lives in one place. Returns `None` when the `id` field is
+/// missing or non-numeric — every downstream consumer requires `id > 0`,
+/// so a 0-id placeholder would just leak into caches and confuse later
+/// `id > 0` filters into thinking the entry is a Jikan-fallback row.
+pub(crate) fn parse_media_node(m: &serde_json::Value) -> Option<AnimeDetail> {
+    let streaming_episodes = m["streamingEpisodes"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|ep| StreamingEpisode {
+                    title: ep["title"].as_str().unwrap_or("").to_string(),
+                    thumbnail: ep["thumbnail"].as_str().unwrap_or("").to_string(),
+                    url: ep["url"].as_str().unwrap_or("").to_string(),
+                    site: ep["site"].as_str().unwrap_or("").to_string(),
                 })
                 .collect()
         })
@@ -1405,7 +1485,7 @@ pub(crate) fn parse_media_node(m: &serde_json::Value) -> Option<AnimeDetail> {
             })
             .unwrap_or_default(),
         streaming_episodes,
-        relations,
+        relations: parse_media_relations(m),
     })
 }
 
@@ -1902,10 +1982,10 @@ mod tests {
             source: "anilist".into(),
             average_score: Some(85),
         }];
-        search_cache_put(key.clone(), entries.clone());
+        search_cache_put(key.clone(), entries.into_iter().map(Into::into).collect());
         let got = search_cache_get(&key).expect("cached value should be present");
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].id, 42);
+        assert_eq!(got[0].entry.id, 42);
 
         // A different normalized key should miss.
         let other = normalize_search_key(false, "completely different");

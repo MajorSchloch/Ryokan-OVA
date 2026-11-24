@@ -29,11 +29,13 @@ pub(super) struct Browse {
     q: String,
     source: String,
     provider_id: Option<i64>,
+    franchise_id: Option<i64>,
 }
 
 #[derive(Deserialize)]
 pub(super) struct Save {
     provider_id: i64,
+    franchise_id: Option<i64>,
     q: String,
     source: String,
     monitor_mode: Choice,
@@ -81,6 +83,8 @@ struct Setup {
     search_hint: &'static str,
 }
 
+mod discovery;
+
 #[derive(Template)]
 #[template(path = "add_anime.html")]
 struct AddPage {
@@ -89,13 +93,15 @@ struct AddPage {
     q: String,
     source: &'static str,
     back: String,
+    franchise_id: Option<i64>,
+    franchise: Option<discovery::Franchise>,
     results: Vec<ResultRow>,
     setup: Option<Setup>,
     error: &'static str,
 }
 
 impl AddPage {
-    fn new(cfg: &config::Config, q: String, source: &str) -> Self {
+    fn new(cfg: &config::Config, q: String, source: &str, franchise_id: Option<i64>) -> Self {
         let source = match source {
             "al" => "al",
             "mal" => "mal",
@@ -110,10 +116,22 @@ impl AddPage {
             q,
             source,
             back,
+            franchise_id: franchise_id.filter(|id| supported_provider(*id)),
+            franchise: None,
             results: Vec::new(),
             setup: None,
             error: "",
         }
+    }
+
+    fn franchise_path(&self, id: i64) -> String {
+        format!("{}&franchise_id={id}", self.back)
+    }
+
+    fn back_to_setup_parent(&self) -> String {
+        self.franchise_id
+            .map(|id| self.franchise_path(id))
+            .unwrap_or_else(|| self.back.clone())
     }
 
     fn into_response(self) -> Response {
@@ -209,9 +227,25 @@ fn supported_provider(id: i64) -> bool {
 }
 
 async fn existing(state: &AppState, id: i64) -> Result<Option<series::Series>, sqlx::Error> {
-    resolve_series_request(&state.db, id, true)
-        .await
-        .map(|(row, _)| row)
+    let (row, _) = resolve_series_request(&state.db, id, true).await?;
+    if let Some(row) = &row
+        && id > 0
+        && row.anilist_id < 0
+    {
+        // A title search can know about a new split before the local cache does.
+        // An existing MAL row must explicitly identify this AniList release.
+        let confirmed: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM series_metadata_cache WHERE series_id=? AND provider_id=?)",
+        )
+        .bind(row.id)
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?;
+        if !confirmed {
+            return Ok(None);
+        }
+    }
+    Ok(row)
 }
 
 pub(super) async fn page(
@@ -224,7 +258,7 @@ pub(super) async fn page(
         .ok()
         .flatten()
         .unwrap_or_default();
-    let mut view = AddPage::new(&cfg, query.q, &query.source);
+    let mut view = AddPage::new(&cfg, query.q, &query.source, query.franchise_id);
     if let Some(id) = query.provider_id {
         if !supported_provider(id) {
             return (StatusCode::BAD_REQUEST, "Choose a valid anime.").into_response();
@@ -246,58 +280,21 @@ pub(super) async fn page(
             }
             Err(_) => view.error = "Could not load this anime. Search again or try later.",
         }
+    } else if let Some(seed) = view.franchise_id {
+        match discovery::open(&state, &view, seed).await {
+            Ok(franchise) => view.franchise = Some(franchise),
+            Err(error) => {
+                tracing::warn!(%error, "Could not open Add Anime franchise");
+                view.error = "Could not open this franchise. Search again or try later.";
+            }
+        }
     } else if !view.q.is_empty()
-        && let Err(error) = find_results(&state, &mut view).await
+        && let Err(error) = discovery::find_results(&state, &mut view).await
     {
         tracing::warn!(%error, "Add Anime search failed");
         view.error = "Could not load search results. Try again or choose the other provider.";
     }
     view.into_response()
-}
-
-async fn find_results(state: &AppState, view: &mut AddPage) -> Result<(), String> {
-    let entries = anilist::search_anime_with_options(&view.q, view.source == "mal").await?;
-    let ids = entries.iter().map(|entry| entry.id).collect::<Vec<_>>();
-    let exact = series::get_by_anilist_ids(&state.db, &ids)
-        .await
-        .map_err(|error| error.to_string())?;
-    let mut results = Vec::with_capacity(entries.len());
-    for entry in entries
-        .into_iter()
-        .filter(|entry| supported_provider(entry.id))
-    {
-        let provider = match exact.get(&entry.id) {
-            Some(row) => Some(row.anilist_id),
-            None if entry.id < 0 || entry.id_mal.is_some() => existing(state, entry.id)
-                .await
-                .map_err(|error| error.to_string())?
-                .map(|row| row.anilist_id),
-            None => None,
-        };
-        let title = title(
-            &view.title_language,
-            &entry.title_english,
-            &entry.title_romaji,
-            &entry.title_native,
-        );
-        let subtitle = [&entry.title_english, &entry.title_romaji]
-            .into_iter()
-            .find(|candidate| !candidate.is_empty() && candidate.as_str() != title)
-            .cloned()
-            .unwrap_or_default();
-        results.push(ResultRow {
-            title,
-            subtitle,
-            cover: entry.cover_url,
-            facts: facts(&entry.format, entry.episodes, entry.season_year),
-            href: provider
-                .map(detail::path)
-                .unwrap_or_else(|| format!("{}&provider_id={}", view.back, entry.id)),
-            existing: provider.is_some(),
-        });
-    }
-    view.results = results;
-    Ok(())
 }
 
 pub(super) async fn save(
@@ -313,7 +310,7 @@ pub(super) async fn save(
         .ok()
         .flatten()
         .unwrap_or_default();
-    let mut view = AddPage::new(&cfg, form.q, &form.source);
+    let mut view = AddPage::new(&cfg, form.q, &form.source, form.franchise_id);
     match existing(&state, form.provider_id).await {
         Ok(Some(row)) => return htmx_aware_redirect(htmx, &detail::path(row.anilist_id)),
         Ok(None) => {}
@@ -350,6 +347,7 @@ pub(super) async fn save(
         Some(AddOptions {
             mode: form.monitor_mode.into(),
             search_now: form.search_now,
+            detail: &data,
         }),
     )
     .await
