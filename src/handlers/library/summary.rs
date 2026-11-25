@@ -1,7 +1,7 @@
 //! Read-only summaries of managed episode files and current requirement facts.
 use crate::{
-    models::{config, series},
-    services::{language_preferences, media, media_info, media_requirements},
+    models::{config, metadata_cache, series},
+    services::{anilist, language_preferences, media, media_info, media_requirements},
 };
 use sqlx::SqlitePool;
 use std::{
@@ -367,6 +367,19 @@ pub(super) fn franchise_title_provider(group: &super::groups::Group) -> Option<i
             .or_else(|| group.entries.first())
             .map(|entry| entry.provider_id),
         _ => None,
+    }
+}
+
+pub(super) async fn provider_ratings(db: &SqlitePool, provider_ids: &[i64]) -> HashMap<i64, i32> {
+    match metadata_cache::exact_cached_details(db, provider_ids).await {
+        Ok(details) => details
+            .into_iter()
+            .filter_map(|(id, detail)| anilist::detail_rating(&detail).map(|rating| (id, rating)))
+            .collect(),
+        Err(error) => {
+            tracing::debug!(%error, "Could not read cached provider ratings");
+            HashMap::new()
+        }
     }
 }
 

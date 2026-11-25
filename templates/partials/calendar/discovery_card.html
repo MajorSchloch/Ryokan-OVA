@@ -2,7 +2,8 @@
     {% if !card.cover.is_empty() %}<a href="{{ crate::handlers::library::detail::path(card.id) }}" class="discovery-cover-link" title="Open details for {{ card.title }}"><img src="{{ card.cover }}" alt="" loading="lazy" width="44" height="62"></a>{% endif %}
     <div class="discovery-info">
         <a href="{{ crate::handlers::library::detail::path(card.id) }}"><strong>{{ card.title }}</strong></a>
-        <small>{% if card.format.is_empty() %}Format unknown{% else %}{{ card.format }}{% endif %}{% if !card.date.is_empty() %} · {{ card.date }}{% endif %} · {% if card.library_id.is_some() %}In library{% else %}Outside library{% endif %}</small>
+        <small>{% if card.format.is_empty() %}Format unknown{% else %}{{ card.format }}{% endif %}{% if !card.date.is_empty() %} · {{ card.date }}{% endif %} · {% if card.library_id.is_some() %}In library{% else %}Outside library{% endif %}{% if let Some(score) = card.rating %} · {% call provider_rating::badge(score) %}{% endcall %}{% endif %}</small>
+        {% if let Some(link) = card.franchise %}<small class="discovery-franchise">{{ link.label }} · <a href="{{ link.href }}">{{ link.title }}</a></small>{% endif %}
     </div>
     {% if let Some(id) = card.library_id %}
     <a class="btn btn-secondary btn-sm" href="/series/{{ id }}">Open in library</a>

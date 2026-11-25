@@ -60,7 +60,7 @@ pub(crate) async fn future_controls(
 use crate::{
     models::{config, local_metadata, series},
     services::{
-        anilist::{AnimeDetail, AnimeSearchHit, RelatedEntry},
+        anilist::{AnimeDetail, AnimeSearchHit, RelatedEntry, detail_rating, valid_rating},
         library_link::pick_title,
     },
 };
@@ -115,6 +115,7 @@ pub(super) struct Entry {
 struct RelationLabel {
     label: String,
     peer: String,
+    peer_id: i64,
     outside: bool,
     within_group: bool,
 }
@@ -136,39 +137,31 @@ fn date_label(date: Option<&str>, year: Option<i32>) -> String {
         .unwrap_or_default()
 }
 
-pub(super) fn valid_rating(score: Option<i32>) -> Option<i32> {
-    score.filter(|score| (1..=100).contains(score))
-}
-
-pub(super) fn detail_rating(detail: &AnimeDetail) -> Option<i32> {
-    if !detail.score_is_ten_point {
-        return valid_rating(detail.average_score);
-    }
-    // MAL's display value preserves the decimal places lost in average_score.
-    let score = detail
-        .average_score_display
-        .as_deref()
-        .and_then(|score| score.strip_suffix("/10"))
-        .and_then(|score| score.parse::<f64>().ok())
-        .or_else(|| detail.average_score.map(f64::from))
-        .filter(|score| (0.0..=10.0).contains(score))?;
-    valid_rating(Some((score * 10.0).round() as i32))
-}
-
 impl Entry {
-    pub(super) fn relationship(&self) -> Option<(&str, &str)> {
+    pub(super) fn relationships(&self) -> impl Iterator<Item = (&str, &str, i64)> {
+        let rank = |link: &RelationLabel| match link.label.as_str() {
+            "Sequel to" => 0,
+            "Summary of" => 1,
+            "Side story of" | "Spin-off of" => 2,
+            "Alternative to" => 3,
+            "Related to" => 4,
+            _ => 5,
+        };
+        let links = self.links.iter().filter(|link| {
+            link.within_group
+                && !link.peer.trim().is_empty()
+                && (link.label != "Sequel to" || !self.has_conflicting_predecessor(link.peer_id))
+        });
+        let best = links.clone().map(rank).min();
+        links
+            .filter(move |link| Some(rank(link)) == best)
+            .map(|link| (link.label.as_str(), link.peer.as_str(), link.peer_id))
+    }
+
+    pub(super) fn has_conflicting_predecessor(&self, predecessor: i64) -> bool {
         self.links
             .iter()
-            .filter(|link| link.within_group && !link.peer.trim().is_empty())
-            .min_by_key(|link| match link.label.as_str() {
-                "Sequel to" => 0,
-                "Side story of" => 1,
-                "Spin-off of" => 2,
-                "Summary of" => 3,
-                "Alternative to" => 4,
-                _ => 5,
-            })
-            .map(|link| (link.label.as_str(), link.peer.as_str()))
+            .any(|link| link.peer_id == predecessor && link.label != "Sequel to")
     }
 
     fn release_key(&self) -> String {
@@ -241,7 +234,7 @@ impl Catalog {
             "ALTERNATIVE" => ("Alternative to", "Alternative to"),
             "SIDE_STORY" => ("Side story of", "Parent of"),
             "SPIN_OFF" => ("Spin-off of", "Parent of"),
-            "PARENT" | "PARENT_STORY" => ("Parent of", "Side story of"),
+            "PARENT" | "PARENT_STORY" => ("Parent of", "Related to"),
             "SUMMARY" => ("Summary of", "Full story of"),
             "FULL_STORY" => ("Full story of", "Summary of"),
             _ => return,
@@ -435,6 +428,7 @@ impl Catalog {
                         Some(RelationLabel {
                             label: (*label).into(),
                             peer: other.title.clone(),
+                            peer_id: *peer,
                             outside: other.series_id.is_none(),
                             within_group: member_ids.contains(peer),
                         })

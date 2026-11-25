@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "partials/provider_rating.html" as provider_rating %}
 {% block title %} - {{ title }}{% endblock %}
 {% block content %}
 <div data-title-page data-default-tab="releases">
@@ -10,6 +11,7 @@
         <p class="franchise-eyebrow">Franchise</p>
         <h2 id="franchise-title">{{ title }}</h2>
         <p class="franchise-card-summary">{{ tracked }} release{% if tracked != 1 %}s{% endif %} in library{% if upcoming_releases > 0 %} · {{ upcoming_releases }} upcoming release{% if upcoming_releases != 1 %}s{% endif %}{% endif %}</p>
+        {% if let Some(score) = provider_rating %}<p class="franchise-card-summary">Main release {% call provider_rating::badge(score) %}{% endcall %}</p>{% endif %}
         <div class="franchise-follow-status">
             <span class="chip{% if !future.enabled %} chip-dim{% endif %}">{% if future.enabled %}Follows future releases{% else %}Future releases off{% endif %}</span>
             {% if seed > 0 %}<a class="btn btn-secondary btn-sm" href="?tab=settings" data-title-tab="settings">Follow settings</a>{% endif %}
@@ -48,7 +50,7 @@
         <a class="franchise-release-cover" href="{{ release.path }}" aria-label="Open {{ release.title }}">{% if !release.cover_url.is_empty() %}<img src="{{ release.cover_url }}" alt="" loading="lazy">{% else %}<span class="series-cover-placeholder">No Image</span>{% endif %}</a>
         <div class="franchise-release-info">
             <h4><a href="{{ release.path }}">{{ release.title }}</a></h4>
-            <div class="series-meta"><span class="tag tag-res">{{ release.format }}</span><span>{{ release.date }}</span></div>
+            <div class="series-meta"><span class="tag tag-res">{{ release.format }}</span><span>{{ release.date }}</span>{% if let Some(score) = release.provider_rating %}{% call provider_rating::badge(score) %}{% endcall %}{% endif %}</div>
             <div class="release-monitoring-badges">
                 {% if release.in_library %}<span class="chip chip-dim">{{ release.monitoring_label }}</span>{% else %}<span class="chip chip-dim">Outside library</span>{% endif %}
                 {% if release.progress.following %}<span class="chip">Selected in follow</span>{% endif %}

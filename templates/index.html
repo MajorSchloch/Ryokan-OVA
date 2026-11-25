@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "partials/provider_rating.html" as provider_rating %}
 {# Per-page CSS now bundled in base.html — see comment there. #}
 
 {% block title %} - Library{% endblock %}
@@ -217,6 +218,7 @@
             </ul>
             {% endif %}
             <p class="franchise-card-summary">{{ franchise.tracked }} release{% if franchise.tracked != 1 %}s{% endif %} in library{% if franchise.available > 0 %} &middot; {{ franchise.available }} more{% endif %}</p>
+            {% if let Some(score) = franchise.provider_rating %}<p class="franchise-card-formats">Main release {% call provider_rating::badge(score) %}{% endcall %}</p>{% endif %}
             {% if !franchise.formats.is_empty() %}<p class="franchise-card-formats">{{ franchise.formats }}</p>{% endif %}
             {% if franchise.progress.files.complete_scan || franchise.progress.files.episodes > 0 %}
             <p class="franchise-card-progress" data-summary-part="episodes">{% if !franchise.progress.files.complete_scan %}At least {% endif %}{{ franchise.progress.files.episodes }} downloaded</p>
@@ -268,6 +270,7 @@
                 <span class="tag tag-res">{% if !s.format.is_empty() %}{{ s.format.replace("_", " ") }}{% else %}TBA{% endif %}</span>
                 {% if let Some(eps) = s.episodes %}<span class="tag tag-res series-eps">{{ eps }} eps</span>{% endif %}
                 <span class="tag tag-status-{{ s.status|lowercase }}">{{ s.status.replace("_", " ") }}</span>
+                {% if let Some(score) = provider_ratings.get(&s.anilist_id).copied() %}{% call provider_rating::badge(score) %}{% endcall %}{% endif %}
                 {# #62 — user's personal score from their linked
                    AL/MAL account. Hidden when no account is linked or
                    the user hasn't rated this series. #}

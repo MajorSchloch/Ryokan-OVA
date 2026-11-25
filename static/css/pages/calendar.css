@@ -36,19 +36,40 @@
 
 
 
-/* Filters row — search input + per-mode toggle pills sit to the
-   right of the range tabs. On mobile they stack via the existing
-   .calendar-toolbar @media flex-direction: column. */
 .calendar-filters {
     display: flex;
-    align-items: center;
-    gap: 12px;
+    align-items: end;
+    gap: 10px;
     flex-wrap: wrap;
 }
 
+.calendar-list > .calendar-toolbar { margin-bottom: 0; }
+
+.calendar-filter-field {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+    color: var(--text-dim);
+    font-size: 12px;
+}
+
+.calendar-filter-field select {
+    height: 40px;
+    max-width: 100%;
+    padding: 0 25px 0 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background-color: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+}
+
+.calendar-filter-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
 .calendar-series-search {
-    width: 220px;
-    height: 32px;
+    width: min(220px, 100%);
+    height: 40px;
     padding: 0 10px;
     background: var(--bg);
     border: 1px solid var(--border);
@@ -57,43 +78,6 @@
     font-size: 13px;
     font-family: inherit;
     transition: border-color 0.15s;
-}
-
-.calendar-series-search:focus {
-    outline: none;
-    border-color: var(--accent);
-}
-
-.calendar-series-search::placeholder {
-    color: var(--text-dim);
-}
-
-/* Shared shape for the per-mode checkboxes (premieres-only,
-   monitored-only). Inline label that reads as a pill of small
-   text + checkbox so it doesn't compete visually with the search
-   input. */
-.calendar-toggle-filter {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--text-dim);
-    font-size: 13px;
-    cursor: pointer;
-    user-select: none;
-}
-
-/* Backwards-compat: the original `.calendar-monitored-filter`
-   class is still referenced by tests / older snapshots if we
-   ever pick it up, but new markup uses `.calendar-toggle-filter`
-   for the same shape. */
-.calendar-monitored-filter {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--text-dim);
-    font-size: 13px;
-    cursor: pointer;
-    user-select: none;
 }
 
 .calendar-list {
@@ -116,8 +100,7 @@
 .calendar-period-label { margin: 0 0 4px; font-size: 16px; }
 .calendar-period-heading small { display: block; margin: 0; }
 .calendar-date-form label { font-size: 12px; color: var(--text-dim); }
-.calendar-date-form input[type="date"],
-.calendar-date-form select {
+.calendar-date-form input[type="date"] {
     max-width: 160px;
     min-width: 0;
     height: 40px;
@@ -131,7 +114,6 @@
     color-scheme: dark;
 }
 .calendar-period [aria-disabled="true"] { opacity: .45; cursor: default; }
-.calendar-filter-empty[hidden] { display: none; }
 
 @media (max-width: 700px) {
     .calendar-period { justify-content: center; }
@@ -195,13 +177,6 @@
     border-left: 3px solid var(--accent);
     padding-left: 12px;
     margin-left: -15px;
-}
-
-/* Hidden-by-filter sections + episodes — `display: none` so the
-   container's flex/grid doesn't reserve their space. */
-.calendar-day-hidden,
-.calendar-episode-hidden {
-    display: none;
 }
 
 .calendar-day-episodes {
@@ -525,6 +500,11 @@
         flex: 1 1 auto;
         text-align: center;
     }
+    .calendar-filter-field {
+        flex: 1 1 135px;
+    }
+    .calendar-filter-field:first-of-type { flex-basis: 100%; }
+    .calendar-filter-field :is(input, select) { width: 100%; }
     .calendar-day-label {
         top: 0;
     }
@@ -600,5 +580,4 @@
 .calendar-file-status-pending summary { color: var(--accent); }
 .calendar-month-entry { min-width: 0; }
 .calendar-month-entry .calendar-file-status { margin: 0 .3rem .4rem; font-size: .7rem; }
-.calendar-date-form select { max-width: 210px; }
-@media (max-width: 600px) { .calendar-file-status summary { min-height: 44px; } .calendar-date-form select { max-width: 100%; } }
+@media (max-width: 600px) { .calendar-file-status summary { min-height: 44px; } }

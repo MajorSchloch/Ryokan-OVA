@@ -64,7 +64,7 @@ async fn no_file_is_distinct_from_unavailable_library_and_future_or_unmonitored(
 }
 #[tokio::test]
 async fn routed_pending_has_no_parent_leak_and_displays_only_its_import_hold() {
-    let (db, cfg, mut eps, _root) = fixture().await;
+    let (db, cfg, mut eps, root) = fixture().await;
     let id = eps[0].series_id;
     let other = seed_series(&db, 102, "Other").await;
     let gid:i64=sqlx::query_scalar("INSERT INTO grabbed_torrents(hash,torrent_name,series_id,episode_numbers,state) VALUES('hash','pack',?,'[6]','pending') RETURNING id").bind(other).fetch_one(&db).await.unwrap();
@@ -88,8 +88,20 @@ async fn routed_pending_has_no_parent_leak_and_displays_only_its_import_hold() {
     let out = load(&db, &cfg, &mut eps, 200).await.unwrap();
     assert_eq!(out[&(id, 6)].kind, "missing");
     assert_eq!(out[&(id, 7)].kind, "pending");
+    assert!(out[&(id, 7)].matches("pending"));
+    assert!(out[&(id, 7)].matches("held"));
+    assert!(!out[&(id, 6)].matches("held"));
     assert!(out[&(id, 7)].explanation.contains("review required"));
     assert!(!out[&(id, 6)].explanation.contains("review required"));
+
+    std::fs::create_dir(root.path().join("Test")).unwrap();
+    std::fs::write(root.path().join("Test/Test - S01E07.mkv"), b"file").unwrap();
+    let out = load(&db, &cfg, &mut eps, 200).await.unwrap();
+    let upgrade_held = &out[&(id, 7)];
+    assert_eq!(upgrade_held.label, "Available");
+    assert!(upgrade_held.matches("available"));
+    assert!(upgrade_held.matches("held"));
+    assert!(upgrade_held.explanation.contains("review required"));
 }
 #[tokio::test]
 async fn last_check_is_bound_to_exact_episode_and_current_provider_identity() {

@@ -87,6 +87,7 @@ struct IndexTemplate {
     /// template's dense `s.*` field references stay untouched.
     cards: Vec<(series::Series, CardProgress)>,
     search_titles: std::collections::HashMap<i64, String>,
+    provider_ratings: std::collections::HashMap<i64, i32>,
     franchise_cards: Vec<navigation::FranchiseCard>,
     individual: bool,
     franchise_count: usize,
@@ -176,6 +177,7 @@ struct SeriesTemplate {
     automatic_checks: Option<std::collections::HashMap<(i64, i32), String>>,
     automatic_recovery_off: bool,
     detail: anilist::AnimeDetail,
+    provider_rating: Option<i32>,
     is_tracked: bool,
     db_id: Option<i64>,
     folder_name: String,

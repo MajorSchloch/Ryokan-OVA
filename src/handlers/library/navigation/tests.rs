@@ -317,6 +317,76 @@ async fn grouped_posters_are_default_and_release_mode_keeps_bulk_library_ids() {
 }
 
 #[tokio::test]
+async fn library_ratings_use_the_main_release_and_omit_unknown_scores() {
+    let db = in_memory_pool().await;
+    release(&db, 100, "First show", "Franchise").await;
+    release(&db, 200, "Second season", "Franchise").await;
+    release(&db, 300, "Unrated show", "Unrated").await;
+    for (id, score) in [(100, 84), (200, 97)] {
+        let mut detail = metadata_cache::get_by_provider_id(&db, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .detail;
+        detail.average_score = Some(score);
+        metadata_cache::upsert_provider(&db, id, None, &detail)
+            .await
+            .unwrap();
+    }
+    sqlx::query("UPDATE provider_metadata_cache SET cached_at=datetime('now','-20 days') WHERE provider_id=100")
+        .execute(&db)
+        .await
+        .unwrap();
+    let badges = |html, selector| {
+        let doc = scraper::Html::parse_document(html);
+        let selector = scraper::Selector::parse(selector).unwrap();
+        let mut ratings: Vec<_> = doc
+            .select(&selector)
+            .map(|el| el.text().last().unwrap_or_default().trim().to_owned())
+            .collect();
+        ratings.sort_unstable();
+        ratings
+    };
+    let grouped = index_html(&db, None, None).await;
+    assert_eq!(
+        badges(&grouped, ".franchise-card .provider-rating"),
+        ["84%"]
+    );
+    let individual = index_html(&db, Some("1"), None).await;
+    assert_eq!(
+        badges(&individual, ".series-card .provider-rating"),
+        ["84%", "97%"]
+    );
+
+    let (page_id, _) = library_layout::page_for_provider(&db, 100)
+        .await
+        .unwrap()
+        .unwrap();
+    let Html(franchise) = page(
+        State(build_test_app_state(db.clone(), None)),
+        Path(page_id),
+        Query(Default::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        badges(&franchise, ".franchise-heading .provider-rating"),
+        ["84%"]
+    );
+    assert_eq!(
+        badges(&franchise, ".franchise-release-row .provider-rating"),
+        ["84%", "97%"]
+    );
+
+    let response = super::super::table::page(State(db)).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let table = std::str::from_utf8(&bytes).unwrap();
+    assert_eq!(badges(table, "tbody .provider-rating"), ["84%", "97%"]);
+}
+
+#[tokio::test]
 async fn poster_review_link_opens_only_held_releases_on_first_load() {
     let db = in_memory_pool().await;
     release(&db, 100, "First show", "Franchise").await;

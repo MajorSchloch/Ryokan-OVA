@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "partials/provider_rating.html" as provider_rating %}
 {% block title %} - Library table{% endblock %}
 {% block content %}
 <section id="library-table">
@@ -72,7 +73,7 @@
             <tbody>
             {% for row in rows %}
             <tr data-aliases="{{ row.aliases }}" data-mode="{{ row.mode }}" data-follow="{% if row.followed %}yes{% else %}no{% endif %}">
-                <td data-value="{{ row.title }}"><a href="{{ row.href }}">{{ row.title }}</a>{% if row.follow_only %}<small>Follow only</small>{% endif %}</td>
+                <td data-value="{{ row.title }}"><a href="{{ row.href }}">{{ row.title }}</a>{% if let Some(score) = row.provider_rating %}<small>{% call provider_rating::badge(score) %}{% endcall %}</small>{% endif %}{% if row.follow_only %}<small>Follow only</small>{% endif %}</td>
                 <td>{% if row.format.is_empty() %}Unknown{% else %}{{ row.format }}{% endif %}</td>
                 <td>{% if row.status.is_empty() %}Unknown{% else %}{{ row.status }}{% endif %}</td>
                 <td class="table-mode">{% if row.follow_only %}—{% else %}{{ row.mode }}{% endif %}</td>

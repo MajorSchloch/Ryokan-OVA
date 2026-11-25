@@ -1,37 +1,7 @@
-// /calendar page lifecycle (issue #116). HTMX-driven swap:
-//
-//   1. Range tabs (this week / next week / month) carry hx-get
-//      against the same /calendar URL. The handler branches on
-//      HxRequest and returns the partials/calendar/list.html
-//      partial, which htmx swaps into #calendar-list. No JS
-//      involvement needed here — this file only re-applies post-
-//      swap hydrators (time, today-highlight, local filters).
-//
-//   2. "Monitored only" toggle uses htmx.ajax() to fetch the
-//      same partial with the new query string, keeping the URL
-//      bar honest via the `push` option (hx-push-url semantics).
-//
-//   3. iCal subscribe modal opens on the page-header button and
-//      composes the subscription URL by fetching the picked
-//      key's plaintext via /api/api-keys/{id}/reveal (cookie-auth
-//      gated same as Settings).
-//
-// `var` at module scope per CLAUDE.md hx-boost re-execution rule.
+// Calendar controls, local episode times, and the iCal subscription dialog.
 
 (function () {
     if (!document.getElementById('calendar-list')) return;
-
-    function activeRange() {
-        var period = document.querySelector('.calendar-period');
-        if (period) return period.dataset.range;
-        var t = document.querySelector('.calendar-range-tab.active');
-        return t ? t.dataset.range : 'this_week';
-    }
-
-    function monitoredOnly() {
-        var cb = document.getElementById('calendar-monitored-toggle');
-        return cb ? cb.checked : false;
-    }
 
     function fmtTime(unixTs) {
         try {
@@ -45,83 +15,28 @@
         }
     }
 
-    function calendarUrl() {
-        var url = new URL(window.location.href);
-        url.pathname = '/calendar';
-        url.hash = '';
-        url.searchParams.set('range', activeRange());
-        var period = document.querySelector('.calendar-period');
-        if (period) url.searchParams.set('date', period.dataset.date);
-        carryFilters(url);
-        return url.pathname + url.search;
-    }
-
-    function carryFilters(url) {
-        var status = document.getElementById('calendar-status');
-        if (status && status.value !== 'all') url.searchParams.set('status', status.value);
-        else url.searchParams.delete('status');
-        if (monitoredOnly()) url.searchParams.set('monitored', 'true');
-        else url.searchParams.delete('monitored');
-        var input = document.getElementById('calendar-series-search');
-        var search = input ? input.value.trim().slice(0, 128) : '';
-        if (search) url.searchParams.set('search', search);
-        else url.searchParams.delete('search');
-    }
-
-    // Patch each tab's `href` + `hx-get` to carry the current
-    // monitored-only state forward, so toggling monitored then
-    // clicking a range doesn't reset it.
-    function syncRangeTabHrefs() {
-        document.querySelectorAll('.calendar-range-tab').forEach(function (a) {
-            var url = new URL(calendarUrl(), window.location.origin);
-            url.searchParams.set('range', a.dataset.range);
-            a.setAttribute('href', url.pathname + url.search);
-            a.setAttribute('hx-get', url.pathname + url.search);
-        });
-        document.querySelectorAll('.calendar-period-link').forEach(function (a) {
-            var url = new URL(a.href, window.location.origin);
-            carryFilters(url);
-            a.setAttribute('href', url.pathname + url.search);
-            a.setAttribute('hx-get', url.pathname + url.search);
-        });
-        var form = document.querySelector('.calendar-date-form');
-        if (form) {
-            ['monitored', 'search'].forEach(function (name) {
-                var value = new URL(calendarUrl(), window.location.origin).searchParams.get(name);
-                var field = form.querySelector('input[name="' + name + '"]');
-                if (!value) { if (field) field.remove(); return; }
-                if (!field) {
-                    field = document.createElement('input');
-                    field.type = 'hidden'; field.name = name; form.appendChild(field);
-                }
-                field.value = value;
-            });
-        }
-    }
-
-    // ── Monitored-only toggle (HTMX swap) ───────────────────────
-    var monToggle = document.getElementById('calendar-monitored-toggle');
-    if (monToggle && window.htmx) {
-        monToggle.addEventListener('change', function () {
-            syncRangeTabHrefs();
-            // htmx.ajax with target+swap mirrors what hx-get would
-            // do declaratively, plus push for back/forward.
-            // `push` takes the hx-push-url vocabulary: the string
-            // 'true' pushes the request URL. A boolean true is read
-            // as a URL and pushes a page literally named /true.
-            window.htmx.ajax('GET', calendarUrl(), {
-                target: '#calendar-list',
-                swap: 'innerHTML',
-                push: 'true',
+    if (window.htmx && !window.ryokanCalendarFilterControls) {
+        window.ryokanCalendarFilterControls = true;
+        document.addEventListener('change', function (event) {
+            var select = event.target;
+            if (!select.matches('[data-calendar-filter-select]')) return;
+            var fields = new URLSearchParams(new FormData(select.form));
+            var current = new URLSearchParams(window.location.search);
+            var title = fields.get('search').trim();
+            if (title) fields.set('search', title);
+            else fields.delete('search');
+            if (fields.get('status') === 'all') fields.delete('status');
+            var monitoring = fields.get('monitoring');
+            if (monitoring === 'all') fields.delete('monitoring');
+            else if (monitoring === 'monitored' && current.get('monitored') === 'true') {
+                fields.delete('monitoring');
+                fields.set('monitored', 'true');
+            }
+            window.htmx.ajax('GET', '/calendar?' + fields, {
+                target: '#calendar-list', swap: 'innerHTML', push: 'true',
             });
         });
     }
-
-    document.body.addEventListener('change', function (event) {
-        if (event.target.id !== 'calendar-status' || !window.htmx) return;
-        syncRangeTabHrefs();
-        window.htmx.ajax('GET', calendarUrl(), { target: '#calendar-list', swap: 'innerHTML', push: 'true' });
-    });
 
     // ── iCal subscribe modal ────────────────────────────────────
 
@@ -230,102 +145,18 @@
         return todayEl;
     }
 
-    // ── Local filter: series-name search ────────────────────────
-    // Premiere status is now a passive visual indicator (badge in
-    // list view, ★ + accent border in grid view), not a filter.
-    var seriesSearchInput = document.getElementById('calendar-series-search');
-
-    function applyLocalFilters(root) {
-        var query = seriesSearchInput ? seriesSearchInput.value.trim().toLowerCase() : '';
-        var scope = root || document;
-
-        // List view — day-grouped sections.
-        scope.querySelectorAll('.calendar-day').forEach(function (day) {
-            var visibleCount = 0;
-            day.querySelectorAll('.calendar-episode').forEach(function (ep) {
-                var name = ep.dataset.seriesName || '';
-                var matches = !query || name.indexOf(query) !== -1;
-                ep.classList.toggle('calendar-episode-hidden', !matches);
-                if (matches) visibleCount++;
-            });
-            day.classList.toggle('calendar-day-hidden', visibleCount === 0);
-            var countEl = day.querySelector('.calendar-day-label-count');
-            if (countEl) {
-                var totalEps = day.querySelectorAll('.calendar-episode').length;
-                if (visibleCount < totalEps) {
-                    countEl.textContent = visibleCount + ' / ' + totalEps + ' eps';
-                } else {
-                    countEl.textContent = totalEps + (totalEps === 1 ? ' ep' : ' eps');
-                }
-            }
-        });
-
-        // Grid view — filter pills per cell. Cells stay in place
-        // (hiding them would break the 7-column rectangle); only
-        // non-matching pills get hidden.
-        scope.querySelectorAll('.calendar-month-entry').forEach(function (pill) {
-            var name = pill.dataset.seriesName || '';
-            var matches = !query || name.indexOf(query) !== -1;
-            pill.classList.toggle('calendar-episode-hidden', !matches);
-        });
-        var empty = scope.querySelector('.calendar-filter-empty');
-        if (empty) {
-            var cards = scope.querySelectorAll('.calendar-episode, .calendar-month-entry');
-            var visible = Array.prototype.some.call(cards, function (card) {
-                return !card.classList.contains('calendar-episode-hidden');
-            });
-            empty.hidden = !query || !cards.length || visible;
-        }
+    function hydrateCalendar() {
+        var root = document.getElementById('calendar-list');
+        if (!root) return;
+        hydrateTimes(root);
+        applyTodayHighlight(root);
+        var period = root.querySelector('.calendar-period');
+        if (period) root.dataset.viewMode = period.dataset.range === 'month' ? 'grid' : 'list';
     }
 
-    if (seriesSearchInput) {
-        seriesSearchInput.addEventListener('input', function () {
-            applyLocalFilters();
-            window.history.replaceState(window.history.state, '', calendarUrl());
-            syncRangeTabHrefs();
-        });
-    }
-
-    // Initial paint hydrators + first scroll-to-today.
-    hydrateTimes();
-    applyTodayHighlight();
-    applyLocalFilters();
-    // Keep navigation visible; loading the current day must not scroll
-    // the date controls out of view.
-    syncRangeTabHrefs();
-
-    // ── Re-hydrate after every HTMX swap of #calendar-list ──────
-    // The handler returns the same partial used for the initial
-    // render, but the DOM nodes are fresh — so the timestamps,
-    // today-highlight, and local filters all need re-applying.
-    // htmx 4 dispatches after:swap on the request's source element
-    // (the range tab, which sits outside the list), so the listener
-    // lives on body and matches the swap target by id; a listener
-    // on #calendar-list itself never fires for a tab click.
-    if (document.getElementById('calendar-list')) {
-        document.body.addEventListener('htmx:after:swap', function (ev) {
-            if (window.ryokanSwapTargetId(ev) !== 'calendar-list') return;
-            // Re-run the hydrators against the current list root so
-            // we don't pick up stale handles.
-            var root = document.getElementById('calendar-list') || document;
-            hydrateTimes(root);
-            applyTodayHighlight(root);
-            applyLocalFilters(root);
-            // Active-tab class follows the range that was requested:
-            // the clicked tab's data-range when a tab made the
-            // request, else the URL (the monitored toggle keeps the
-            // range, so the URL already carries it). htmx doesn't
-            // update `.active` on swap.
-            try {
-                var range = activeRange();
-                document.querySelectorAll('.calendar-range-tab').forEach(function (a) {
-                    var on = a.dataset.range === range;
-                    a.classList.toggle('active', on);
-                    a.setAttribute('aria-selected', on ? 'true' : 'false');
-                });
-                root.dataset.viewMode = range === 'month' ? 'grid' : 'list';
-                syncRangeTabHrefs();
-            } catch (_) {}
-        });
+    hydrateCalendar();
+    if (window.htmx && !window.ryokanCalendarHydration) {
+        window.ryokanCalendarHydration = true;
+        window.htmx.onLoad(hydrateCalendar);
     }
 })();

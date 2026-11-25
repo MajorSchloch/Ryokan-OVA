@@ -33,7 +33,7 @@ async fn app() -> Router {
     .await
     .unwrap();
     let series = seed_series(&db, 100, "Calendar feature").await;
-    sqlx::query("UPDATE series SET monitor_mode='all',folder_name='Calendar feature' WHERE id=?")
+    sqlx::query("UPDATE series SET monitor_mode='all',folder_name='Calendar feature',alternate_titles='Star path' WHERE id=?")
         .bind(series)
         .execute(&db)
         .await
@@ -46,6 +46,19 @@ async fn app() -> Router {
         sqlx::query("INSERT INTO episode_airings(series_id,episode,airing_at,duration_minutes) VALUES(?,?,?,24)")
             .bind(series).bind(day as i32).bind(at).execute(&db).await.unwrap();
     }
+    let same_day = Utc
+        .with_ymd_and_hms(2026, 1, 1, 15, 0, 0)
+        .unwrap()
+        .timestamp();
+    sqlx::query("INSERT INTO episode_airings(series_id,episode,airing_at,duration_minutes) VALUES(?,42,?,24)")
+        .bind(series).bind(same_day).execute(&db).await.unwrap();
+    sqlx::query(
+        "INSERT INTO episode_monitor_state(series_id,episode_number,monitored) VALUES(?,42,0)",
+    )
+    .bind(series)
+    .execute(&db)
+    .await
+    .unwrap();
     sqlx::query("INSERT INTO grabbed_torrents(hash,torrent_name,series_id,episode_numbers,state) VALUES('pending','fixture',?,'[7]','pending')").bind(series).execute(&db).await.unwrap();
     Router::new()
         .layer(axum::Extension(root))
@@ -197,4 +210,45 @@ async fn availability_filter_is_shared_by_full_partial_list_and_grid_and_preserv
             assert!(!body.contains("calendar-file-status-unknown"));
         }
     }
+}
+
+#[tokio::test]
+async fn title_alias_monitoring_and_status_compose_in_every_range() {
+    let app = app().await;
+    for range in ["day", "this_week", "month"] {
+        let url = format!(
+            "/calendar?range={range}&date=2026-01-01&search=star%20path&monitoring=unmonitored&status=unmonitored"
+        );
+        let response = app
+            .clone()
+            .oneshot(Request::get(url).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("data-episode=\"42\""));
+        assert!(!body.contains("data-episode=\"1\""));
+        assert!(body.contains("calendar-file-status-unmonitored"));
+        assert!(body.contains("monitoring=unmonitored"));
+        assert!(body.contains("search=star%20path"));
+    }
+
+    let response = app
+        .oneshot(
+            Request::get("/calendar?range=day&date=2026-01-01&search=unrelated")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        std::str::from_utf8(&body)
+            .unwrap()
+            .contains("No saved episodes match these filters")
+    );
 }

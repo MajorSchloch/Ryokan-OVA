@@ -1,0 +1,44 @@
+<div class="calendar-toolbar">
+    <div class="calendar-range-tabs" role="tablist" aria-label="Calendar range">
+        <a href="{{ navigation.day }}" hx-get="{{ navigation.day }}" hx-target="#calendar-list" hx-swap="innerHTML" hx-push-url="true"
+           class="calendar-range-tab {% if navigation.range == "day" %}active{% endif %}" role="tab" data-range="day"
+           aria-selected="{% if navigation.range == "day" %}true{% else %}false{% endif %}">Day</a>
+        <a href="{{ navigation.week }}" hx-get="{{ navigation.week }}" hx-target="#calendar-list" hx-swap="innerHTML" hx-push-url="true"
+           class="calendar-range-tab {% if navigation.range == "this_week" %}active{% endif %}" role="tab" data-range="this_week"
+           aria-selected="{% if navigation.range == "this_week" %}true{% else %}false{% endif %}">Week</a>
+        <a href="{{ navigation.month }}" hx-get="{{ navigation.month }}" hx-target="#calendar-list" hx-swap="innerHTML" hx-push-url="true"
+           class="calendar-range-tab {% if navigation.range == "month" %}active{% endif %}" role="tab" data-range="month"
+           aria-selected="{% if navigation.range == "month" %}true{% else %}false{% endif %}">Month</a>
+    </div>
+    <form class="calendar-filters calendar-episode-filters" action="/calendar" method="get" hx-get="/calendar" hx-target="#calendar-list" hx-swap="innerHTML" hx-push-url="true" aria-label="Filter library episodes">
+        <input type="hidden" name="range" value="{{ navigation.range }}">
+        <input type="hidden" name="date" value="{{ navigation.date }}">
+        {% for p in navigation.parameters %}{% if p.name != "status" && p.name != "monitoring" && p.name != "monitored" && p.name != "search" %}<input type="hidden" name="{{ p.name }}" value="{{ p.value }}">{% endif %}{% endfor %}
+        <label class="calendar-filter-field" for="calendar-series-search">Title
+            <input class="calendar-series-search" type="search" id="calendar-series-search" name="search" value="{{ search }}" maxlength="128" autocomplete="off">
+        </label>
+        <label class="calendar-filter-field" for="calendar-monitoring">Monitoring
+            <select id="calendar-monitoring" name="monitoring" data-calendar-filter-select>
+                <option value="all" {% if monitoring_filter == "all" %}selected{% endif %}>All episodes</option>
+                <option value="monitored" {% if monitoring_filter == "monitored" %}selected{% endif %}>Monitored</option>
+                <option value="unmonitored" {% if monitoring_filter == "unmonitored" %}selected{% endif %}>Unmonitored</option>
+            </select>
+        </label>
+        <label class="calendar-filter-field" for="calendar-status">Availability
+            <select id="calendar-status" name="status" data-calendar-filter-select>
+                <option value="all" {% if status_filter == "all" %}selected{% endif %}>Any status</option>
+                <option value="available" {% if status_filter == "available" %}selected{% endif %}>Available</option>
+                <option value="pending" {% if status_filter == "pending" %}selected{% endif %}>Download / import pending</option>
+                <option value="held" {% if status_filter == "held" %}selected{% endif %}>Held for review</option>
+                <option value="missing" {% if status_filter == "missing" %}selected{% endif %}>Missing</option>
+                <option value="upcoming" {% if status_filter == "upcoming" %}selected{% endif %}>Upcoming</option>
+                <option value="unmonitored" {% if status_filter == "unmonitored" %}selected{% endif %}>Unmonitored</option>
+                <option value="unknown" {% if status_filter == "unknown" %}selected{% endif %}>Unknown</option>
+            </select>
+        </label>
+        <div class="calendar-filter-actions">
+            <button class="btn btn-secondary" type="submit">Apply filters</button>
+            {% if has_filters %}<a class="btn btn-ghost" href="{{ navigation.reset }}" hx-get="{{ navigation.reset }}" hx-target="#calendar-list" hx-swap="innerHTML" hx-push-url="true">Reset filters</a>{% endif %}
+        </div>
+    </form>
+</div>

@@ -1,7 +1,17 @@
 //! The background job owns the cache. Page requests only read it.
-use crate::services::anilist::discovery::{self, Premiere};
+use crate::{
+    models::{config, metadata_cache, series::parse_alternate_titles},
+    services::{
+        anilist::{
+            RelatedEntry, detail_rating,
+            discovery::{self, Premiere},
+            valid_rating,
+        },
+        library_link::pick_title,
+    },
+};
 use sqlx::SqlitePool;
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 const PERIOD: Duration = Duration::from_secs(12 * 3600);
 const RETRY: Duration = Duration::from_secs(15 * 60);
@@ -32,6 +42,146 @@ pub(crate) async fn read(db: &SqlitePool) -> Result<Snapshot, String> {
         refreshed_at,
         failed,
     })
+}
+
+#[derive(Default)]
+pub(crate) struct PageContext {
+    pub rating: Option<i32>,
+    pub aliases: Vec<String>,
+    pub franchise: Option<FranchiseLink>,
+    has_exact_detail: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct FranchiseLink {
+    pub title: String,
+    pub href: String,
+    pub label: &'static str,
+}
+
+fn reference_link(id: i64, relations: &[RelatedEntry], lang: &str) -> Option<FranchiseLink> {
+    let rank = |relation: &RelatedEntry| match relation.relation_type.as_str() {
+        "PARENT" | "PARENT_STORY" => 0,
+        "FULL_STORY" => 1,
+        "PREQUEL" => 2,
+        _ => 3,
+    };
+    let mut relations = relations
+        .iter()
+        .filter(|rel| rel.id > 0 && rel.id != id && rel.media_type == "ANIME" && rank(rel) < 3);
+    let best_rank = relations.clone().map(rank).min()?;
+    let best = relations.find(|relation| rank(relation) == best_rank)?;
+    if relations.any(|relation| rank(relation) == best_rank && relation.id != best.id) {
+        return None;
+    }
+    let title = pick_title(
+        lang,
+        &best.title_english,
+        &best.title_romaji,
+        &best.title_native,
+    );
+    let label = match best_rank {
+        0 => "Part of",
+        1 => "Summary of",
+        _ => "Sequel to",
+    };
+    (!title.trim().is_empty()).then(|| FranchiseLink {
+        title: title.to_owned(),
+        href: format!("/discover?franchise_id={id}"),
+        label,
+    })
+}
+
+async fn contexts(
+    db: &SqlitePool,
+    ids: &[i64],
+    lang: &str,
+) -> Result<HashMap<i64, PageContext>, sqlx::Error> {
+    let mut data = HashMap::new();
+    if ids.is_empty() {
+        return Ok(data);
+    }
+    for (id, detail) in metadata_cache::exact_cached_details(db, ids).await? {
+        let rating = detail_rating(&detail);
+        let franchise = reference_link(id, &detail.relations, lang);
+        let aliases = [
+            detail.title_english,
+            detail.title_romaji,
+            detail.title_native,
+        ]
+        .into_iter()
+        .chain(detail.synonyms)
+        .filter(|name| !name.is_empty())
+        .collect();
+        data.insert(
+            id,
+            PageContext {
+                rating,
+                aliases,
+                franchise,
+                has_exact_detail: true,
+            },
+        );
+    }
+    let requested = serde_json::json!(ids).to_string();
+    let manual_aliases: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT s.anilist_id,s.alternate_titles FROM json_each(?) i
+         JOIN series s ON s.anilist_id=i.value WHERE s.alternate_titles<>''",
+    )
+    .bind(&requested)
+    .fetch_all(db)
+    .await?;
+    for (id, raw) in manual_aliases {
+        data.entry(id)
+            .or_default()
+            .aliases
+            .extend(parse_alternate_titles(&raw));
+    }
+    let franchises: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT m.provider_id, f.folder, f.page_id
+         FROM json_each(?) AS ids JOIN library_franchise_members m ON m.provider_id=ids.value
+         JOIN library_franchises f ON f.folder=m.folder WHERE f.page_id IS NOT NULL AND f.page_id<>''",
+    )
+    .bind(&requested)
+    .fetch_all(db)
+    .await?;
+    for (id, title, page_id) in franchises {
+        data.entry(id).or_default().franchise = Some(FranchiseLink {
+            title,
+            href: format!("/franchises/{page_id}"),
+            label: "Franchise",
+        });
+    }
+    Ok(data)
+}
+
+pub(crate) async fn page_context(
+    db: &SqlitePool,
+    ids: &[i64],
+) -> Result<HashMap<i64, PageContext>, sqlx::Error> {
+    let lang = config::get_naming_prefs(db).await.title_language;
+    contexts(db, ids, &lang).await
+}
+
+pub(crate) async fn premiere_contexts(
+    db: &SqlitePool,
+    items: &[Premiere],
+) -> Result<HashMap<i64, PageContext>, sqlx::Error> {
+    let lang = config::get_naming_prefs(db).await.title_language;
+    let ids: Vec<_> = items.iter().map(|item| item.entry.id).collect();
+    let mut data = contexts(db, &ids, &lang).await?;
+    for item in items {
+        let id = item.entry.id;
+        let context = data.entry(id).or_default();
+        context.rating = context.rating.or(valid_rating(item.entry.average_score));
+        if context.franchise.is_none() && !context.has_exact_detail {
+            context.franchise = item
+                .relations
+                .as_deref()
+                .and_then(|relations| reference_link(id, relations, &lang));
+        }
+    }
+    Ok(data)
 }
 
 pub async fn refresh(db: &SqlitePool) -> Result<(), String> {
@@ -73,6 +223,7 @@ pub async fn run(db: &SqlitePool) {
     // Keep a fresh snapshot across restarts without spending more API calls.
     if let Ok(snapshot) = read(db).await
         && !snapshot.failed
+        && snapshot.entries.iter().all(|item| item.relations.is_some())
         && let Some(at) = snapshot.refreshed_at
     {
         let age = chrono::Utc::now().timestamp().saturating_sub(at).max(0) as u64;

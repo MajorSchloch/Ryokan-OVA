@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "partials/provider_rating.html" as provider_rating %}
 {% block title %} - Upcoming anime{% endblock %}
 {% block content %}
 <header class="page-header calendar-page-header">
@@ -7,12 +8,22 @@
 </header>
 <div class="calendar-toolbar">
     <form class="calendar-filters" action="/calendar/upcoming" method="get">
-        <label>Format <select class="folder-select" name="format">
+        <label class="calendar-filter-field" for="upcoming-search">Title
+            <input class="calendar-series-search" type="search" id="upcoming-search" name="search" value="{{ filters.search }}" maxlength="128" autocomplete="off">
+        </label>
+        <label class="calendar-filter-field" for="upcoming-format">Format <select id="upcoming-format" name="format">
             <option value="">All formats</option>
             {% for f in formats %}<option value="{{ f }}"{% if f.as_str() == filters.format %} selected{% endif %}>{{ f.replace("_", " ") }}</option>{% endfor %}
         </select></label>
-        <label class="calendar-toggle-filter"><input type="checkbox" name="hide_tracked" value="true"{% if filters.hide_tracked %} checked{% endif %}> Hide titles in my library</label>
-        <button class="btn btn-secondary btn-sm" type="submit">Apply filters</button>
+        <label class="calendar-filter-field" for="upcoming-library">Library <select id="upcoming-library" name="library">
+            <option value="all"{% if filters.library == "all" %} selected{% endif %}>All titles</option>
+            <option value="tracked"{% if filters.library == "tracked" %} selected{% endif %}>In library</option>
+            <option value="outside"{% if filters.library == "outside" %} selected{% endif %}>Outside library</option>
+        </select></label>
+        <div class="calendar-filter-actions">
+            <button class="btn btn-secondary" type="submit">Apply filters</button>
+            {% if has_filters %}<a class="btn btn-ghost" href="/calendar/upcoming">Reset filters</a>{% endif %}
+        </div>
     </form>
     {% if let Some(at) = refreshed %}<small>Last refreshed {{ at }}</small>{% endif %}
 </div>

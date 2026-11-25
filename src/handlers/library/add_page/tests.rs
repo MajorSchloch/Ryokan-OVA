@@ -200,6 +200,77 @@ async fn discover_keeps_search_available_without_a_calendar_snapshot() {
 }
 
 #[tokio::test]
+async fn orders_releases_across_formats_and_keeps_unknown_watch_positions_separate() {
+    let db = in_memory_pool().await;
+    let root = provider_entry(TRACKED, ORIGINAL);
+    let mut film = provider_entry(OTHER, "Ada Orbit Compilation");
+    film["format"] = json!("MOVIE");
+    film["startDate"] = json!({"year":2023,"month":4});
+    film["relations"]["edges"] = json!([{"relationType":"PARENT","node":root.clone()}]);
+    let mut prequel = provider_entry(NEW, "Ada Orbit Origins");
+    prequel["startDate"] = json!({"year":2024,"month":2,"day":1});
+    prequel["relations"]["edges"] = json!([{"relationType":"SEQUEL","node":root.clone()}]);
+    for item in [root, film, prequel] {
+        let detail = anilist::parse_media_node(&item).unwrap();
+        metadata_cache::upsert_provider(&db, detail.id, None, &detail)
+            .await
+            .unwrap();
+    }
+    let state = build_test_app_state(db, None);
+    let path = format!("/discover?franchise_id={TRACKED}");
+    let premiere = html(request(&state, &format!("{path}&order=premiere"), None).await).await;
+    let release_ids = |page: &str, selector: &str| {
+        add_links(page, selector)
+            .iter()
+            .map(|url| link_id(url, "provider_id").unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        release_ids(&premiere, ".add-anime-results .anilist-title-link"),
+        [TRACKED, OTHER, NEW]
+    );
+    assert!(premiere.contains("Related to <a"));
+    assert!(premiere.contains("Premiere · April 2023 (day TBA)"));
+
+    let watch = html(request(&state, &format!("{path}&order=watch"), None).await).await;
+    assert_eq!(
+        release_ids(
+            &watch,
+            "[aria-labelledby='discover-releases-watch'] .anilist-title-link"
+        ),
+        [NEW, TRACKED]
+    );
+    assert_eq!(
+        release_ids(
+            &watch,
+            "[aria-labelledby='discover-releases-other'] .anilist-title-link"
+        ),
+        [OTHER]
+    );
+    let selection =
+        html(request(&state, &format!("{path}&order=watch&select=true"), None).await).await;
+    assert!(selection.contains("name=\"order\" value=\"watch\""));
+    assert!(selection.contains("No known watch position"));
+    assert!(!selection.contains("aria-label=\"Release order\""));
+
+    let mut branch = provider_entry(UPCOMING, "Ada Orbit Branch");
+    branch["relations"]["edges"] = json!([{
+        "relationType": "PREQUEL", "node": provider_entry(NEW, "Ada Orbit Origins")
+    }]);
+    let detail = anilist::parse_media_node(&branch).unwrap();
+    metadata_cache::upsert_provider(&state.db, detail.id, None, &detail)
+        .await
+        .unwrap();
+    let ambiguous = html(request(&state, &format!("{path}&order=watch"), None).await).await;
+    assert!(ambiguous.contains("A single watch sequence is unavailable."));
+    assert!(!ambiguous.contains("Known watch sequence"));
+    assert_eq!(
+        release_ids(&ambiguous, ".add-anime-results .anilist-title-link").len(),
+        4
+    );
+}
+
+#[tokio::test]
 async fn cold_search_groups_releases_and_saves_the_selected_mode() {
     let server = MockServer::start().await;
     let mut original = provider_entry(TRACKED, ORIGINAL);
@@ -373,7 +444,9 @@ async fn mocked_provider_results_and_save() {
     );
     assert!(franchise.contains(SEQUEL));
     assert!(franchise.contains("81%</span>"));
-    assert!(franchise.contains(&format!("Sequel to {ORIGINAL}")));
+    assert!(franchise.contains(&format!(
+        "Sequel to <a href=\"#discover-release-{TRACKED}\">{ORIGINAL}"
+    )));
     assert!(!franchise.contains(UNRELATED));
     assert!(franchise.contains("In library"));
     assert!(franchise.contains("Open release"));

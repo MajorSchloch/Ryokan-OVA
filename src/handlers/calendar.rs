@@ -63,7 +63,7 @@ use axum_htmx::{HxBoosted, HxRequest};
 use chrono::{Datelike, TimeZone};
 use navigation::Navigation;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::AppState;
 use crate::models::config;
@@ -121,6 +121,8 @@ pub struct CalendarPageQuery {
     /// off — surfaces every airing series.
     #[serde(default)]
     pub monitored: Option<bool>,
+    /// `all`, `monitored`, or `unmonitored`. Overrides the legacy checkbox URL.
+    pub monitoring: Option<String>,
     #[serde(default)]
     pub date: Option<String>,
     #[serde(default)]
@@ -140,6 +142,15 @@ impl CalendarPageQuery {
             .take(128)
             .collect()
     }
+
+    fn monitoring_filter(&self) -> &'static str {
+        match self.monitoring.as_deref() {
+            Some("monitored") => "monitored",
+            Some("unmonitored") => "unmonitored",
+            None if self.monitored == Some(true) => "monitored",
+            _ => "all",
+        }
+    }
 }
 
 #[derive(Template)]
@@ -147,9 +158,7 @@ impl CalendarPageQuery {
 struct CalendarPageTemplate {
     page: String,
     title_language: String,
-    /// Active range token — drives the toggle's selected state.
-    range: String,
-    monitored_only: bool,
+    monitoring_filter: &'static str,
     /// `"list"` for week-shaped ranges, `"grid"` for month. Drives
     /// the body partial selection in the template.
     view_mode: String,
@@ -171,6 +180,8 @@ struct CalendarPageTemplate {
     search: String,
     load_failed: bool,
     status_filter: String,
+    has_filters: bool,
+    has_results: bool,
 }
 
 /// Per-episode template input. Pre-formats per-day-grouping
@@ -186,11 +197,7 @@ pub struct EpisodeView {
     /// user's local timezone via `new Date(unixTs * 1000)`.
     pub airing_at: i64,
     pub monitored: bool,
-    /// Lowercase concatenation of every title variant (romaji +
-    /// english + native + db-stored) so the page's series-name
-    /// search input matches against any of them, not just the
-    /// resolved `title_language` form. Server-precomputed once.
-    pub search_haystack: String,
+    rating: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -271,13 +278,17 @@ pub async fn page(
         .ok()
         .flatten()
         .unwrap_or_default();
-    let monitored_only = params.monitored.unwrap_or(false);
+    let monitoring_filter = params.monitoring_filter();
 
     let now_utc = chrono::Utc::now();
     let navigation = Navigation::new(&params, now_utc);
-    let range = navigation.range.to_string();
     let search = params.search_text();
-    let view_mode = if range == "month" { "grid" } else { "list" };
+    let needle = search.to_lowercase();
+    let view_mode = if navigation.range == "month" {
+        "grid"
+    } else {
+        "list"
+    };
 
     // Window selection: list ranges slide N days from now;
     // grid uses the calendar weeks containing the current
@@ -289,16 +300,41 @@ pub async fn page(
     let fetched = calendar::fetch_upcoming(&state.db, &cfg, from, to, false).await;
     let load_failed = fetched.is_err();
     let mut episodes = fetched.unwrap_or_default();
+    let ids: BTreeSet<_> = episodes
+        .iter()
+        .map(|episode| i64::from(episode.anilist_id))
+        .collect();
+    let context =
+        calendar::discovery::page_context(&state.db, &ids.into_iter().collect::<Vec<_>>())
+            .await
+            .unwrap_or_default();
+    if !needle.is_empty() {
+        episodes.retain(|episode| {
+            episode.search_haystack.contains(&needle)
+                || context
+                    .get(&i64::from(episode.anilist_id))
+                    .is_some_and(|info| {
+                        info.aliases
+                            .iter()
+                            .any(|alias| alias.to_lowercase().contains(&needle))
+                    })
+        });
+    }
     let statuses = status::load(&state.db, &cfg, &mut episodes, now_utc.timestamp())
         .await
         .unwrap_or_default();
     let status_filter = status::filter(params.context.get("status")).to_string();
+    let has_filters = monitoring_filter != "all" || status_filter != "all" || !search.is_empty();
 
     let library_is_empty = library_has_no_positive_al_series(&state.db).await;
 
     let episode_views: Vec<EpisodeView> = episodes
         .into_iter()
-        .filter(|e| !monitored_only || e.monitored)
+        .filter(|e| match monitoring_filter {
+            "monitored" => e.monitored,
+            "unmonitored" => !e.monitored,
+            _ => true,
+        })
         .map(|e| EpisodeView {
             status: statuses
                 .get(&(e.series_id, e.episode))
@@ -310,10 +346,13 @@ pub async fn page(
             episode: e.episode,
             airing_at: e.airing_at,
             monitored: e.monitored,
-            search_haystack: e.search_haystack,
+            rating: context
+                .get(&i64::from(e.anilist_id))
+                .and_then(|info| info.rating),
         })
-        .filter(|e| status_filter == "all" || e.status.kind == status_filter)
+        .filter(|e| e.status.matches(&status_filter))
         .collect();
+    let has_results = !episode_views.is_empty();
 
     let (day_buckets, month_grid) = if view_mode == "grid" {
         let anchor = navigation.date.and_hms_opt(0, 0, 0).unwrap().and_utc();
@@ -343,10 +382,12 @@ pub async fn page(
             library_is_empty,
             navigation,
             view_mode: view_mode.to_string(),
-            monitored_only,
+            monitoring_filter,
             search,
             load_failed,
             status_filter,
+            has_filters,
+            has_results,
         };
         return Html(partial.render().unwrap_or_default());
     }
@@ -357,8 +398,7 @@ pub async fn page(
     let tmpl = CalendarPageTemplate {
         page: "calendar".to_string(),
         title_language: cfg.title_language.clone(),
-        range,
-        monitored_only,
+        monitoring_filter,
         view_mode: view_mode.to_string(),
         day_buckets,
         month_grid,
@@ -368,6 +408,8 @@ pub async fn page(
         search,
         load_failed,
         status_filter,
+        has_filters,
+        has_results,
     };
     Html(tmpl.render().unwrap_or_default())
 }
@@ -381,9 +423,11 @@ struct CalendarBodyPartial {
     month_grid: MonthGrid,
     navigation: Navigation,
     view_mode: String,
-    monitored_only: bool,
+    monitoring_filter: &'static str,
     search: String,
     load_failed: bool,
+    has_filters: bool,
+    has_results: bool,
 }
 
 /// Build the Sun→Sat calendar grid for the month containing
@@ -987,7 +1031,7 @@ mod tests {
             episode,
             airing_at,
             monitored,
-            search_haystack: "test".to_string(),
+            rating: None,
         }
     }
 
