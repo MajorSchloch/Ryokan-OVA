@@ -125,6 +125,8 @@ struct ResultRow {
     facts: String,
     franchise: Option<FranchiseLink>,
     rating: Option<i32>,
+    genres: Vec<String>,
+    preview_path: String,
     href: String,
     existing: bool,
 }
@@ -146,6 +148,7 @@ mod branch_map;
 pub(super) mod bulk;
 mod discovery;
 mod guide;
+pub(super) mod preview;
 mod upcoming;
 
 #[derive(Default)]
@@ -391,6 +394,16 @@ fn facts(format: &str, episodes: Option<i32>, year: Option<i32>) -> String {
         facts.push(year.to_string());
     }
     facts.join(" · ")
+}
+
+fn poster_genres(genres: &[String]) -> Vec<String> {
+    genres
+        .iter()
+        .map(|genre| genre.trim())
+        .filter(|genre| !genre.is_empty())
+        .take(2)
+        .map(str::to_owned)
+        .collect()
 }
 
 async fn exact_detail(db: &sqlx::SqlitePool, id: i64) -> Result<anilist::AnimeDetail, String> {

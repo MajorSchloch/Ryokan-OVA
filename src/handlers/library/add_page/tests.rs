@@ -200,6 +200,49 @@ async fn discover_keeps_search_available_without_a_calendar_snapshot() {
 }
 
 #[tokio::test]
+async fn quick_preview_reads_the_exact_release_and_retains_its_franchise_context() {
+    let db = in_memory_pool().await;
+    let root = provider_entry(TRACKED, ORIGINAL);
+    let mut movie = provider_entry(NEW, "Ada Orbit at the Cinema");
+    movie["format"] = json!("MOVIE");
+    movie["averageScore"] = json!(88);
+    movie["genres"] = json!(["Mystery", "Drama", "Fantasy"]);
+    movie["startDate"] = json!({"year":2099,"month":4,"day":2});
+    movie["description"] = json!("<p>The astronomers &amp; the archivist meet.</p>");
+    movie["relations"]["edges"] = json!([{"relationType":"PARENT","node":root}]);
+    let exact = anilist::parse_media_node(&movie).unwrap();
+    metadata_cache::upsert_provider(&db, NEW, None, &exact)
+        .await
+        .unwrap();
+    let state = build_test_app_state(db.clone(), None);
+    let preview = html(request(&state, &format!("/discover/preview/{NEW}"), None).await).await;
+    assert!(preview.contains("data-preview-title=\"Ada Orbit at the Cinema\""));
+    assert!(preview.contains("Part of · Ada Orbit"));
+    let document = scraper::Html::parse_fragment(&preview);
+    let synopsis = scraper::Selector::parse(".discover-preview-synopsis").unwrap();
+    assert_eq!(
+        document
+            .select(&synopsis)
+            .next()
+            .unwrap()
+            .text()
+            .collect::<String>(),
+        "The astronomers & the archivist meet."
+    );
+    assert!(preview.contains("Premiere · Apr 2, 2099"));
+    assert!(preview.contains("88%"));
+    for genre in ["Mystery", "Drama", "Fantasy"] {
+        assert!(preview.contains(&format!("<li>{genre}</li>")));
+    }
+    assert!(!preview.contains("<form"));
+    assert_eq!(
+        request(&state, "/discover/preview/0", None).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_no_additions(&db).await;
+}
+
+#[tokio::test]
 async fn orders_releases_across_formats_and_keeps_unknown_watch_positions_separate() {
     let db = in_memory_pool().await;
     let root = provider_entry(TRACKED, ORIGINAL);
@@ -444,6 +487,7 @@ async fn cold_search_groups_releases_and_saves_the_selected_mode() {
     let mut original = provider_entry(TRACKED, ORIGINAL);
     original["title"]["romaji"] = json!("Ada no Kidou");
     original["averageScore"] = json!(86);
+    original["genres"] = json!(["Mystery", "Adventure", "Drama"]);
     original["synonyms"] = json!(["Orbit of Ada", " orbit of ada ", ORIGINAL]);
     original["description"] = json!(
         "<p>The <em>original story</em> begins here.</p><script>unsafe_fixture_markup</script>"
@@ -592,6 +636,18 @@ async fn mocked_provider_results_and_save() {
     assert!(results.contains(UNRELATED));
     assert!(results.contains("86%</span>"));
     assert!(!results.contains("81%</span>"));
+    let results_doc = scraper::Html::parse_document(&results);
+    let genres = scraper::Selector::parse(".discover-poster-genres > span").unwrap();
+    assert_eq!(
+        results_doc
+            .select(&genres)
+            .map(|genre| genre.text().collect::<String>())
+            .collect::<Vec<_>>(),
+        ["Mystery", "Adventure"]
+    );
+    assert!(results.contains(&format!(
+        "data-discover-preview=\"/discover/preview/{TRACKED}\""
+    )));
     let franchise_link = franchise_links[0];
     assert_eq!(parameter(franchise_link, "q").as_deref(), Some(QUERY));
     assert_eq!(parameter(franchise_link, "source").as_deref(), Some("al"));

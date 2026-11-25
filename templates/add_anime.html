@@ -7,7 +7,7 @@
 <ul class="discover-poster-grid" aria-labelledby="{{ heading }}">
     {% for entry in entries %}
     <li>
-        <a class="discover-poster" href="{{ entry.href }}">
+        <a class="discover-poster" href="{{ entry.href }}" data-discover-preview="{{ entry.preview_path }}" hx-boost="false">
             <div class="discover-poster-art">
                 {% if !entry.cover.is_empty() %}<img src="{{ entry.cover }}" alt="" width="320" height="480" loading="lazy" decoding="async">{% endif %}
                 {% if entry.existing %}<span class="discover-poster-library">In library</span>{% endif %}
@@ -18,6 +18,7 @@
                 {% if !entry.subtitle.is_empty() %}<span class="discover-poster-subtitle" title="{{ entry.subtitle }}">{{ entry.subtitle }}</span>{% endif %}
                 {% if let Some(franchise) = entry.franchise %}<span class="discover-poster-franchise" title="{{ franchise.title }}">{{ franchise.label }} · {{ franchise.title }}</span>{% endif %}
                 {% if !entry.facts.is_empty() %}<span class="discover-poster-facts">{{ entry.facts }}</span>{% endif %}
+                {% if !entry.genres.is_empty() %}<span class="discover-poster-genres">{% for genre in entry.genres.iter().take(2) %}<span>{{ genre }}</span>{% if !loop.last %} · {% endif %}{% endfor %}</span>{% endif %}
             </div>
         </a>
     </li>
@@ -302,6 +303,24 @@
         {% call poster_grid(results, "discover-results-title") %}{% endcall %}
         {% endif %}
     </section>
+    {% endif %}
+    {% if !upcoming.is_empty() || !results.is_empty() %}
+    <dialog id="discover-preview-dialog" class="discover-preview-dialog" aria-labelledby="discover-preview-title">
+        <header class="discover-preview-header">
+            <h3 id="discover-preview-title"></h3>
+            <form method="dialog" hx-boost="false">
+                <button type="submit" class="btn btn-secondary" autofocus>Close</button>
+            </form>
+        </header>
+        <div class="discover-preview-content">
+            <div data-discover-preview-body></div>
+            <p class="form-hint discover-preview-status" data-discover-preview-status role="status"></p>
+            <button type="button" class="btn btn-secondary" data-discover-preview-retry hidden>Retry</button>
+        </div>
+        <footer class="discover-preview-footer">
+            <a class="btn btn-primary" data-discover-preview-open hx-boost="false">Open franchise</a>
+        </footer>
+    </dialog>
     {% endif %}
     {% endif %}
 </section>

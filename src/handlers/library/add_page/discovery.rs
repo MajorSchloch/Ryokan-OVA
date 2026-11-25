@@ -15,7 +15,7 @@ use crate::{
 
 use super::{
     AddPage, ReleaseOrder, ResultRow, branch_map, detail, exact_detail, existing, facts,
-    storyline_selection_path, supported_provider, upcoming,
+    poster_genres, storyline_selection_path, supported_provider, upcoming,
 };
 use crate::handlers::library::{
     availability::premiere_label,
@@ -295,6 +295,8 @@ pub(super) async fn find_results(state: &AppState, view: &mut AddPage) -> Result
             facts: info,
             franchise: None,
             rating: main.rating,
+            genres: poster_genres(&main.genres),
+            preview_path: format!("/discover/preview/{}", main.provider_id),
             href: view.franchise_path(id),
             existing: group.tracked > 0,
             title,
@@ -383,6 +385,8 @@ fn release_sections(
                 facts: facts(&entry.format, entry.episodes, None),
                 franchise: None,
                 rating,
+                genres: Vec::new(),
+                preview_path: String::new(),
                 href,
                 existing: entry.series_id.is_some(),
             },

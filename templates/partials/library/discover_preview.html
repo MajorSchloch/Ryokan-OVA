@@ -1,0 +1,21 @@
+{% import "partials/provider_rating.html" as provider_rating %}
+
+<div class="discover-preview-details" data-discover-preview-details data-preview-title="{{ title }}">
+    {% if !cover.is_empty() %}<img class="discover-preview-cover" src="{{ cover }}" alt="" width="320" height="480">{% endif %}
+    <div class="discover-preview-copy">
+        {% if rating.is_some() || !facts.is_empty() %}
+        <div class="discover-preview-facts">
+            {% if let Some(score) = rating %}{% call provider_rating::badge(score) %}{% endcall %}{% endif %}
+            {% if !facts.is_empty() %}<span>{{ facts }}</span>{% endif %}
+        </div>
+        {% endif %}
+        {% if !premiere.is_empty() %}<p class="discover-preview-fact">Premiere · {{ premiere }}</p>{% endif %}
+        {% if let Some(group) = franchise %}<p class="discover-preview-franchise">{{ group.label }} · {{ group.title }}</p>{% endif %}
+        {% if !genres.is_empty() %}
+        <ul class="discover-preview-genres" aria-label="Genres">
+            {% for genre in genres %}<li>{{ genre }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+        {% if !synopsis.is_empty() %}<p class="discover-preview-synopsis">{{ synopsis }}</p>{% endif %}
+    </div>
+</div>

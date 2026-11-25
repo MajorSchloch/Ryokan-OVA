@@ -188,6 +188,7 @@ pub struct AnimeEntry {
 pub(crate) struct AnimeSearchHit {
     pub entry: AnimeEntry,
     pub release_date: Option<String>,
+    pub genres: Vec<String>,
     pub relations: Vec<RelatedEntry>,
 }
 
@@ -196,6 +197,7 @@ impl From<AnimeEntry> for AnimeSearchHit {
         Self {
             entry,
             release_date: None,
+            genres: Vec::new(),
             relations: Vec::new(),
         }
     }
@@ -629,6 +631,7 @@ async fn search_anime_hits(
 
     let relation_fields = if with_relations {
         r#"startDate { year month day }
+            genres
             relations {
                 edges {
                     relationType(version: 2)
@@ -800,6 +803,7 @@ async fn search_anime_hits(
             Some(AnimeSearchHit {
                 entry: parse_search_entry(node)?,
                 release_date: premiere_date(&node["startDate"]),
+                genres: parse_genres(node),
                 relations: parse_media_relations(node),
             })
         })
@@ -807,6 +811,18 @@ async fn search_anime_hits(
 
     search_cache_put(cache_key, entries.clone());
     Ok(entries)
+}
+
+fn parse_genres(media: &serde_json::Value) -> Vec<String> {
+    media["genres"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|genre| !genre.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 fn parse_search_entry(m: &serde_json::Value) -> Option<AnimeEntry> {
@@ -831,25 +847,14 @@ fn parse_search_entry(m: &serde_json::Value) -> Option<AnimeEntry> {
     })
 }
 
-async fn fallback_search_hits(
-    query: &str,
-    reason: Option<String>,
-) -> Result<Vec<AnimeSearchHit>, String> {
-    Ok(fallback_jikan(query, reason)
-        .await?
-        .into_iter()
-        .map(Into::into)
-        .collect())
-}
-
 /// Shared fallback helper used when AniList is unavailable or force_mal_fallback is set.
 /// Tries Jikan (MAL-backed). If Jikan also fails, `compose_search_error` builds a
 /// user-friendly combined message for the frontend.
-async fn fallback_jikan(
+async fn fallback_search_hits(
     query: &str,
     anilist_reason: Option<String>,
-) -> Result<Vec<AnimeEntry>, String> {
-    match jikan::search_anime(query).await {
+) -> Result<Vec<AnimeSearchHit>, String> {
+    match jikan::search_anime_hits(query).await {
         Ok(results) => Ok(results),
         Err(jikan_err) => Err(compose_search_error(anilist_reason.as_deref(), &jikan_err)),
     }
@@ -1478,14 +1483,7 @@ pub(crate) fn parse_media_node(m: &serde_json::Value) -> Option<AnimeDetail> {
         season_year: m["seasonYear"].as_i64().map(|y| y as i32),
         end_year: m["endDate"]["year"].as_i64().map(|y| y as i32),
         description: sanitize_rich_description(m["description"].as_str().unwrap_or(""), true),
-        genres: m["genres"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|g| g.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default(),
+        genres: parse_genres(m),
         average_score: m["averageScore"].as_i64().map(|s| s as i32),
         average_score_display: m["averageScore"].as_i64().map(|s| format!("{}%", s)),
         score_is_ten_point: false,

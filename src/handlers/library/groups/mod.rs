@@ -105,6 +105,7 @@ pub(super) struct Entry {
     pub(super) format: String,
     pub(super) episodes: Option<i32>,
     pub(super) rating: Option<i32>,
+    pub(super) genres: Vec<String>,
     pub(super) date: String,
     pub(super) season: String,
     pub(super) series_id: Option<i64>,
@@ -236,6 +237,9 @@ impl Catalog {
         }
         old.episodes = entry.episodes.or(old.episodes);
         old.rating = entry.rating.or(old.rating);
+        if !entry.genres.is_empty() {
+            old.genres = entry.genres;
+        }
     }
 
     fn relation(&mut self, owner: i64, rel: &RelatedEntry, lang: &str) {
@@ -300,6 +304,7 @@ impl Catalog {
                 format: detail.format.clone(),
                 episodes: detail.episodes,
                 rating: detail_rating(detail),
+                genres: detail.genres.clone(),
                 date: date_label(detail.release_date.as_deref(), detail.season_year),
                 season: match detail.season.as_str() {
                     "WINTER" => "Winter",
@@ -347,6 +352,9 @@ impl Catalog {
         }
         own.episodes = own.episodes.or(e.episodes);
         own.rating = own.rating.or(valid_rating(e.average_score));
+        if own.genres.is_empty() {
+            own.genres.clone_from(&hit.genres);
+        }
         own.related.get_or_insert_with(|| RelatedEntry {
             id: e.id,
             id_mal: e.id_mal,
