@@ -84,6 +84,7 @@ struct Setup {
 }
 
 mod discovery;
+mod upcoming;
 
 #[derive(Template)]
 #[template(path = "add_anime.html")]
@@ -96,6 +97,7 @@ struct AddPage {
     franchise_id: Option<i64>,
     franchise: Option<discovery::Franchise>,
     results: Vec<ResultRow>,
+    upcoming: Vec<ResultRow>,
     setup: Option<Setup>,
     error: &'static str,
 }
@@ -109,7 +111,7 @@ impl AddPage {
             _ => "al",
         };
         let q: String = q.trim().chars().take(200).collect();
-        let back = format!("/library/add?source={source}&q={}", urlencoding::encode(&q));
+        let back = format!("/discover?source={source}&q={}", urlencoding::encode(&q));
         Self {
             page: "library",
             title_language: cfg.title_language.clone(),
@@ -119,6 +121,7 @@ impl AddPage {
             franchise_id: franchise_id.filter(|id| supported_provider(*id)),
             franchise: None,
             results: Vec::new(),
+            upcoming: Vec::new(),
             setup: None,
             error: "",
         }
@@ -126,6 +129,14 @@ impl AddPage {
 
     fn franchise_path(&self, id: i64) -> String {
         format!("{}&franchise_id={id}", self.back)
+    }
+
+    fn setup_path(&self, seed: i64, release: i64) -> String {
+        format!(
+            "/library/add?source={}&q={}&franchise_id={seed}&provider_id={release}",
+            self.source,
+            urlencoding::encode(&self.q),
+        )
     }
 
     fn back_to_setup_parent(&self) -> String {
@@ -288,9 +299,9 @@ pub(super) async fn page(
                 view.error = "Could not open this franchise. Search again or try later.";
             }
         }
-    } else if !view.q.is_empty()
-        && let Err(error) = discovery::find_results(&state, &mut view).await
-    {
+    } else if view.q.is_empty() {
+        view.upcoming = upcoming::load(&state, &view).await;
+    } else if let Err(error) = discovery::find_results(&state, &mut view).await {
         tracing::warn!(%error, "Add Anime search failed");
         view.error = "Could not load search results. Try again or choose the other provider.";
     }

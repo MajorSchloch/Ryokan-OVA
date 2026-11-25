@@ -25,6 +25,7 @@ pub fn path(provider_id: impl std::borrow::Borrow<i64>) -> String {
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route("/discover", get(super::add_page::page))
         .route(
             "/library/add",
             get(super::add_page::page).post(super::add_page::save),
