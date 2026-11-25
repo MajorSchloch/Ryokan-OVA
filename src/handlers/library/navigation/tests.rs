@@ -202,7 +202,7 @@ async fn release_rows_support_watch_order_and_hiding_unfollowed() {
         let document = scraper::Html::parse_document(&html);
         let row =
             scraper::Selector::parse("[data-franchise-list] > [data-franchise-release]").unwrap();
-        let title = scraper::Selector::parse("h4 a").unwrap();
+        let title = scraper::Selector::parse("h4 a, h5 a").unwrap();
         document
             .select(&row)
             .map(|entry| {
@@ -240,6 +240,47 @@ async fn release_rows_support_watch_order_and_hiding_unfollowed() {
             ("Side story".into(), false, true),
         ]
     );
+
+    let storylines = render(FranchiseFilters {
+        f_order: "storylines".into(),
+        f_q: "original".into(),
+        ..Default::default()
+    })
+    .await
+    .unwrap()
+    .0;
+    let document = scraper::Html::parse_document(&storylines);
+    let selector = |css| scraper::Selector::parse(css).unwrap();
+    let guide = document
+        .select(&selector("a[href^='/discover']"))
+        .next()
+        .unwrap();
+    assert_eq!(
+        guide.attr("href"),
+        Some("/discover?source=al&franchise_id=100&order=storylines&guide=true")
+    );
+    assert!(
+        document
+            .select(&selector("option[value='storylines'][selected]"))
+            .next()
+            .is_some()
+    );
+    assert!(
+        document
+            .select(&selector(
+                "details[data-franchise-section][hidden] #franchise-release-300"
+            ))
+            .next()
+            .is_some()
+    );
+    assert_eq!(
+        rows(storylines),
+        [
+            ("Prequel".into(), false, true),
+            ("Original".into(), true, false),
+            ("Side story".into(), false, true),
+        ]
+    );
 }
 
 #[test]
@@ -249,8 +290,8 @@ fn watch_order_falls_back_when_links_are_conflicting_or_outside_the_franchise() 
     entries[0].watch_predecessors = vec![2];
     entries[1].provider_id = 2;
     entries[1].watch_predecessors = vec![1];
-    assert_eq!(watch_ranks(&entries[..1]), None);
-    assert_eq!(watch_ranks(&entries), None);
+    assert_eq!(groups::watch_sequence(&entries[..1]), None);
+    assert_eq!(groups::watch_sequence(&entries), None);
 }
 
 async fn index_html(db: &SqlitePool, individual: Option<&str>, cookie: Option<&str>) -> String {

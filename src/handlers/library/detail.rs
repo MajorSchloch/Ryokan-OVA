@@ -27,6 +27,10 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/discover", get(super::add_page::page))
         .route(
+            "/discover/guide",
+            axum::routing::post(super::add_page::preview_guide),
+        )
+        .route(
             "/discover/add-releases",
             axum::routing::post(super::add_page::bulk::save),
         )

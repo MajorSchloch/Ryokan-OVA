@@ -38,9 +38,25 @@ pub(super) struct Franchise {
 }
 
 pub(super) struct ReleaseSection {
-    pub id: &'static str,
-    pub title: &'static str,
+    pub id: String,
+    pub title: String,
     pub releases: Vec<FranchiseRelease>,
+    pub extras: bool,
+}
+
+impl ReleaseSection {
+    fn new(
+        id: impl Into<String>,
+        title: impl Into<String>,
+        releases: Vec<FranchiseRelease>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            releases,
+            extras: false,
+        }
+    }
 }
 
 pub(super) struct FranchiseRelease {
@@ -48,6 +64,7 @@ pub(super) struct FranchiseRelease {
     pub row: ResultRow,
     pub date: String,
     pub relationships: Vec<Relationship>,
+    pub optional: bool,
 }
 
 pub(super) struct Relationship {
@@ -327,41 +344,6 @@ pub(super) async fn resolve_group(
     })
 }
 
-/// Use a single unambiguous chain supported by explicit prequel/sequel edges.
-/// Related releases outside that chain have no known position.
-fn watch_sequence(entries: &[Entry]) -> Option<Vec<i64>> {
-    let members: HashSet<_> = entries.iter().map(|entry| entry.provider_id).collect();
-    let mut successors = HashMap::new();
-    let mut preceded = HashSet::new();
-    for entry in entries {
-        for id in entry
-            .watch_predecessors
-            .iter()
-            .copied()
-            .filter(|id| members.contains(id))
-        {
-            if entry.has_conflicting_predecessor(id)
-                || successors.insert(id, entry.provider_id).is_some()
-                || !preceded.insert(entry.provider_id)
-            {
-                return None;
-            }
-        }
-    }
-    let mut roots = successors
-        .keys()
-        .copied()
-        .filter(|id| !preceded.contains(id));
-    let head = roots.next()?;
-    if roots.next().is_some() {
-        return None;
-    }
-    let sequence: Vec<_> = std::iter::successors(Some(head), |id| successors.get(id).copied())
-        .take(successors.len() + 1)
-        .collect();
-    (sequence.len() == successors.len() + 1).then_some(sequence)
-}
-
 fn release_sections(
     group: &Group,
     view: &AddPage,
@@ -398,10 +380,48 @@ fn release_sections(
                     id,
                 })
                 .collect(),
+            optional: false,
         }
     });
+    if let Some(guide) = &view.guide {
+        let guide_ids: HashSet<_> = guide.releases.iter().map(|step| step.id).collect();
+        let mut rows: HashMap<_, _> = rows.map(|row| (row.id, row)).collect();
+        let releases = guide
+            .releases
+            .iter()
+            .filter_map(|step| {
+                let mut row = rows.remove(&step.id)?;
+                row.optional = step.optional;
+                row.relationships
+                    .retain(|link| guide_ids.contains(&link.id));
+                Some(row)
+            })
+            .collect();
+        return (
+            vec![ReleaseSection::new("guide", &guide.name, releases)],
+            "",
+        );
+    }
+    if view.order == ReleaseOrder::Storylines {
+        let mut rows: HashMap<_, _> = rows.map(|row| (row.id, row)).collect();
+        let sections = groups::storylines::sections(&group.entries)
+            .into_iter()
+            .enumerate()
+            .map(|(index, section)| ReleaseSection {
+                id: format!("{}-{index}", section.kind.slug()),
+                title: section.title,
+                releases: section
+                    .releases
+                    .into_iter()
+                    .filter_map(|id| rows.remove(&id))
+                    .collect(),
+                extras: section.extras,
+            })
+            .collect();
+        return (sections, "");
+    }
     if view.order == ReleaseOrder::Watch
-        && let Some(sequence) = watch_sequence(&group.entries)
+        && let Some(sequence) = groups::watch_sequence(&group.entries)
     {
         let positions: HashMap<_, _> = sequence
             .into_iter()
@@ -411,17 +431,13 @@ fn release_sections(
         let (mut known, others): (Vec<_>, Vec<_>) =
             rows.partition(|row| positions.contains_key(&row.id));
         known.sort_by_key(|row| positions[&row.id]);
-        let mut sections = vec![ReleaseSection {
-            id: "watch",
-            title: "Known watch sequence",
-            releases: known,
-        }];
+        let mut sections = vec![ReleaseSection::new("watch", "Known watch sequence", known)];
         if !others.is_empty() {
-            sections.push(ReleaseSection {
-                id: "other",
-                title: "No known watch position",
-                releases: others,
-            });
+            sections.push(ReleaseSection::new(
+                "other",
+                "No known watch position",
+                others,
+            ));
         }
         return (sections, "");
     }
@@ -432,11 +448,11 @@ fn release_sections(
             ""
         };
         return (
-            vec![ReleaseSection {
-                id: "premiere",
-                title: "Premiere order",
-                releases: rows.collect(),
-            }],
+            vec![ReleaseSection::new(
+                "premiere",
+                "Premiere order",
+                rows.collect(),
+            )],
             hint,
         );
     }
@@ -446,11 +462,7 @@ fn release_sections(
         ("specials", "OVAs and specials"),
         ("other", "Other releases"),
     ]
-    .map(|(id, title)| ReleaseSection {
-        id,
-        title,
-        releases: Vec::new(),
-    });
+    .map(|(id, title)| ReleaseSection::new(id, title, Vec::new()));
     for (entry, row) in group.entries.iter().zip(rows) {
         let index = match entry.format.as_str() {
             "TV" | "TV_SHORT" | "ONA" => 0,
@@ -522,7 +534,10 @@ pub(super) async fn project(
             .as_ref()
             .and_then(anilist::detail_rating)
             .or(main.rating),
-        can_select: group.entries.iter().any(|entry| entry.series_id.is_none()),
+        can_select: sections
+            .iter()
+            .flat_map(|section| &section.releases)
+            .any(|release| !release.row.existing),
         has_multiple: group.entries.len() > 1,
         order_hint,
         sections,

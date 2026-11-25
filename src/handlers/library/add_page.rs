@@ -34,6 +34,7 @@ pub(super) struct Browse {
     franchise_id: Option<i64>,
     select: bool,
     order: ReleaseOrder,
+    guide: bool,
 }
 
 #[derive(Deserialize)]
@@ -63,6 +64,7 @@ enum Choice {
 enum ReleaseOrder {
     Premiere,
     Watch,
+    Storylines,
     #[default]
     #[serde(other)]
     Formats,
@@ -73,6 +75,7 @@ impl ReleaseOrder {
         match order {
             "premiere" => Self::Premiere,
             "watch" => Self::Watch,
+            "storylines" => Self::Storylines,
             _ => Self::Formats,
         }
     }
@@ -82,6 +85,7 @@ impl ReleaseOrder {
             Self::Formats => "formats",
             Self::Premiere => "premiere",
             Self::Watch => "watch",
+            Self::Storylines => "storylines",
         }
     }
 
@@ -130,7 +134,33 @@ struct Setup {
 
 pub(super) mod bulk;
 mod discovery;
+mod guide;
 mod upcoming;
+
+#[derive(Default)]
+struct GuideInput {
+    name: String,
+    entries: String,
+}
+
+impl GuideInput {
+    fn resolve(&self, group: &super::groups::Group) -> Result<guide::Guide, String> {
+        guide::GuideDraft::parse(&self.name, &self.entries)?.resolve(group)
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct GuideForm {
+    franchise_id: i64,
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    order: ReleaseOrder,
+    guide_name: String,
+    guide_entries: String,
+}
 
 #[derive(Template)]
 #[template(path = "add_anime.html")]
@@ -147,6 +177,8 @@ struct AddPage {
     selection_notice: String,
     selected_releases: HashSet<i64>,
     selection_mode: Choice,
+    guide_input: Option<GuideInput>,
+    guide: Option<guide::Guide>,
     results: Vec<ResultRow>,
     upcoming: Vec<ResultRow>,
     setup: Option<Setup>,
@@ -176,6 +208,8 @@ impl AddPage {
             selection_notice: String::new(),
             selected_releases: HashSet::new(),
             selection_mode: Choice::default(),
+            guide_input: None,
+            guide: None,
             results: Vec::new(),
             upcoming: Vec::new(),
             setup: None,
@@ -211,6 +245,14 @@ impl AddPage {
 
     fn selection_monitor_mode(&self) -> &'static str {
         MonitorMode::from(self.selection_mode).as_str()
+    }
+
+    fn guide_path(&self) -> String {
+        format!("{}&guide=true#add-anime-guide", self.back_to_setup_parent())
+    }
+
+    fn can_preview_guide(&self) -> bool {
+        self.franchise_id.is_some_and(|id| id > 0)
     }
 
     fn order_path(&self, order: &str) -> String {
@@ -375,9 +417,12 @@ pub(super) async fn page(
             Err(_) => view.error = "Could not load this anime. Search again or try later.",
         }
     } else if let Some(seed) = view.franchise_id {
+        if query.guide && view.can_preview_guide() {
+            view.guide_input = Some(GuideInput::default());
+        }
         match discovery::open(&state, &view, seed).await {
             Ok(franchise) => {
-                view.select = query.select && franchise.can_select;
+                view.select = query.select && franchise.can_select && view.guide_input.is_none();
                 view.franchise = Some(franchise);
             }
             Err(error) => {
@@ -391,6 +436,48 @@ pub(super) async fn page(
         tracing::warn!(%error, "Add Anime search failed");
         view.error = "Could not load search results. Try again or choose the other provider.";
     }
+    view.into_response()
+}
+
+pub(super) async fn preview_guide(
+    State(state): State<AppState>,
+    Form(form): Form<GuideForm>,
+) -> Response {
+    let seed = form.franchise_id;
+    if seed <= 0 || !supported_provider(seed) {
+        return (StatusCode::BAD_REQUEST, "Choose an AniList franchise.").into_response();
+    }
+    let cfg = config::get_config(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let mut view = AddPage::new(&cfg, form.q, &form.source, Some(seed));
+    view.order = form.order;
+    let input = GuideInput {
+        name: form.guide_name,
+        entries: form.guide_entries,
+    };
+    let resolved = match discovery::resolve_group(&state, &view, seed).await {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            tracing::warn!(%error, seed, "Could not load franchise for watch guide");
+            view.guide_input = Some(input);
+            view.error = "Could not load this franchise. Try the preview again.";
+            return (StatusCode::BAD_GATEWAY, view.into_response()).into_response();
+        }
+    };
+    match input.resolve(&resolved.group) {
+        Ok(guide) => {
+            view.selected_releases.clone_from(&guide.selected);
+            view.guide = Some(guide);
+        }
+        Err(message) => view.selection_notice = message,
+    }
+    view.guide_input = Some(input);
+    let franchise = discovery::project(&state, &view, seed, resolved).await;
+    view.select = view.guide.is_some() && franchise.can_select;
+    view.franchise = Some(franchise);
     view.into_response()
 }
 

@@ -10,8 +10,9 @@ use axum::{
 use axum_htmx::HxRequest;
 
 use super::{
-    AddOptions, AddPage, AppState, Choice, ReleaseOrder, add_entry, add_series_form, config,
-    discovery, exact_detail, htmx_aware_redirect, metadata_cache, series, supported_provider,
+    AddOptions, AddPage, AppState, Choice, GuideInput, ReleaseOrder, add_entry, add_series_form,
+    config, discovery, exact_detail, htmx_aware_redirect, metadata_cache, series,
+    supported_provider,
 };
 
 struct Selection {
@@ -21,6 +22,7 @@ struct Selection {
     mode: Choice,
     order: ReleaseOrder,
     releases: HashSet<i64>,
+    guide_input: Option<GuideInput>,
 }
 
 fn provider_id(value: &str) -> Option<i64> {
@@ -36,6 +38,8 @@ fn parse(fields: Vec<(String, String)>) -> Result<Selection, &'static str> {
     let mut source = None;
     let mut mode = None;
     let mut order = None;
+    let mut guide_name = None;
+    let mut guide_entries = None;
     let mut releases = HashSet::new();
     for (name, value) in fields {
         match name.as_str() {
@@ -45,6 +49,8 @@ fn parse(fields: Vec<(String, String)>) -> Result<Selection, &'static str> {
             "q" if query.is_none() => query = Some(value),
             "source" if source.is_none() => source = Some(value),
             "order" if order.is_none() => order = Some(ReleaseOrder::from_param(&value)),
+            "guide_name" if guide_name.is_none() => guide_name = Some(value),
+            "guide_entries" if guide_entries.is_none() => guide_entries = Some(value),
             "monitor_mode" if mode.is_none() => {
                 mode = Some(match value.as_str() {
                     "all" => Choice::All,
@@ -56,19 +62,27 @@ fn parse(fields: Vec<(String, String)>) -> Result<Selection, &'static str> {
             "release" => {
                 releases.insert(provider_id(&value).ok_or("Choose a valid release.")?);
             }
-            "franchise_id" | "q" | "source" | "monitor_mode" | "order" => {
+            "franchise_id" | "q" | "source" | "monitor_mode" | "order" | "guide_name"
+            | "guide_entries" => {
                 return Err("Reload the franchise and review your choices.");
             }
             _ => {}
         }
     }
+    let seed = seed.ok_or("Choose a valid franchise.")?;
+    let guide_input = match (guide_name, guide_entries) {
+        (Some(name), Some(entries)) if seed > 0 => Some(GuideInput { name, entries }),
+        (None, None) => None,
+        _ => return Err("Open an AniList franchise and preview the guide again."),
+    };
     Ok(Selection {
-        seed: seed.ok_or("Choose a valid franchise.")?,
+        seed,
         query: query.unwrap_or_default(),
         source: source.unwrap_or_default(),
         mode: mode.ok_or("Choose how to monitor the selected releases.")?,
         order: order.unwrap_or_default(),
         releases,
+        guide_input,
     })
 }
 
@@ -81,7 +95,7 @@ async fn selection_error(
     message: String,
 ) -> Response {
     let franchise = discovery::project(state, &view, seed, resolved).await;
-    view.select = franchise.can_select;
+    view.select = franchise.can_select && (view.guide_input.is_none() || view.guide.is_some());
     view.franchise = Some(franchise);
     view.selection_notice = message;
     let mut response = view.into_response();
@@ -110,14 +124,35 @@ pub(in crate::handlers::library) async fn save(
     view.selected_releases = selection.releases;
     view.selection_mode = selection.mode;
     view.order = selection.order;
+    view.guide_input = selection.guide_input;
     let mut resolved = match discovery::resolve_group(&state, &view, seed).await {
         Ok(resolved) => resolved,
         Err(error) => {
             tracing::warn!(%error, seed, "Could not confirm selected franchise");
-            view.error = "Could not load this franchise. Search for it again.";
+            view.error = if view.guide_input.is_some() {
+                "Could not load this franchise. Try the preview again."
+            } else {
+                "Could not load this franchise. Search for it again."
+            };
             return (StatusCode::BAD_GATEWAY, view.into_response()).into_response();
         }
     };
+    if let Some(input) = &view.guide_input {
+        match input.resolve(&resolved.group) {
+            Ok(guide) => view.guide = Some(guide),
+            Err(message) => {
+                return selection_error(
+                    &state,
+                    view,
+                    seed,
+                    resolved,
+                    StatusCode::CONFLICT,
+                    message,
+                )
+                .await;
+            }
+        }
+    }
     if view.selected_releases.is_empty() {
         return selection_error(
             &state,
@@ -129,20 +164,29 @@ pub(in crate::handlers::library) async fn save(
         )
         .await;
     }
-    let known: HashSet<_> = resolved
-        .group
-        .entries
-        .iter()
-        .flat_map(|entry| std::iter::once(entry.provider_id).chain(entry.library_provider_id))
-        .collect();
+    let known: HashSet<_> = if let Some(guide) = &view.guide {
+        guide.releases.iter().map(|release| release.id).collect()
+    } else {
+        resolved
+            .group
+            .entries
+            .iter()
+            .flat_map(|entry| std::iter::once(entry.provider_id).chain(entry.library_provider_id))
+            .collect()
+    };
     if !view.selected_releases.is_subset(&known) {
+        let message = if view.guide.is_some() {
+            "Select only releases in this watch guide."
+        } else {
+            "The franchise changed. Review your choices and try again."
+        };
         return selection_error(
             &state,
             view,
             seed,
             resolved,
             StatusCode::CONFLICT,
-            "The franchise changed. Review your choices and try again.".into(),
+            message.into(),
         )
         .await;
     }

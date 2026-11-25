@@ -1352,6 +1352,16 @@ a.franchise-status:hover { border-color: currentColor; text-decoration: underlin
 .franchise-heading .card-progress { max-width: 440px; border-radius: var(--radius-pill); }
 .franchise-section-heading { display: flex; align-items: baseline; gap: 16px; margin-bottom: 16px; }
 .franchise-section-heading h3 { margin: 0; }
+.library-franchise-release-heading { justify-content: space-between; flex-wrap: wrap; }
+#franchise-releases-title { scroll-margin-top: 5rem; }
+.library-franchise-section { margin-block: 24px; }
+.library-franchise-section > h4, .library-franchise-extras summary h4 { margin: 0; }
+.library-franchise-extras summary { cursor: pointer; }
+.library-franchise-extras summary h4 { display: inline; }
+.library-franchise-section .franchise-release-info h5 { margin: 0 0 6px; overflow-wrap: anywhere; line-height: 1.35; font-size: 1rem; }
+.library-franchise-section .franchise-release-info h5 a { color: inherit; text-decoration: none; }
+.library-franchise-section .franchise-release-info h5 a:hover { text-decoration: underline; }
+.library-franchise-section .franchise-release-row[data-followed="false"] h5 { color: var(--text); }
 @media (max-width: 640px) {
     .franchise-heading { grid-template-columns: 96px minmax(0, 1fr); gap: 16px; }
     .franchise-heading .detail-actions { margin-left: -112px; padding-top: 12px; }
@@ -1519,9 +1529,19 @@ a.franchise-status:hover { border-color: currentColor; text-decoration: underlin
 }
 
 .discover-release-section { margin-block: 20px; }
-.discover-release-section h4 { margin: 0 0 8px; }
-.discover-release-order { display: flex; flex-wrap: wrap; gap: 6px; }
+.discover-release-section h4, .discover-release-section summary { margin: 0 0 8px; }
+.discover-release-section summary, .discover-watch-guide summary { font-weight: 600; cursor: pointer; }
+.discover-release-order, .discover-release-toolbar { display: flex; flex-wrap: wrap; gap: 6px; }
 .discover-release-order [aria-current="true"] { border-color: var(--accent); color: var(--accent); }
+.discover-watch-guide {
+    margin-block: 16px;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-card);
+}
+.discover-watch-guide form { margin-top: 12px; }
+.discover-watch-guide textarea { width: 100%; resize: vertical; }
 .add-anime-results { display: grid; gap: 8px; list-style: none; padding: 0; margin: 0; }
 .add-anime-results .anilist-result {
     display: grid;

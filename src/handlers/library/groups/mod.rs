@@ -2,6 +2,7 @@
 //! identify folders and links, and never double as provider IDs.
 pub mod follow;
 pub mod preview;
+pub(super) mod storylines;
 
 #[derive(Default)]
 pub(crate) struct FutureFollowView {
@@ -118,6 +119,41 @@ struct RelationLabel {
     peer_id: i64,
     outside: bool,
     within_group: bool,
+}
+
+/// Use a single unambiguous chain supported by explicit prequel and sequel edges.
+/// Releases outside that chain have no known watch position.
+pub(super) fn watch_sequence(entries: &[Entry]) -> Option<Vec<i64>> {
+    let members: HashSet<_> = entries.iter().map(|entry| entry.provider_id).collect();
+    let mut successors = HashMap::new();
+    let mut preceded = HashSet::new();
+    for entry in entries {
+        for id in entry
+            .watch_predecessors
+            .iter()
+            .copied()
+            .filter(|id| members.contains(id))
+        {
+            if entry.has_conflicting_predecessor(id)
+                || successors.insert(id, entry.provider_id).is_some()
+                || !preceded.insert(entry.provider_id)
+            {
+                return None;
+            }
+        }
+    }
+    let mut roots = successors
+        .keys()
+        .copied()
+        .filter(|id| !preceded.contains(id));
+    let head = roots.next()?;
+    if roots.next().is_some() {
+        return None;
+    }
+    let sequence: Vec<_> = std::iter::successors(Some(head), |id| successors.get(id).copied())
+        .take(successors.len() + 1)
+        .collect();
+    (sequence.len() == successors.len() + 1).then_some(sequence)
 }
 
 #[derive(Default)]
