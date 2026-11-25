@@ -1,14 +1,34 @@
 {% extends "base.html" %}
 
-{% block title %} - Add Anime{% endblock %}
+{% block title %} - {% if setup.is_some() %}Add Anime{% else if let Some(group) = franchise %}{{ group.title }}{% else %}Discover{% endif %}{% endblock %}
+
+{% macro poster_grid(entries, heading) %}
+<ul class="discover-poster-grid" aria-labelledby="{{ heading }}">
+    {% for entry in entries %}
+    <li>
+        <a class="discover-poster" href="{{ entry.href }}">
+            <div class="discover-poster-art">
+                {% if !entry.cover.is_empty() %}<img src="{{ entry.cover }}" alt="" width="320" height="480" loading="lazy" decoding="async">{% endif %}
+                {% if entry.existing %}<span class="discover-poster-library">In library</span>{% endif %}
+            </div>
+            <div class="discover-poster-copy">
+                <strong>{{ entry.title }}</strong>
+                {% if !entry.subtitle.is_empty() %}<span class="discover-poster-subtitle">{{ entry.subtitle }}</span>{% endif %}
+                {% if !entry.facts.is_empty() %}<span class="discover-poster-facts">{{ entry.facts }}</span>{% endif %}
+            </div>
+        </a>
+    </li>
+    {% endfor %}
+</ul>
+{% endmacro %}
 
 {% block content %}
-<section class="add-anime" aria-labelledby="add-anime-title">
+<section class="add-anime{% if setup.is_none() %} add-anime--discover{% endif %}" aria-labelledby="add-anime-title">
     <nav class="detail-breadcrumb" aria-label="Breadcrumb">
         <a href="/">Library</a>
-        {% if setup.is_some() || franchise.is_some() %} · <a href="{{ back }}">Add Anime</a>{% endif %}
+        {% if setup.is_some() || franchise.is_some() %} · <a href="{{ back }}">Discover</a>{% endif %}
     </nav>
-    <div class="page-header"><h2 id="add-anime-title">{% if setup.is_some() %}Set up release{% else if let Some(group) = franchise %}{{ group.title }}{% else %}Add Anime{% endif %}</h2></div>
+    <div class="page-header"><h2 id="add-anime-title">{% if setup.is_some() %}Set up release{% else if let Some(group) = franchise %}{{ group.title }}{% else %}Discover{% endif %}</h2></div>
     {% if !error.is_empty() %}<p class="alert alert-warn" role="alert">{{ error }}</p>{% endif %}
     {% if let Some(release) = setup %}
     <section class="add-anime-panel">
@@ -34,22 +54,29 @@
             <label class="checkbox-row add-anime-search-toggle"><input type="checkbox" name="search_now" value="true" aria-describedby="add-anime-search-hint"{% if release.search_now %} checked{% endif %}{% if !release.can_search %} disabled{% endif %}><span>Search after adding</span></label>
             <p class="form-hint" id="add-anime-search-hint">{{ release.search_hint }}</p>
             <div class="add-anime-actions">
-                <a class="btn btn-secondary" href="{{ self.back_to_setup_parent() }}">{% if franchise_id.is_some() %}Back to franchise{% else %}Back to search{% endif %}</a>
+                <a class="btn btn-secondary" href="{{ self.back_to_setup_parent() }}">{% if franchise_id.is_some() %}Back to franchise{% else if !q.is_empty() %}Back to search{% else %}Back to Discover{% endif %}</a>
                 <button type="submit" class="btn btn-primary">Add to library</button>
             </div>
         </form>
     </section>
     {% else if let Some(group) = franchise %}
-    <section aria-labelledby="add-anime-releases-title">
-        {% if !group.cover.is_empty() || !group.subtitle.is_empty() || group.library_url.is_some() %}
-        <div class="add-anime-franchise">
-            {% if !group.cover.is_empty() %}<img src="{{ group.cover }}" alt="" width="64" height="96">{% endif %}
-            <div>
-                {% if !group.subtitle.is_empty() %}<p class="anilist-subtitle">{{ group.subtitle }}</p>{% endif %}
-                {% if let Some(path) = group.library_url %}<a href="{{ path }}">Manage franchise in Library</a>{% endif %}
-            </div>
-        </div>
+    {% if !group.cover.is_empty() || !group.synopsis.is_empty() || !group.alternate_titles.is_empty() || group.library_url.is_some() %}
+    <div class="add-anime-franchise">
+        {% if !group.cover.is_empty() %}<img class="discover-franchise-art" src="{{ group.cover }}" alt="" width="320" height="480">{% endif %}
+        {% if !group.synopsis.is_empty() %}
+        <h3>Synopsis</h3>
+        <div class="synopsis-body">{{ group.synopsis|safe }}</div>
         {% endif %}
+        {% if !group.alternate_titles.is_empty() %}
+        <h3>Alternate titles</h3>
+        <ul class="discover-alternate-titles">
+            {% for title in group.alternate_titles %}<li>{{ title }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+        {% if let Some(path) = group.library_url %}<a href="{{ path }}">Manage franchise in Library</a>{% endif %}
+    </div>
+    {% endif %}
+    <section aria-labelledby="add-anime-releases-title">
         <h3 id="add-anime-releases-title">Releases</h3>
         <ul class="add-anime-results" aria-labelledby="add-anime-releases-title">
             {% for release in group.releases %}
@@ -64,13 +91,13 @@
             </li>
             {% endfor %}
         </ul>
-        <a class="btn btn-secondary" href="{{ back }}">Back to search</a>
+        <a class="btn btn-secondary" href="{{ back }}">{% if q.is_empty() %}Back to Discover{% else %}Back to search{% endif %}</a>
     </section>
     {% else %}
-    <form class="add-anime-query" action="/library/add" method="get">
+    <form class="add-anime-query" action="/discover" method="get">
         <div class="form-group">
             <label for="add-anime-query">Anime title</label>
-            <input id="add-anime-query" type="search" name="q" value="{{ q }}" maxlength="200" required>
+            <input id="add-anime-query" type="search" name="q" value="{{ q }}" placeholder="Search for a title" maxlength="200" required>
         </div>
         <div class="form-group">
             <label for="add-anime-source">Provider</label>
@@ -81,23 +108,30 @@
         </div>
         <button class="btn btn-primary" type="submit">Search</button>
     </form>
-    {% if !results.is_empty() %}
-    <ul class="add-anime-results" aria-label="Search results">
-        {% for result in results %}
-        <li class="anilist-result">
-            {% if !result.cover.is_empty() %}<img src="{{ result.cover }}" class="anilist-cover" alt="" width="44" height="64" loading="lazy">{% endif %}
-            <div class="anilist-info">
-                <a class="anilist-title-link" href="{{ result.href }}">{{ result.title }}</a>
-                {% if !result.subtitle.is_empty() %}<p class="anilist-subtitle">{{ result.subtitle }}</p>{% endif %}
-                {% if !result.facts.is_empty() %}<p class="anilist-meta">{{ result.facts }}</p>{% endif %}
-            </div>
-            {% if result.existing %}<span class="chip">In library</span>{% endif %}
-            <a href="{{ result.href }}" class="btn {% if result.existing %}btn-secondary{% else %}btn-primary{% endif %}">Open franchise</a>
-        </li>
-        {% endfor %}
-    </ul>
-    {% else if !q.is_empty() && error.is_empty() %}
-    <p class="form-hint" role="status">No results found. Try a different title or provider.</p>
+    {% if q.is_empty() && error.is_empty() %}
+    <section aria-labelledby="discover-upcoming-title">
+        <div class="discover-shelf-heading">
+            <h3 id="discover-upcoming-title">Upcoming anime</h3>
+            <a href="/calendar/upcoming">See all upcoming anime</a>
+        </div>
+        {% if upcoming.is_empty() %}
+        <p class="form-hint">No dated premieres are available in Calendar yet.</p>
+        {% else %}
+        {% call poster_grid(upcoming, "discover-upcoming-title") %}{% endcall %}
+        {% endif %}
+    </section>
+    {% else if error.is_empty() %}
+    <section aria-labelledby="discover-results-title">
+        <div class="discover-shelf-heading">
+            <h3 id="discover-results-title">Search results</h3>
+            <a href="/discover">Clear search</a>
+        </div>
+        {% if results.is_empty() %}
+        <p class="form-hint" role="status">No results found. Try a different title or provider.</p>
+        {% else %}
+        {% call poster_grid(results, "discover-results-title") %}{% endcall %}
+        {% endif %}
+    </section>
     {% endif %}
     {% endif %}
 </section>

@@ -1,17 +1,29 @@
 //! Read-only franchise results and release choices for Add Anime.
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use crate::{
     AppState,
-    services::anilist::{self, AnimeSearchHit},
+    models::{metadata_cache, series},
+    services::{
+        anilist::{self, AnimeDetail, AnimeSearchHit},
+        html::sanitize_rich_description,
+    },
 };
 
-use super::{AddPage, ResultRow, detail, exact_detail, existing, facts, supported_provider};
+use super::{
+    AddPage, ResultRow, detail, exact_detail, existing, facts, supported_provider, upcoming,
+};
 use crate::handlers::library::groups::{self, Entry, Group};
+
+const DETAIL_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub(super) struct Franchise {
     pub title: String,
-    pub subtitle: String,
+    pub synopsis: String,
+    pub alternate_titles: Vec<String>,
     pub cover: String,
     pub library_url: Option<String>,
     pub releases: Vec<ResultRow>,
@@ -86,6 +98,84 @@ fn subtitle(entry: &Entry, display_title: &str) -> String {
         .unwrap_or_default()
 }
 
+async fn representative_detail(
+    db: &sqlx::SqlitePool,
+    main: &Entry,
+    loaded: Option<AnimeDetail>,
+    fetch: bool,
+) -> Option<AnimeDetail> {
+    let id = main.provider_id;
+    if !supported_provider(id) {
+        return None;
+    }
+    if let Some(detail) = loaded.filter(|detail| detail.id == id) {
+        return Some(detail);
+    }
+    if let Some(series_id) = main.series_id
+        && let Ok(Some(cached)) = metadata_cache::get_by_series_id(db, series_id).await
+        && cached.provider_id == id
+        && cached.detail.id == id
+    {
+        return Some(cached.detail);
+    }
+    if let Ok(Some(cached)) = metadata_cache::get_by_provider_id(db, id).await
+        && cached.detail.id == id
+    {
+        return Some(cached.detail);
+    }
+    if !fetch {
+        return None;
+    }
+    // Provider latency must not make the release choices unavailable.
+    let detail = tokio::time::timeout(DETAIL_TIMEOUT, anilist::get_anime_detail(id))
+        .await
+        .ok()?
+        .ok()?;
+    (detail.id == id).then_some(detail)
+}
+
+fn alternate_titles(
+    title: &str,
+    main: &Entry,
+    detail: Option<&AnimeDetail>,
+    tracked: Option<&series::Series>,
+) -> Vec<String> {
+    let mut names = vec![main.title.as_str()];
+    if let Some(data) = &main.related {
+        names.extend([
+            data.title_english.as_str(),
+            data.title_romaji.as_str(),
+            data.title_native.as_str(),
+        ]);
+    }
+    if let Some(detail) = detail {
+        names.extend([
+            detail.title_english.as_str(),
+            detail.title_romaji.as_str(),
+            detail.title_native.as_str(),
+        ]);
+        names.extend(detail.synonyms.iter().map(String::as_str));
+    }
+    let manual_aliases = tracked
+        .map(series::Series::alternate_title_list)
+        .unwrap_or_default();
+    if let Some(row) = tracked {
+        names.extend([
+            row.title_english.as_str(),
+            row.title_romaji.as_str(),
+            row.title_native.as_str(),
+        ]);
+    }
+    names.extend(manual_aliases.iter().map(String::as_str));
+    let mut seen = HashSet::from([title.trim().to_lowercase()]);
+    names
+        .into_iter()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && seen.insert(name.to_lowercase()))
+        .map(str::to_owned)
+        .collect()
+}
+
 fn cover(entry: &Entry) -> String {
     entry
         .related
@@ -147,7 +237,7 @@ pub(super) async fn find_results(state: &AppState, view: &mut AddPage) -> Result
 }
 
 pub(super) async fn open(state: &AppState, view: &AddPage, seed: i64) -> Result<Franchise, String> {
-    let hits = if view.q.is_empty() {
+    let mut hits = if view.q.is_empty() {
         Vec::new()
     } else {
         // A deep link can still open its exact release if title search is unavailable.
@@ -157,8 +247,21 @@ pub(super) async fn open(state: &AppState, view: &AddPage, seed: i64) -> Result<
         .await
         .map_err(|error| error.to_string())?;
     let id = tracked.as_ref().map_or(seed, |row| row.anilist_id);
+    let mut fetch_overview = true;
     let detail = if tracked.is_none() && !hits.iter().any(|hit| hit.entry.id == id) {
-        Some(exact_detail(&state.db, id).await?)
+        if let Some(saved) = upcoming::saved_hit(&state.db, id).await {
+            // Keep a saved premiere usable when the provider cannot supply the
+            // full franchise. Setup still resolves the exact ID separately.
+            hits.push(saved);
+            let detail = tokio::time::timeout(DETAIL_TIMEOUT, exact_detail(&state.db, id))
+                .await
+                .ok()
+                .and_then(Result::ok);
+            fetch_overview = detail.is_some();
+            detail
+        } else {
+            Some(exact_detail(&state.db, id).await?)
+        }
     } else {
         None
     };
@@ -175,7 +278,15 @@ pub(super) async fn open(state: &AppState, view: &AddPage, seed: i64) -> Result<
 
     let main = representative(&group);
     let title = display_title(&group, main);
-    let back = view.franchise_path(seed);
+    let main_detail = representative_detail(&state.db, main, detail, fetch_overview).await;
+    let main_row = if let Some(id) = main.series_id {
+        match tracked.filter(|row| row.id == id) {
+            Some(row) => Some(row),
+            None => series::get_by_id(&state.db, id).await.ok().flatten(),
+        }
+    } else {
+        None
+    };
     let releases = group
         .entries
         .iter()
@@ -183,7 +294,7 @@ pub(super) async fn open(state: &AppState, view: &AddPage, seed: i64) -> Result<
             let href = entry
                 .library_provider_id
                 .map(detail::path)
-                .unwrap_or_else(|| format!("{back}&provider_id={}", entry.provider_id));
+                .unwrap_or_else(|| view.setup_path(seed, entry.provider_id));
             ResultRow {
                 title: entry.title.clone(),
                 subtitle: subtitle(entry, &entry.title),
@@ -195,8 +306,22 @@ pub(super) async fn open(state: &AppState, view: &AddPage, seed: i64) -> Result<
         })
         .collect();
     Ok(Franchise {
-        subtitle: subtitle(main, &title),
-        cover: cover(main),
+        synopsis: main_detail.as_ref().map_or_else(String::new, |detail| {
+            sanitize_rich_description(&detail.description, true)
+        }),
+        alternate_titles: alternate_titles(&title, main, main_detail.as_ref(), main_row.as_ref()),
+        cover: main_detail
+            .as_ref()
+            .map(|detail| &detail.cover_url)
+            .filter(|url| !url.is_empty())
+            .or_else(|| {
+                main_row
+                    .as_ref()
+                    .map(|row| &row.cover_url)
+                    .filter(|url| !url.is_empty())
+            })
+            .cloned()
+            .unwrap_or_else(|| cover(main)),
         title,
         library_url: group.page_id.as_ref().map(|id| format!("/franchises/{id}")),
         releases,

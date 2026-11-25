@@ -45,7 +45,7 @@
                    oninput="liveLibrarySearch(this)"
                    onkeydown="if(event.key==='Enter'){event.preventDefault();}">
         </form>
-        <a class="btn btn-primary library-add-btn" href="/library/add">Add anime</a>
+        <a class="btn btn-primary library-add-btn" href="/discover">Add anime</a>
     </div>
     {# ── Row 2: scope + presentation. Custom-list chips make the
        active scope visible at a glance (the old closed dropdown hid
@@ -165,7 +165,7 @@
     <p>Your library is empty.</p>
     <p class="form-hint">Add your first series to get Ryokan watching for new episodes. You can also browse releases directly on Nyaa via the Search tab.</p>
     <div class="empty-state-actions">
-        <a class="btn btn-primary" href="/library/add">Add anime</a>
+        <a class="btn btn-primary" href="/discover">Add anime</a>
         <a class="btn btn-secondary" href="/search">Browse Nyaa</a>
     </div>
     {% endif %}

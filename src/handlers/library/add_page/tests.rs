@@ -18,6 +18,7 @@ use wiremock::{
 const NEW: i64 = 910_021;
 const TRACKED: i64 = 910_022;
 const OTHER: i64 = 910_023;
+const UPCOMING: i64 = 910_024;
 const QUERY: &str = "Fixture choices";
 const ORIGINAL: &str = "Ada Orbit";
 const SEQUEL: &str = "Ada Orbit Season 2";
@@ -188,10 +189,27 @@ async fn invalid_monitoring_mode_does_not_add_the_release() {
 }
 
 #[tokio::test]
+async fn discover_keeps_search_available_without_a_calendar_snapshot() {
+    let db = in_memory_pool().await;
+    let state = build_test_app_state(db.clone(), None);
+    let page = html(request(&state, "/discover", None).await).await;
+    assert!(page.contains("Upcoming anime"));
+    assert!(page.contains("No dated premieres are available"));
+    assert!(page.contains("action=\"/discover\" method=\"get\""));
+    assert_no_additions(&db).await;
+}
+
+#[tokio::test]
 async fn cold_search_groups_releases_and_saves_the_selected_mode() {
     let server = MockServer::start().await;
-    let original = provider_entry(TRACKED, ORIGINAL);
+    let mut original = provider_entry(TRACKED, ORIGINAL);
+    original["title"]["romaji"] = json!("Ada no Kidou");
+    original["synonyms"] = json!(["Orbit of Ada", " orbit of ada ", ORIGINAL]);
+    original["description"] = json!(
+        "<p>The <em>original story</em> begins here.</p><script>unsafe_fixture_markup</script>"
+    );
     let mut sequel = provider_entry(NEW, SEQUEL);
+    sequel["description"] = json!("The sequel's own synopsis.");
     sequel["seasonYear"] = json!(2023);
     sequel["idMal"] = json!(SHARED_MAL_ID);
     let mut unrelated = provider_entry(OTHER, UNRELATED);
@@ -218,6 +236,12 @@ async fn cold_search_groups_releases_and_saves_the_selected_mode() {
             .mount(&server)
             .await;
     }
+    Mock::given(method("POST"))
+        .and(body_partial_json(json!({"variables": {"id": UPCOMING}})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"Media": null}})))
+        .expect(1)
+        .mount(&server)
+        .await;
 
     // A subprocess keeps the provider overrides local to this fixture.
     // The add endpoint starts metadata refreshes in background tasks.
@@ -257,11 +281,54 @@ async fn mocked_provider_results_and_save() {
         .unwrap();
     let state = build_test_app_state(db.clone(), None);
 
+    let entries = json!([{
+        "entry": {
+            "id": UPCOMING, "title_english": "Tomorrow's Film", "title_romaji": "Ashita no Eiga",
+            "title_native": "", "cover_url": "", "format": "MOVIE", "status": "NOT_YET_RELEASED",
+            "status_display": "Not yet released", "source": "anilist"
+        },
+        "date": chrono::Utc::now().date_naive().succ_opt().unwrap().to_string(), "season": ""
+    }]);
+    sqlx::query(
+        "INSERT INTO premiere_discovery(id,entries,refreshed_at,failed) VALUES(1,?,unixepoch(),1)",
+    )
+    .bind(entries.to_string())
+    .execute(&db)
+    .await
+    .unwrap();
+    let landing = html(request(&state, "/discover", None).await).await;
+    let link = add_links(
+        &landing,
+        "[aria-labelledby='discover-upcoming-title'] a.discover-poster",
+    );
+    assert_eq!(link.len(), 1);
+    assert_eq!(link_id(&link[0], "franchise_id"), Some(UPCOMING));
+    let saved_preview = html(request(&state, &request_uri(&link[0]), None).await).await;
+    let saved_doc = scraper::Html::parse_document(&saved_preview);
+    let heading = scraper::Selector::parse("#add-anime-title").unwrap();
+    assert_eq!(
+        saved_doc
+            .select(&heading)
+            .next()
+            .unwrap()
+            .text()
+            .collect::<String>(),
+        "Tomorrow's Film"
+    );
+    assert_eq!(
+        link_id(
+            &add_links(&saved_preview, "a.btn[href^='/library/add?']")[0],
+            "provider_id"
+        ),
+        Some(UPCOMING)
+    );
+    assert_eq!(crate::test_support::count_series(&db).await, 1);
+
     let results =
-        html(request(&state, "/library/add?q=Fixture%20choices&source=al", None).await).await;
+        html(request(&state, "/discover?q=Fixture%20choices&source=al", None).await).await;
     let result_links = add_links(
         &results,
-        "[aria-label='Search results'] a.btn[href^='/library/add?']",
+        ".discover-poster-grid[aria-labelledby='discover-results-title'] a.discover-poster[href^='/discover?']",
     );
     let franchise_links: Vec<_> = result_links
         .iter()
@@ -287,6 +354,18 @@ async fn mocked_provider_results_and_save() {
 
     let franchise = html(request(&state, &request_uri(franchise_link), None).await).await;
     assert!(franchise.contains(&format!("<h2 id=\"add-anime-title\">{ORIGINAL}</h2>")));
+    assert!(franchise.contains("The <em>original story</em> begins here."));
+    assert!(!franchise.contains("unsafe_fixture_markup"));
+    assert!(!franchise.contains("The sequel's own synopsis"));
+    let franchise_doc = scraper::Html::parse_document(&franchise);
+    let aliases = scraper::Selector::parse(".discover-alternate-titles li").unwrap();
+    assert_eq!(
+        franchise_doc
+            .select(&aliases)
+            .map(|alias| alias.text().collect::<String>())
+            .collect::<Vec<_>>(),
+        ["Ada no Kidou", "Orbit of Ada"]
+    );
     assert!(franchise.contains(SEQUEL));
     assert!(!franchise.contains(UNRELATED));
     assert!(franchise.contains("In library"));
@@ -306,7 +385,7 @@ async fn mocked_provider_results_and_save() {
     let setup = html(request(&state, &request_uri(setup_link), None).await).await;
     assert!(setup.contains("Set up release"));
     assert!(setup.contains(SEQUEL));
-    let back_links = add_links(&setup, "a[href^='/library/add?']");
+    let back_links = add_links(&setup, "a[href^='/discover?']");
     assert!(back_links.iter().any(|link| link == franchise_link));
     assert_eq!(crate::test_support::count_series(&db).await, 1);
 
