@@ -1,6 +1,8 @@
 //! Project provider relationships into viewing sections without changing franchise
 //! membership or inferring an intended watch order.
 
+pub(in crate::handlers::library) mod branches;
+
 use std::collections::{BTreeSet, HashMap};
 
 use super::Entry;
