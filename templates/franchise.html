@@ -100,14 +100,31 @@
     {% if section.title.is_empty() %}
         {% call release_list(section.releases.as_slice(), section.title.as_str()) %}{% endcall %}
     {% else if section.extras %}
-        <details class="library-franchise-section library-franchise-extras" data-franchise-section{% if !section.has_matches() %} hidden{% endif %} open>
+        <details class="library-franchise-section library-franchise-extras" data-franchise-section{% if !section.has_matches() %} hidden{% endif %}{% if !filters.f_q.is_empty() %} open{% endif %}>
             <summary><h4>{{ section.title }}</h4></summary>
             {% call release_list(section.releases.as_slice(), section.title.as_str()) %}{% endcall %}
         </details>
     {% else %}
         <section class="library-franchise-section" aria-labelledby="franchise-storyline-{{ loop.index }}" data-franchise-section{% if !section.has_matches() %} hidden{% endif %}>
-            <h4 id="franchise-storyline-{{ loop.index }}">{{ section.title }}</h4>
+            <div class="library-storyline-heading">
+                <div>
+                    <h4 id="franchise-storyline-{{ loop.index }}">{{ section.title }}</h4>
+                    {% for link in section.links.iter().take(2) %}<p class="card-date">{{ link.label }} <strong>{{ link.peer_title }}</strong></p>{% endfor %}
+                    {% if section.links.len() > 2 %}
+                    <details class="library-storyline-connections card-date">
+                        <summary>More connections</summary>
+                        {% for link in section.links.iter().skip(2) %}<p>{{ link.label }} <strong>{{ link.peer_title }}</strong></p>{% endfor %}
+                    </details>
+                    {% endif %}
+                </div>
+                {% if let Some(path) = section.selection_path %}<a class="btn btn-secondary btn-sm" href="{{ path }}" hx-boost="false">Select this storyline</a>{% endif %}
+            </div>
+            {% if filters.f_order == "storylines" %}
+            <details class="library-storyline-releases"{% if !filters.f_q.is_empty() %} open{% endif %}>
+                <summary>{{ section.releases.len() }} release{% if section.releases.len() != 1 %}s{% endif %}</summary>
+            {% endif %}
             {% call release_list(section.releases.as_slice(), section.title.as_str()) %}{% endcall %}
+            {% if filters.f_order == "storylines" %}</details>{% endif %}
         </section>
     {% endif %}
     {% endfor %}

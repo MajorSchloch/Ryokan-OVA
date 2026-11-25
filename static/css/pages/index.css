@@ -1355,7 +1355,12 @@ a.franchise-status:hover { border-color: currentColor; text-decoration: underlin
 .library-franchise-release-heading { justify-content: space-between; flex-wrap: wrap; }
 #franchise-releases-title { scroll-margin-top: 5rem; }
 .library-franchise-section { margin-block: 24px; }
-.library-franchise-section > h4, .library-franchise-extras summary h4 { margin: 0; }
+.library-storyline-heading { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; }
+.library-storyline-heading > div { min-width: 0; overflow-wrap: anywhere; }
+.library-storyline-heading h4, .library-franchise-extras summary h4 { margin: 0; }
+.library-storyline-connections p { margin-block: 4px; }
+.library-storyline-releases > summary, .library-storyline-connections > summary { cursor: pointer; }
+.library-storyline-releases > summary { color: var(--text-dim); margin-block: 6px; }
 .library-franchise-extras summary { cursor: pointer; }
 .library-franchise-extras summary h4 { display: inline; }
 .library-franchise-section .franchise-release-info h5 { margin: 0 0 6px; overflow-wrap: anywhere; line-height: 1.35; font-size: 1rem; }
@@ -1531,6 +1536,15 @@ a.franchise-status:hover { border-color: currentColor; text-decoration: underlin
 .discover-release-section { margin-block: 20px; }
 .discover-release-section h4, .discover-release-section summary { margin: 0 0 8px; }
 .discover-release-section summary, .discover-watch-guide summary { font-weight: 600; cursor: pointer; }
+.discover-section-heading, .discover-storyline-action { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 12px; }
+.discover-section-heading { justify-content: space-between; margin-bottom: 8px; }
+.discover-section-heading h4 { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.discover-storyline-context { margin: 0 0 10px; padding: 0; list-style: none; color: var(--text-dim); font-size: 13px; overflow-wrap: anywhere; }
+.discover-storyline-context a { color: inherit; }
+.discover-storyline-context ul { padding-inline-start: 18px; }
+.discover-storyline-context summary, .discover-storyline-releases > summary { font-weight: 400; margin: 0 0 6px; }
+.discover-storyline-section { margin-block: 12px; border-top: 1px solid var(--border); padding-top: 12px; }
+.discover-storyline-releases > summary { color: var(--text-dim); }
 .discover-release-order, .discover-release-toolbar { display: flex; flex-wrap: wrap; gap: 6px; }
 .discover-release-order [aria-current="true"] { border-color: var(--accent); color: var(--accent); }
 .discover-watch-guide {
@@ -1574,6 +1588,12 @@ a.franchise-status:hover { border-color: currentColor; text-decoration: underlin
 }
 .discover-add-selection .form-group { margin: 0; }
 .discover-add-selection select { max-width: 100%; }
+.discover-selection-review { margin-top: 16px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); scroll-margin-top: 5rem; overflow-wrap: anywhere; }
+.discover-selection-review summary { font-weight: 600; cursor: pointer; }
+.discover-selection-review ul { margin: 8px 0 0; padding-inline-start: 24px; }
+.discover-selection-review li + li { margin-top: 6px; }
+.discover-selection-review li small { display: block; color: var(--text-dim); }
+.discover-selection-review .form-hint { margin: 8px 0 0; }
 .discover-franchise-rating { margin: 0 0 8px; }
 #add-anime-releases-title, .add-anime-results .anilist-result { scroll-margin-top: 5rem; }
 .add-anime-franchise {

@@ -25,18 +25,40 @@
 </ul>
 {% endmacro %}
 
-{% macro release_sections(sections, choosing) %}
+{% macro release_sections(sections, choosing, compact) %}
 {% for section in sections %}
-<section class="discover-release-section" aria-labelledby="discover-releases-{{ section.id }}">
-    {% if section.extras %}
-    <details open>
-    <summary id="discover-releases-{{ section.id }}">{{ section.title }}</summary>
-    {% else %}
-    <h4 id="discover-releases-{{ section.id }}">{{ section.title }}</h4>
+<section class="discover-release-section{% if compact %} discover-storyline-section{% endif %}" aria-labelledby="discover-releases-{{ section.id }}">
+    <div class="discover-section-heading">
+        <h4 id="discover-releases-{{ section.id }}">{{ section.title }}</h4>
+        {% if !choosing && guide_input.is_none() %}
+        {% if let Some(path) = section.selection_path %}
+        <div class="discover-storyline-action">
+            <small class="anilist-meta">{{ section.selection_count }} to add</small>
+            <a class="btn btn-secondary" href="{{ path }}" hx-boost="false" aria-describedby="discover-releases-{{ section.id }}">Select this storyline</a>
+        </div>
+        {% endif %}
+        {% endif %}
+    </div>
+    {% if !section.links.is_empty() %}
+    <ul class="discover-storyline-context" aria-label="Storyline connections">
+        {% for link in section.links.iter().take(2) %}<li>{{ link.label }} <a href="#discover-release-{{ link.id }}">{{ link.title }}</a></li>{% endfor %}
+        {% if section.links.len() > 2 %}
+        <li><details>
+            <summary>More connections</summary>
+            <ul>
+                {% for link in section.links.iter().skip(2) %}<li>{{ link.label }} <a href="#discover-release-{{ link.id }}">{{ link.title }}</a></li>{% endfor %}
+            </ul>
+        </details></li>
+        {% endif %}
+    </ul>
+    {% endif %}
+    {% if compact %}
+    <details class="discover-storyline-releases"{% if choosing && section.has_selected(&selected_releases) %} open{% endif %}>
+        <summary>{{ section.releases.len() }} release{% if section.releases.len() != 1 %}s{% endif %}</summary>
     {% endif %}
     <ul class="add-anime-results{% if choosing %} add-anime-results--select{% endif %}">
         {% for release in section.releases %}
-        <li class="anilist-result" id="discover-release-{{ release.id }}">
+        <li class="anilist-result" id="discover-release-{{ release.id }}"{% if choosing && !release.row.existing %} data-review-facts="{% if !release.row.facts.is_empty() %}{{ release.row.facts }} · {% endif %}{{ release.date }}"{% endif %}>
             {% if choosing && !release.row.existing %}
             <label class="discover-release-choice">
                 <input type="checkbox" name="release" value="{{ release.id }}" form="add-anime-selected"{% if selected_releases.contains(&release.id) %} checked{% endif %}>
@@ -61,7 +83,7 @@
         </li>
         {% endfor %}
     </ul>
-    {% if section.extras %}</details>{% endif %}
+    {% if compact %}</details>{% endif %}
 </section>
 {% endfor %}
 {% endmacro %}
@@ -153,7 +175,9 @@
     <section aria-labelledby="add-anime-releases-title">
         <div class="discover-shelf-heading">
             <h3 id="add-anime-releases-title">{% if select %}Choose releases to add{% else %}Releases{% endif %}</h3>
-            {% if !select && guide_input.is_none() %}
+            {% if select %}
+            <a href="#discover-selection-review" data-discover-review-link hidden>Review selection</a>
+            {% else if guide_input.is_none() %}
             <div class="discover-release-toolbar">
                 {% if self.can_preview_guide() %}<a class="btn btn-secondary" href="{{ self.guide_path() }}" hx-boost="false">Preview watch guide</a>{% endif %}
                 {% if group.can_select %}<a class="btn btn-primary" href="{{ self.select_releases_path() }}" hx-boost="false">Add releases</a>{% endif %}
@@ -180,7 +204,8 @@
         <p class="form-hint">Every release in this guide is already in your library.</p>
         <a href="{{ self.back_to_setup_parent() }}#add-anime-releases-title" hx-boost="false">Back to all releases</a>
         {% endif %}
-        {% call release_sections(group.sections.as_slice(), select) %}{% endcall %}
+        {% let compact = self.order.as_str() == "storylines" && guide.is_none() %}
+        {% call release_sections(group.sections.as_slice(), select, compact) %}{% endcall %}
         {% if select %}
         <form class="discover-add-selection" id="add-anime-selected" action="/discover/add-releases#add-anime-releases-title" method="post" hx-boost="false">
             {% if let Some(id) = franchise_id %}<input type="hidden" name="franchise_id" value="{{ id }}">{% endif %}
@@ -201,6 +226,11 @@
                 </select>
                 <p class="form-hint" id="discover-monitor-hint">Ryokan checks monitored episodes on its usual schedule.</p>
             </div>
+            <details class="discover-selection-review" id="discover-selection-review" tabindex="-1" open hidden>
+                <summary><span data-discover-selection-count aria-live="polite"></span></summary>
+                <ul hidden></ul>
+                <p class="form-hint" hidden>Select releases above to review them here.</p>
+            </details>
             <div class="add-anime-actions">
                 <a class="btn btn-secondary" href="{{ self.back_to_setup_parent() }}#add-anime-releases-title" hx-boost="false">Cancel</a>
                 <button type="submit" class="btn btn-primary">Add selected releases</button>

@@ -280,6 +280,70 @@ async fn orders_releases_across_formats_and_keeps_unknown_watch_positions_separa
 }
 
 #[tokio::test]
+async fn selects_only_untracked_releases_in_the_requested_storyline() {
+    const EXTRA: i64 = 910_025;
+    let db = in_memory_pool().await;
+    seed_series(&db, TRACKED, ORIGINAL).await;
+    let root = provider_entry(TRACKED, ORIGINAL);
+    let mut first = provider_entry(NEW, "Ada Orbit Red Route");
+    first["relations"]["edges"] = json!([{"relationType":"PREQUEL","node":root.clone()}]);
+    let mut next = provider_entry(UPCOMING, "Ada Orbit Red Route Finale");
+    next["relations"]["edges"] = json!([{"relationType":"PREQUEL","node":first.clone()}]);
+    let mut other = provider_entry(OTHER, "Ada Orbit Blue Route");
+    other["relations"]["edges"] = json!([{"relationType":"PREQUEL","node":root.clone()}]);
+    let mut extra = provider_entry(EXTRA, "Ada Orbit Short");
+    extra["relations"]["edges"] = json!([{"relationType":"PARENT","node":root.clone()}]);
+    for item in [root, first, next, other, extra] {
+        let detail = anilist::parse_media_node(&item).unwrap();
+        metadata_cache::upsert_provider(&db, detail.id, None, &detail)
+            .await
+            .unwrap();
+    }
+    let state = build_test_app_state(db.clone(), None);
+    let base = format!("/discover?franchise_id={TRACKED}&order=storylines");
+    let browse = html(request(&state, &base, None).await).await;
+    let links = add_links(&browse, ".discover-storyline-action a");
+    assert_eq!(
+        links
+            .iter()
+            .filter_map(|url| link_id(url, "storyline"))
+            .collect::<HashSet<_>>(),
+        HashSet::from([NEW, OTHER])
+    );
+    assert!(browse.contains(&format!(
+        "Continues from <a href=\"#discover-release-{TRACKED}\""
+    )));
+
+    let choose =
+        html(request(&state, &format!("{base}&select=true&storyline={NEW}"), None).await).await;
+    let checked = scraper::Selector::parse("input[name='release'][checked]").unwrap();
+    let chosen_ids = |markup: &str| {
+        scraper::Html::parse_document(markup)
+            .select(&checked)
+            .map(|input| input.value().attr("value").unwrap().parse::<i64>().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(chosen_ids(&choose), [NEW, UPCOMING]);
+    assert!(choose.contains(&format!("name=\"release\" value=\"{OTHER}\"")));
+    assert!(choose.contains(&format!("name=\"release\" value=\"{EXTRA}\"")));
+    assert!(!choose.contains(&format!("name=\"release\" value=\"{TRACKED}\"")));
+
+    for head in [EXTRA, 42] {
+        let stale = html(request(&state, &format!("{base}&storyline={head}"), None).await).await;
+        assert!(chosen_ids(&stale).is_empty());
+        assert!(stale.contains("Choose releases individually."));
+    }
+    assert_eq!(series::get_all(&db).await.unwrap().len(), 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM grabbed_torrents")
+            .fetch_one(&db)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn watch_guide_previews_exact_releases_and_only_presets_required_choices() {
     let db = in_memory_pool().await;
     let root = provider_entry(TRACKED, ORIGINAL);

@@ -26,6 +26,13 @@ impl StorylineKind {
             Self::Related => "related",
         }
     }
+
+    pub(in crate::handlers::library) fn can_select(self) -> bool {
+        matches!(
+            self,
+            Self::Sequence | Self::Continuation | Self::SpinOff | Self::Alternative
+        )
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -34,6 +41,20 @@ pub(in crate::handlers::library) struct Storyline {
     pub releases: Vec<i64>,
     pub extras: bool,
     pub kind: StorylineKind,
+    pub links: Vec<StorylineLink>,
+}
+
+impl Storyline {
+    pub(in crate::handlers::library) fn head(&self) -> i64 {
+        self.releases[0]
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::handlers::library) struct StorylineLink {
+    pub peer_id: i64,
+    pub peer_title: String,
+    pub label: &'static str,
 }
 
 #[derive(Default)]
@@ -66,17 +87,19 @@ pub(in crate::handlers::library) fn sections(entries: &[Entry]) -> Vec<Storyline
                             )
                     })
             });
+            let peers = |label| {
+                labels
+                    .clone()
+                    .filter(|link| link.label == label)
+                    .map(|link| positions[&link.peer_id])
+                    .collect()
+            };
             Roles {
                 extras,
-                spin_offs: labels
-                    .clone()
-                    .filter(|link| link.label == "Spin-off of")
-                    .map(|link| positions[&link.peer_id])
-                    .collect(),
-                alternatives: labels
-                    .filter(|link| link.label == "Alternative to")
-                    .map(|link| positions[&link.peer_id])
-                    .collect(),
+                spin_offs: peers("Spin-off of"),
+                recaps: peers("Summary of"),
+                side_stories: peers("Side story of"),
+                alternatives: peers("Alternative to"),
             }
         })
         .collect();
@@ -166,6 +189,7 @@ pub(in crate::handlers::library) fn sections(entries: &[Entry]) -> Vec<Storyline
                 releases: path.iter().map(|&pos| entries[pos].provider_id).collect(),
                 extras: false,
                 kind,
+                links: storyline_links(&path, entries, &links, &roles),
             });
         }
     }
@@ -180,6 +204,7 @@ pub(in crate::handlers::library) fn sections(entries: &[Entry]) -> Vec<Storyline
                 .collect(),
             extras: false,
             kind: StorylineKind::Related,
+            links: Vec::new(),
         });
     }
     let extras: Vec<_> = entries
@@ -193,14 +218,66 @@ pub(in crate::handlers::library) fn sections(entries: &[Entry]) -> Vec<Storyline
             releases: extras,
             extras: true,
             kind: StorylineKind::Extras,
+            links: Vec::new(),
         });
     }
     result
 }
 
+fn storyline_links(
+    path: &[usize],
+    entries: &[Entry],
+    links: &[Links],
+    roles: &[Roles],
+) -> Vec<StorylineLink> {
+    let mut seen: BTreeSet<_> = path.iter().copied().collect();
+    let predecessors = &links[path[0]].before;
+    let predecessor_label = if predecessors.len() == 1 {
+        "Continues from"
+    } else {
+        "Linked prequel"
+    };
+    // One reference per destination. A verified direct predecessor at the
+    // start is more useful here than a version relationship later in the path.
+    predecessors
+        .iter()
+        .map(|&peer| (peer, predecessor_label))
+        .chain(path.iter().flat_map(|&pos| {
+            roles[pos]
+                .spin_offs
+                .iter()
+                .map(|&peer| (peer, "Spin-off of"))
+        }))
+        .chain(
+            path.iter()
+                .flat_map(|&pos| roles[pos].recaps.iter().map(|&peer| (peer, "Recaps"))),
+        )
+        .chain(path.iter().flat_map(|&pos| {
+            roles[pos]
+                .side_stories
+                .iter()
+                .map(|&peer| (peer, "Side story of"))
+        }))
+        .chain(path.iter().flat_map(|&pos| {
+            roles[pos]
+                .alternatives
+                .iter()
+                .map(|&peer| (peer, "Alternative to"))
+        }))
+        .filter(|(peer, _)| seen.insert(*peer) && !entries[*peer].title.trim().is_empty())
+        .map(|(peer, label)| StorylineLink {
+            peer_id: entries[peer].provider_id,
+            peer_title: entries[peer].title.clone(),
+            label,
+        })
+        .collect()
+}
+
 struct Roles {
     extras: bool,
     spin_offs: Vec<usize>,
+    recaps: Vec<usize>,
+    side_stories: Vec<usize>,
     alternatives: Vec<usize>,
 }
 
@@ -330,6 +407,62 @@ mod tests {
                 (StorylineKind::Continuation, vec![3, 5]),
                 (StorylineKind::Continuation, vec![6, 7]),
             ],
+        );
+    }
+
+    #[test]
+    fn links_sections_to_exact_releases_without_repeating_shared_setup() {
+        let entries = [
+            entry(10, &[], &[]),
+            entry(11, &[10], &[]),
+            entry(12, &[11], &[]),
+            entry(13, &[11], &[]),
+            entry(14, &[12, 13, 13], &[]),
+            entry(20, &[], &[("Spin-off of", 10), ("Spin-off of", 99)]),
+            entry(21, &[20], &[("Spin-off of", 10)]),
+            entry(30, &[], &[("Alternative to", 13), ("Alternative to", 99)]),
+            entry(40, &[], &[("Summary of", 11)]),
+            entry(50, &[], &[("Related to", 11)]),
+            entry(60, &[], &[("Summary of", 10)]),
+            entry(61, &[60], &[("Summary of", 10)]),
+            entry(70, &[], &[("Side story of", 11)]),
+            entry(71, &[70], &[]),
+        ];
+        let sections = sections(&entries);
+        let context = |head| {
+            let section = sections
+                .iter()
+                .find(|section| section.head() == head)
+                .unwrap();
+            section
+                .links
+                .iter()
+                .map(|link| (link.label, link.peer_id, link.peer_title.as_str()))
+                .collect::<Vec<_>>()
+        };
+        assert!(context(10).is_empty());
+        assert_eq!(context(12), [("Continues from", 11, "Release 11")]);
+        assert_eq!(context(13), [("Continues from", 11, "Release 11")]);
+        assert_eq!(
+            context(14),
+            [
+                ("Linked prequel", 12, "Release 12"),
+                ("Linked prequel", 13, "Release 13"),
+            ]
+        );
+        assert_eq!(context(20), [("Spin-off of", 10, "Release 10")]);
+        assert_eq!(context(30), [("Alternative to", 13, "Release 13")]);
+        assert!(context(40).is_empty());
+        assert!(context(50).is_empty());
+        assert_eq!(context(60), [("Recaps", 10, "Release 10")]);
+        assert_eq!(context(70), [("Side story of", 11, "Release 11")]);
+        assert_eq!(
+            sections
+                .iter()
+                .filter(|section| section.kind.can_select())
+                .map(Storyline::head)
+                .collect::<Vec<_>>(),
+            [10, 12, 13, 14, 20, 30, 60, 70]
         );
     }
 

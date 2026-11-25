@@ -33,6 +33,7 @@ pub(super) struct Browse {
     provider_id: Option<i64>,
     franchise_id: Option<i64>,
     select: bool,
+    storyline: Option<i64>,
     order: ReleaseOrder,
     guide: bool,
 }
@@ -320,6 +321,10 @@ impl AddPage {
     }
 }
 
+pub(super) fn storyline_selection_path(franchise_path: &str, head: i64) -> String {
+    format!("{franchise_path}&select=true&storyline={head}#add-anime-releases-title")
+}
+
 fn title(lang: &str, english: &str, romaji: &str, native: &str) -> String {
     library_link::pick_title(lang, english, romaji, native).to_owned()
 }
@@ -420,9 +425,39 @@ pub(super) async fn page(
         if query.guide && view.can_preview_guide() {
             view.guide_input = Some(GuideInput::default());
         }
+        let storyline = query.storyline.filter(|_| view.guide_input.is_none());
+        if storyline.is_some() {
+            view.order = ReleaseOrder::Storylines;
+        }
         match discovery::open(&state, &view, seed).await {
             Ok(franchise) => {
-                view.select = query.select && franchise.can_select && view.guide_input.is_none();
+                view.select = (query.select || storyline.is_some())
+                    && franchise.can_select
+                    && view.guide_input.is_none();
+                if let Some(head) = storyline {
+                    if let Some(section) = franchise
+                        .sections
+                        .iter()
+                        .find(|section| section.storyline == Some(head))
+                    {
+                        view.selected_releases.extend(
+                            section
+                                .releases
+                                .iter()
+                                .filter(|release| !release.row.existing)
+                                .map(|release| release.id),
+                        );
+                        if view.selected_releases.is_empty() {
+                            view.selection_notice =
+                                "Every release in this storyline is already in your library."
+                                    .into();
+                        }
+                    } else {
+                        view.selection_notice =
+                            "This storyline is unavailable for selection. Choose releases individually."
+                                .into();
+                    }
+                }
                 view.franchise = Some(franchise);
             }
             Err(error) => {
