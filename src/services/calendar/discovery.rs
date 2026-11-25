@@ -48,6 +48,7 @@ pub(crate) async fn read(db: &SqlitePool) -> Result<Snapshot, String> {
 pub(crate) struct PageContext {
     pub rating: Option<i32>,
     pub aliases: Vec<String>,
+    pub genres: Vec<String>,
     pub franchise: Option<FranchiseLink>,
     has_exact_detail: bool,
 }
@@ -59,7 +60,11 @@ pub(crate) struct FranchiseLink {
     pub label: &'static str,
 }
 
-fn reference_link(id: i64, relations: &[RelatedEntry], lang: &str) -> Option<FranchiseLink> {
+pub(crate) fn reference_link(
+    id: i64,
+    relations: &[RelatedEntry],
+    lang: &str,
+) -> Option<FranchiseLink> {
     let rank = |relation: &RelatedEntry| match relation.relation_type.as_str() {
         "PARENT" | "PARENT_STORY" => 0,
         "FULL_STORY" => 1,
@@ -118,6 +123,7 @@ async fn contexts(
             PageContext {
                 rating,
                 aliases,
+                genres: detail.genres,
                 franchise,
                 has_exact_detail: true,
             },
@@ -174,6 +180,9 @@ pub(crate) async fn premiere_contexts(
         let id = item.entry.id;
         let context = data.entry(id).or_default();
         context.rating = context.rating.or(valid_rating(item.entry.average_score));
+        if context.genres.is_empty() {
+            context.genres.clone_from(&item.genres);
+        }
         if context.franchise.is_none() && !context.has_exact_detail {
             context.franchise = item
                 .relations

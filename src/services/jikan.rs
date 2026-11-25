@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 use crate::models::log::LogCategory;
-use crate::services::anilist::{AnimeDetail, AnimeEntry, RelatedEntry, StreamingEpisode};
+use crate::services::anilist::{
+    AnimeDetail, AnimeEntry, AnimeSearchHit, RelatedEntry, StreamingEpisode,
+};
 use crate::services::http_body::CappedBody;
 use crate::services::logger;
 
@@ -31,6 +33,7 @@ const DETAIL_CACHE_MAX_ENTRIES: usize = 500;
 #[derive(Debug, Clone)]
 struct DetailCacheEntry {
     detail: AnimeDetail,
+    preview_airing_day: Option<String>,
     fetched_at: Instant,
 }
 
@@ -206,6 +209,7 @@ struct SearchAnime {
     anime_type: Option<String>,
     status: Option<String>,
     episodes: Option<i32>,
+    genres: Option<Vec<NamedItem>>,
     /// MAL's 1-10 community score, e.g. `7.85`. `None` for entries
     /// with no rating yet. Multiplied by 10 on conversion to
     /// `AnimeEntry::average_score` (Option<i32> on the AL 0-100
@@ -318,7 +322,28 @@ fn parse_air_year(value: Option<&str>) -> Option<i32> {
         .and_then(|y| y.parse::<i32>().ok())
 }
 
+fn parse_airing_day(value: Option<&str>) -> Option<String> {
+    let value = value?;
+    let date = if value.contains('T') {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .ok()?
+            .date_naive()
+    } else {
+        chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()?
+    };
+    let date = date.format("%Y-%m-%d").to_string();
+    (date.len() == 10 && !date.starts_with("0000")).then_some(date)
+}
+
 pub async fn search_anime(query: &str) -> Result<Vec<AnimeEntry>, String> {
+    Ok(search_anime_hits(query)
+        .await?
+        .into_iter()
+        .map(|hit| hit.entry)
+        .collect())
+}
+
+pub(crate) async fn search_anime_hits(query: &str) -> Result<Vec<AnimeSearchHit>, String> {
     let query = query.trim();
     if query.is_empty() {
         return Ok(Vec::new());
@@ -372,7 +397,13 @@ pub async fn search_anime(query: &str) -> Result<Vec<AnimeEntry>, String> {
         .map(|anime| {
             let (format, _) = normalize_enum_label(anime.anime_type);
             let (status, status_display) = normalize_enum_label(anime.status);
-            AnimeEntry {
+            let genres = anime
+                .genres
+                .unwrap_or_default()
+                .into_iter()
+                .map(|item| item.name)
+                .collect();
+            let entry = AnimeEntry {
                 id: -anime.mal_id,
                 id_mal: Some(anime.mal_id),
                 title_romaji: anime.title.clone().unwrap_or_default(),
@@ -395,6 +426,10 @@ pub async fn search_anime(query: &str) -> Result<Vec<AnimeEntry>, String> {
                     .score
                     .filter(|s| *s > 0.0)
                     .map(|s| (s * 10.0).round() as i32),
+            };
+            AnimeSearchHit {
+                genres,
+                ..entry.into()
             }
         })
         .collect())
@@ -547,6 +582,7 @@ pub async fn seed_detail_cache_for_tests(mal_id: i64, detail: AnimeDetail) {
         mal_id,
         DetailCacheEntry {
             detail,
+            preview_airing_day: None,
             fetched_at: Instant::now(),
         },
     );
@@ -578,17 +614,21 @@ pub async fn reset_state_for_tests() {
     }
 }
 
+async fn cached_detail(mal_id: i64) -> Option<DetailCacheEntry> {
+    DETAIL_CACHE
+        .read()
+        .await
+        .get(&mal_id)
+        .filter(|entry| entry.fetched_at.elapsed().as_secs() < DETAIL_CACHE_TTL_SECS)
+        .cloned()
+}
+
 pub async fn get_anime_detail_cached(mal_id: i64) -> Result<AnimeDetail, String> {
-    {
-        let cache = DETAIL_CACHE.read().await;
-        if let Some(entry) = cache.get(&mal_id)
-            && entry.fetched_at.elapsed().as_secs() < DETAIL_CACHE_TTL_SECS
-        {
-            return Ok(entry.detail.clone());
-        }
+    if let Some(entry) = cached_detail(mal_id).await {
+        return Ok(entry.detail);
     }
 
-    let detail = get_anime_detail(mal_id).await?;
+    let (detail, preview_airing_day) = fetch_anime_detail(mal_id).await?;
 
     {
         let mut cache = DETAIL_CACHE.write().await;
@@ -596,6 +636,7 @@ pub async fn get_anime_detail_cached(mal_id: i64) -> Result<AnimeDetail, String>
             mal_id,
             DetailCacheEntry {
                 detail: detail.clone(),
+                preview_airing_day,
                 fetched_at: Instant::now(),
             },
         );
@@ -631,14 +672,50 @@ fn is_adult_rating(rating: Option<&str>) -> bool {
 }
 
 pub async fn get_anime_detail(mal_id: i64) -> Result<AnimeDetail, String> {
+    fetch_anime_detail(mal_id).await.map(|(detail, _)| detail)
+}
+
+pub(crate) async fn get_anime_preview(mal_id: i64) -> Result<AnimeDetail, String> {
+    if let Some(entry) = cached_detail(mal_id).await {
+        let mut detail = entry.detail;
+        if detail.release_date.is_none() {
+            detail.release_date = entry.preview_airing_day;
+        }
+        return Ok(detail);
+    }
+
+    // The preview needs only this release. Related cards require separate
+    // requests, and this partial detail must stay out of the full-detail cache.
+    let anime = fetch_full_anime(mal_id).await?;
+    Ok(preview_from_full(anime))
+}
+
+async fn fetch_full_anime(mal_id: i64) -> Result<FullAnime, String> {
     let client = &*HTTP_CLIENT;
     let api_base = std::env::var("JIKAN_API_BASE").unwrap_or_else(|_| JIKAN_API.to_string());
     let url = format!("{}/anime/{}/full", api_base.trim_end_matches('/'), mal_id);
     let body: FullResponse = get_json_with_retry(client, &url)
         .await
         .map_err(|e| format!("Jikan detail failed: {}", e))?;
+    Ok(body.data)
+}
 
-    let mut anime = body.data;
+async fn fetch_anime_detail(mal_id: i64) -> Result<(AnimeDetail, Option<String>), String> {
+    let mut anime = fetch_full_anime(mal_id).await?;
+    let preview_airing_day = parse_airing_day(anime.aired.as_ref().and_then(|a| a.from.as_deref()));
+    // Enrich the relations returned by `/full` for existing detail callers.
+    let relations = enrich_relations(anime.relations.take().unwrap_or_default()).await;
+    Ok((detail_from_full(anime, relations), preview_airing_day))
+}
+
+fn preview_from_full(anime: FullAnime) -> AnimeDetail {
+    let release_date = parse_airing_day(anime.aired.as_ref().and_then(|a| a.from.as_deref()));
+    let mut detail = detail_from_full(anime, Vec::new());
+    detail.release_date = release_date;
+    detail
+}
+
+fn detail_from_full(anime: FullAnime, relations: Vec<RelatedEntry>) -> AnimeDetail {
     let mut genres = Vec::new();
     if let Some(items) = anime.genres {
         genres.extend(items.into_iter().map(|g| g.name));
@@ -659,11 +736,7 @@ pub async fn get_anime_detail(mal_id: i64) -> Result<AnimeDetail, String> {
     let end_year = parse_air_year(anime.aired.as_ref().and_then(|a| a.to.as_deref()));
     let (format, _) = normalize_enum_label(anime.anime_type.clone());
     let (status, status_display) = normalize_enum_label(anime.status.clone());
-    // Relations come pre-baked in the `/full` payload (Jikan v4 — confirmed
-    // 2026-04). Skip the redundant `/anime/{id}/relations` round-trip.
-    let relations = enrich_relations(anime.relations.take().unwrap_or_default()).await;
-
-    Ok(AnimeDetail {
+    AnimeDetail {
         country_of_origin: None,
         release_date: None,
         is_adult: is_adult_rating(anime.rating.as_deref()),
@@ -713,7 +786,7 @@ pub async fn get_anime_detail(mal_id: i64) -> Result<AnimeDetail, String> {
             })
             .unwrap_or_default(),
         relations,
-    })
+    }
 }
 
 pub async fn fetch_episode_titles(db: &SqlitePool, mal_id: i64) -> HashMap<i32, EpisodeInfo> {
@@ -1346,6 +1419,48 @@ mod tests {
     fn parse_air_year_returns_none_on_malformed_input() {
         assert_eq!(parse_air_year(Some("not-a-date")), None);
         assert_eq!(parse_air_year(Some("")), None);
+    }
+
+    #[test]
+    fn preview_airing_day_validates_dates_and_preserves_the_provider_day() {
+        assert_eq!(
+            parse_airing_day(Some("2024-02-29T00:00:00+09:00")).as_deref(),
+            Some("2024-02-29")
+        );
+        assert_eq!(
+            parse_airing_day(Some("2023-04-02")).as_deref(),
+            Some("2023-04-02")
+        );
+        for invalid in [None, Some("2023-02-29"), Some("0000-01-01"), Some("2024")] {
+            assert!(parse_airing_day(invalid).is_none());
+        }
+    }
+
+    #[test]
+    fn preview_maps_the_exact_mal_release_without_related_cards() {
+        let node = serde_json::json!({
+            "mal_id": 17,
+            "title": "An example movie",
+            "synopsis": "A short synopsis.",
+            "type": "Movie",
+            "genres": [{"name": "Mystery"}],
+            "aired": {"from": "2024-02-29T00:00:00+09:00"},
+            "relations": [{"relation": "Prequel", "entry": [
+                {"mal_id": 6, "type": "anime", "name": "Related show"}
+            ]}]
+        });
+        let anime: FullAnime = serde_json::from_value(node.clone()).unwrap();
+        assert_eq!(anime.relations.as_ref().unwrap().len(), 1);
+        let preview = preview_from_full(anime);
+        assert_eq!(preview.id, -17);
+        assert_eq!(preview.format, "MOVIE");
+        assert_eq!(preview.release_date.as_deref(), Some("2024-02-29"));
+        assert_eq!(preview.genres, ["Mystery"]);
+        assert!(preview.description.contains("A short synopsis."));
+        assert!(preview.relations.is_empty());
+
+        let full = detail_from_full(serde_json::from_value(node).unwrap(), Vec::new());
+        assert!(full.release_date.is_none());
     }
 
     // ─── score_class ──────────────────────────────────────────────

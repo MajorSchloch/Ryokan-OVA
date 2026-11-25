@@ -2,8 +2,8 @@
 //! airingSchedules gives one premiere per entry, including undated titles.
 use super::{
     AnimeEntry, HTTP_CLIENT, RelatedEntry, anilist_cooldown_active, anilist_post,
-    classify_anilist_failure, cooldown_from_headers, extract_graphql_error, parse_media_relations,
-    parse_search_entry, premiere_date,
+    classify_anilist_failure, cooldown_from_headers, extract_graphql_error, parse_genres,
+    parse_media_relations, parse_search_entry, premiere_date,
     rate_limit::{ANILIST_COOLDOWN_DEFAULT, AniListFailureKind},
     record_rate_limit_headers, set_cooldown_until_now_plus, throttle_before_anilist_request,
 };
@@ -17,6 +17,8 @@ pub struct Premiere {
     pub entry: AnimeEntry,
     pub date: Option<String>,
     pub season: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub genres: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relations: Option<Vec<RelatedEntry>>,
 }
@@ -28,7 +30,7 @@ const QUERY: &str = "query UpcomingAnime($page:Int!, $perPage:Int!) {
         pageInfo { hasNextPage }
         media(type:ANIME,status:NOT_YET_RELEASED,sort:[POPULARITY_DESC,ID]) {
             id idMal title { english romaji native } format status episodes coverImage { large }
-            startDate { year month day } season seasonYear averageScore
+            startDate { year month day } season seasonYear averageScore genres
             relations { edges {
                 relationType(version: 2)
                 node {
@@ -84,6 +86,7 @@ pub async fn fetch() -> Result<Vec<Premiere>, String> {
                     entry,
                     date: premiere_date(&node["startDate"]),
                     season: node["season"].as_str().unwrap_or_default().into(),
+                    genres: parse_genres(node),
                     relations: Some(parse_media_relations(node)),
                 },
             );
@@ -93,4 +96,32 @@ pub async fn fetch() -> Result<Vec<Premiere>, String> {
         }
     }
     Ok(entries.into_values().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn premiere_genres_are_optional_in_saved_snapshots() {
+        let node = json!({"id": 7, "genres": ["Comedy", null, " Mystery ", "  "]});
+        let old_snapshot = json!({
+            "entry": parse_search_entry(&node).unwrap(),
+            "date": "2027-01-02",
+            "season": "WINTER"
+        });
+        let mut premiere: Premiere = serde_json::from_value(old_snapshot).unwrap();
+        assert!(premiere.genres.is_empty());
+        assert!(
+            serde_json::to_value(&premiere)
+                .unwrap()
+                .get("genres")
+                .is_none()
+        );
+
+        premiere.genres = parse_genres(&node);
+        let saved = serde_json::to_string(&premiere).unwrap();
+        let restored: Premiere = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.genres, ["Comedy", "Mystery"]);
+    }
 }

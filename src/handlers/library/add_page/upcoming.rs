@@ -12,21 +12,25 @@ use crate::{
     },
 };
 
-use super::{AddPage, ResultRow, title};
+use super::{AddPage, ResultRow, poster_genres, title};
 
 const POSTER_LIMIT: usize = 8;
 
 pub(super) async fn saved_hit(db: &sqlx::SqlitePool, id: i64) -> Option<AnimeSearchHit> {
+    if id <= 0 {
+        return None;
+    }
     let premiere = discovery::read(db)
         .await
         .ok()?
         .entries
         .into_iter()
-        .find(|premiere| id > 0 && premiere.entry.id == id)?;
+        .find(|premiere| premiere.entry.id == id)?;
     Some(AnimeSearchHit {
         entry: premiere.entry,
         release_date: premiere.date,
         relations: premiere.relations.unwrap_or_default(),
+        genres: premiere.genres,
     })
 }
 
@@ -112,6 +116,11 @@ pub(super) async fn load(state: &AppState, view: &AddPage) -> Vec<ResultRow> {
                 rating: info
                     .and_then(|item| item.rating)
                     .or(valid_rating(entry.average_score)),
+                genres: poster_genres(
+                    info.filter(|item| !item.genres.is_empty())
+                        .map_or(item.genres.as_slice(), |context| context.genres.as_slice()),
+                ),
+                preview_path: format!("/discover/preview/{}", entry.id),
                 franchise,
                 href: view.franchise_path(entry.id),
                 existing: tracked.contains_key(&entry.id),
@@ -151,6 +160,7 @@ mod tests {
             date,
             season: String::new(),
             relations: None,
+            genres: Vec::new(),
         }
     }
 
@@ -196,6 +206,7 @@ mod tests {
         seed_series(&db, 101, "Anime 101").await;
         let mut film = premiere(102, Some(date.to_string()));
         film.entry.format = "MOVIE".into();
+        film.genres = vec!["Mystery".into(), "Drama".into(), "Fantasy".into()];
         let mut exact = crate::services::anilist::parse_media_node(&serde_json::json!({
             "id": 102, "title": { "english": "Film" },
             "relations": { "edges": [{ "relationType": "PARENT", "node": {
@@ -218,6 +229,8 @@ mod tests {
         assert!(posters[0].existing && !posters[1].existing);
         assert_eq!(posters[0].href, view.franchise_path(101));
         assert_eq!(posters[1].href, view.franchise_path(102));
+        assert_eq!(posters[1].preview_path, "/discover/preview/102");
+        assert_eq!(posters[1].genres, ["Mystery", "Drama"]);
         assert!(posters[0].franchise.is_none());
         let link = posters[1].franchise.as_ref().unwrap();
         assert_eq!((link.label, link.title.as_str()), ("Part of", "Anime 101"));
