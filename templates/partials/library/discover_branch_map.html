@@ -1,25 +1,40 @@
-{% macro branch_connections(cards, identity, heading) %}
-{% if !cards.is_empty() %}
-<section class="discover-branch-group" data-branch-relation="{{ identity }}" aria-labelledby="discover-branch-{{ identity }}">
-    <h4 id="discover-branch-{{ identity }}">{{ heading }}</h4>
-    <ul class="discover-branch-cards">
-        {% for card in cards %}
+{% macro timeline_node(card, parent_id) %}
+<div class="discover-timeline-node{% if card.active %} is-focused{% endif %}" id="discover-branch-node-{% if parent_id != 0 %}{{ parent_id }}-{% endif %}{{ card.id }}">
+    <ul class="discover-timeline-releases" role="list">
+        {% for release in card.releases %}
         <li>
-            <a class="discover-branch-card" href="{{ card.href }}" hx-boost="false">
-                <strong>{{ card.title }}</strong>
-                {% if !card.labels.is_empty() %}
-                <span class="discover-branch-card-labels">{% for label in card.labels %}{{ label }}{% if !loop.last %} · {% endif %}{% endfor %}</span>
-                {% endif %}
+            <a class="discover-timeline-release" href="{{ release.href }}" hx-boost="false">
+                {% if !release.cover.is_empty() %}<img src="{{ release.cover }}" alt="" width="28" height="42" loading="lazy" decoding="async">{% endif %}
+                <span class="discover-timeline-release-copy">
+                    {% if !release.labels.is_empty() %}
+                    <span class="discover-timeline-relation">{% for label in release.labels %}{{ label }}{% if !loop.last %} · {% endif %}{% endfor %}</span>
+                    {% endif %}
+                    <strong>{{ release.title }}</strong>
+                    {% if !release.facts.is_empty() || !release.date.is_empty() %}
+                    <small>{{ release.facts }}{% if !release.facts.is_empty() && !release.date.is_empty() %} · {% endif %}{{ release.date }}</small>
+                    {% endif %}
+                </span>
             </a>
+            {% if loop.first && card.active %}
+            <span class="discover-timeline-focus-active">Focused</span>
+            {% else if loop.first && parent_id != 0 %}
+            <a class="discover-timeline-focus" href="{{ card.href }}" aria-label="Focus on {{ card.title }}" hx-boost="false">Focus</a>
+            {% endif %}
         </li>
         {% endfor %}
     </ul>
-</section>
-{% endif %}
+</div>
 {% endmacro %}
 
-<section class="discover-branch-map" id="discover-branch-map" aria-label="Branch map">
-    <form class="discover-branch-picker" action="/discover#add-anime-releases-title" method="get" hx-boost="false">
+<section class="discover-branch-map" id="discover-branch-map" aria-labelledby="discover-branch-title">
+    <header class="discover-timeline-header">
+        <h4 id="discover-branch-title">Storyline timeline</h4>
+        <ul class="discover-timeline-legend" role="list" aria-label="Connection types">
+            <li><span aria-hidden="true"></span>Confirmed sequence</li>
+            <li><span aria-hidden="true"></span>Watch position unconfirmed</li>
+        </ul>
+    </header>
+    <form class="discover-branch-picker" action="/discover#discover-branch-map" method="get" hx-boost="false">
         {% if let Some(id) = franchise_id %}<input type="hidden" name="franchise_id" value="{{ id }}">{% endif %}
         <input type="hidden" name="q" value="{{ q }}">
         <input type="hidden" name="source" value="{{ source }}">
@@ -32,16 +47,20 @@
         </div>
         <button type="submit" class="btn btn-secondary">Show connections</button>
     </form>
-    <div class="discover-branch-directions">
-        {% call branch_connections(map.before.as_slice(), "prequels", "Linked prequels") %}{% endcall %}
-        <div class="discover-branch-focus">
-            <span class="anilist-meta">Focused storyline</span>
-            <h4>{{ map.title }}</h4>
-        </div>
-        {% call branch_connections(map.after.as_slice(), "sequels", "Linked sequels") %}{% endcall %}
-    </div>
-    {% call branch_connections(map.related.as_slice(), "related", "Other connections") %}{% endcall %}
-    {% if map.before.is_empty() && map.after.is_empty() && map.related.is_empty() %}
-    <p class="form-hint">This storyline has no links to other storylines.</p>
-    {% endif %}
+    <ol class="discover-timeline-spine" role="list" aria-label="Storyline sequence">
+        {% for stop in map.stops %}
+        <li class="discover-timeline-stop">
+            {% call timeline_node(stop.story, 0) %}{% endcall %}
+            {% if !stop.branches.is_empty() %}
+            <ul class="discover-timeline-branches" role="list" aria-label="Connections for {{ stop.story.title }}">
+                {% for card in stop.branches %}
+                <li class="discover-timeline-branch{% if card.solid %} is-direct{% endif %}">
+                    {% call timeline_node(card, stop.story.id) %}{% endcall %}
+                </li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ol>
 </section>

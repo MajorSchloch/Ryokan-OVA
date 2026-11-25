@@ -761,8 +761,8 @@ pub async fn page(
         .count();
     let storylines = groups::storylines::sections(&group.entries);
     let branch_map_path = (seed != 0
-        && !groups::storylines::branches::edges(&group.entries, &storylines).is_empty())
-    .then(|| format!("/discover?franchise_id={seed}&order=branches#add-anime-releases-title"));
+        && !groups::storylines::branches::timeline_edges(&group.entries, &storylines).is_empty())
+    .then(|| format!("/discover?franchise_id={seed}&order=branches#discover-branch-map"));
     let release_sections =
         release_sections(&group.entries, storylines, releases, &filters.f_order, seed);
     let watch_fallback = filters.f_order == "watch"

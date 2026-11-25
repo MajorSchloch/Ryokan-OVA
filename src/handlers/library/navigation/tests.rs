@@ -251,13 +251,16 @@ async fn release_rows_support_watch_order_and_hiding_unfollowed() {
     .0;
     let document = scraper::Html::parse_document(&storylines);
     let selector = |css| scraper::Selector::parse(css).unwrap();
-    let guide = document
+    let discover_links: Vec<_> = document
         .select(&selector("a[href^='/discover']"))
-        .next()
-        .unwrap();
-    assert_eq!(
-        guide.attr("href"),
-        Some("/discover?source=al&franchise_id=100&order=storylines&guide=true")
+        .filter_map(|link| link.attr("href"))
+        .collect();
+    assert!(
+        discover_links.contains(&"/discover?franchise_id=100&order=branches#discover-branch-map")
+    );
+    assert!(
+        discover_links
+            .contains(&"/discover?source=al&franchise_id=100&order=storylines&guide=true")
     );
     assert!(
         document
