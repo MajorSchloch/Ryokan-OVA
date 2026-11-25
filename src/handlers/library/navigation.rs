@@ -423,6 +423,8 @@ struct ReleaseSection {
     title: String,
     releases: Vec<Release>,
     extras: bool,
+    links: Vec<groups::storylines::StorylineLink>,
+    selection_path: Option<String>,
 }
 
 impl ReleaseSection {
@@ -435,11 +437,21 @@ fn release_sections(
     entries: &[groups::Entry],
     releases: Vec<Release>,
     order: &str,
+    seed: i64,
 ) -> Vec<ReleaseSection> {
     let sections = match order {
         "storylines" => groups::storylines::sections(entries)
             .into_iter()
-            .map(|section| (section.title, section.releases, section.extras))
+            .map(|section| {
+                let head = section.kind.can_select().then(|| section.head());
+                (
+                    section.title,
+                    section.releases,
+                    section.extras,
+                    section.links,
+                    head,
+                )
+            })
             .collect(),
         "watch" => groups::watch_sequence(entries).map_or_else(Vec::new, |sequence| {
             let known: HashSet<_> = sequence.iter().copied().collect();
@@ -449,8 +461,20 @@ fn release_sections(
                 .filter(|id| !known.contains(id))
                 .collect();
             vec![
-                ("Known watch sequence".into(), sequence, false),
-                ("No known watch position".into(), other, false),
+                (
+                    "Known watch sequence".into(),
+                    sequence,
+                    false,
+                    Vec::new(),
+                    None,
+                ),
+                (
+                    "No known watch position".into(),
+                    other,
+                    false,
+                    Vec::new(),
+                    None,
+                ),
             ]
         }),
         _ => Vec::new(),
@@ -460,6 +484,8 @@ fn release_sections(
             title: String::new(),
             releases,
             extras: false,
+            links: Vec::new(),
+            selection_path: None,
         }];
     }
 
@@ -469,12 +495,22 @@ fn release_sections(
         .collect();
     let mut grouped: Vec<_> = sections
         .into_iter()
-        .filter_map(|(title, ids, extras)| {
+        .filter_map(|(title, ids, extras, links, head)| {
             let releases: Vec<_> = ids.into_iter().filter_map(|id| by_id.remove(&id)).collect();
+            let selection_path = head
+                .filter(|_| seed != 0 && releases.iter().any(|release| !release.in_library))
+                .map(|head| {
+                    super::add_page::storyline_selection_path(
+                        &format!("/discover?franchise_id={seed}&order=storylines"),
+                        head,
+                    )
+                });
             (!releases.is_empty()).then_some(ReleaseSection {
                 title,
                 releases,
                 extras,
+                links,
+                selection_path,
             })
         })
         .collect();
@@ -486,6 +522,8 @@ fn release_sections(
                 .filter_map(|entry| by_id.remove(&entry.provider_id))
                 .collect(),
             extras: false,
+            links: Vec::new(),
+            selection_path: None,
         });
     }
     grouped
@@ -719,7 +757,7 @@ pub async fn page(
         .iter()
         .filter(|release| release.matches_filter)
         .count();
-    let release_sections = release_sections(&group.entries, releases, &filters.f_order);
+    let release_sections = release_sections(&group.entries, releases, &filters.f_order, seed);
     let watch_fallback = filters.f_order == "watch"
         && release_sections
             .first()

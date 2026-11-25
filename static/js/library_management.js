@@ -107,7 +107,14 @@
                     row.hidden = !matches;
                     if (matches) shown++;
                 });
-                sections.forEach(section => { section.hidden = !section.querySelector('[data-franchise-release]:not([hidden])'); });
+                sections.forEach(section => {
+                    section.hidden = !section.querySelector('[data-franchise-release]:not([hidden])');
+                    if (!section.hidden && term) {
+                        const details = section.matches('.library-franchise-extras')
+                            ? section : section.querySelector('.library-storyline-releases');
+                        if (details) details.open = true;
+                    }
+                });
                 filters.querySelector('[data-franchise-count]').textContent = `${shown} of ${rows.length} releases`;
                 titlePage.querySelector('[data-franchise-empty]').hidden = shown > 0;
                 if (update) {

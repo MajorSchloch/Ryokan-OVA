@@ -14,8 +14,8 @@ use crate::{
 };
 
 use super::{
-    AddPage, ReleaseOrder, ResultRow, detail, exact_detail, existing, facts, supported_provider,
-    upcoming,
+    AddPage, ReleaseOrder, ResultRow, detail, exact_detail, existing, facts,
+    storyline_selection_path, supported_provider, upcoming,
 };
 use crate::handlers::library::{
     availability::premiere_label,
@@ -41,7 +41,10 @@ pub(super) struct ReleaseSection {
     pub id: String,
     pub title: String,
     pub releases: Vec<FranchiseRelease>,
-    pub extras: bool,
+    pub storyline: Option<i64>,
+    pub links: Vec<Relationship>,
+    pub selection_path: Option<String>,
+    pub selection_count: usize,
 }
 
 impl ReleaseSection {
@@ -54,8 +57,17 @@ impl ReleaseSection {
             id: id.into(),
             title: title.into(),
             releases,
-            extras: false,
+            storyline: None,
+            links: Vec::new(),
+            selection_path: None,
+            selection_count: 0,
         }
+    }
+
+    pub fn has_selected(&self, selected: &HashSet<i64>) -> bool {
+        self.releases
+            .iter()
+            .any(|release| selected.contains(&release.id) && !release.row.existing)
     }
 }
 
@@ -404,18 +416,40 @@ fn release_sections(
     }
     if view.order == ReleaseOrder::Storylines {
         let mut rows: HashMap<_, _> = rows.map(|row| (row.id, row)).collect();
+        let path = view.franchise_path(seed);
         let sections = groups::storylines::sections(&group.entries)
             .into_iter()
             .enumerate()
-            .map(|(index, section)| ReleaseSection {
-                id: format!("{}-{index}", section.kind.slug()),
-                title: section.title,
-                releases: section
+            .map(|(index, section)| {
+                let storyline = section.kind.can_select().then(|| section.head());
+                let releases: Vec<_> = section
                     .releases
                     .into_iter()
                     .filter_map(|id| rows.remove(&id))
-                    .collect(),
-                extras: section.extras,
+                    .collect();
+                let selection_count = releases
+                    .iter()
+                    .filter(|release| !release.row.existing)
+                    .count();
+                ReleaseSection {
+                    id: format!("{}-{index}", section.kind.slug()),
+                    title: section.title,
+                    releases,
+                    storyline,
+                    links: section
+                        .links
+                        .into_iter()
+                        .map(|link| Relationship {
+                            label: link.label.to_owned(),
+                            title: link.peer_title,
+                            id: link.peer_id,
+                        })
+                        .collect(),
+                    selection_path: storyline
+                        .filter(|_| selection_count > 0)
+                        .map(|head| storyline_selection_path(&path, head)),
+                    selection_count,
+                }
             })
             .collect();
         return (sections, "");
