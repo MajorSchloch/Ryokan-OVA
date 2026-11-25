@@ -204,12 +204,14 @@ async fn cold_search_groups_releases_and_saves_the_selected_mode() {
     let server = MockServer::start().await;
     let mut original = provider_entry(TRACKED, ORIGINAL);
     original["title"]["romaji"] = json!("Ada no Kidou");
+    original["averageScore"] = json!(86);
     original["synonyms"] = json!(["Orbit of Ada", " orbit of ada ", ORIGINAL]);
     original["description"] = json!(
         "<p>The <em>original story</em> begins here.</p><script>unsafe_fixture_markup</script>"
     );
     let mut sequel = provider_entry(NEW, SEQUEL);
     sequel["description"] = json!("The sequel's own synopsis.");
+    sequel["averageScore"] = json!(81);
     sequel["seasonYear"] = json!(2023);
     sequel["idMal"] = json!(SHARED_MAL_ID);
     let mut unrelated = provider_entry(OTHER, UNRELATED);
@@ -285,7 +287,7 @@ async fn mocked_provider_results_and_save() {
         "entry": {
             "id": UPCOMING, "title_english": "Tomorrow's Film", "title_romaji": "Ashita no Eiga",
             "title_native": "", "cover_url": "", "format": "MOVIE", "status": "NOT_YET_RELEASED",
-            "status_display": "Not yet released", "source": "anilist"
+            "status_display": "Not yet released", "source": "anilist", "average_score": 79
         },
         "date": chrono::Utc::now().date_naive().succ_opt().unwrap().to_string(), "season": ""
     }]);
@@ -302,6 +304,7 @@ async fn mocked_provider_results_and_save() {
         "[aria-labelledby='discover-upcoming-title'] a.discover-poster",
     );
     assert_eq!(link.len(), 1);
+    assert!(landing.contains("79%</span>"));
     assert_eq!(link_id(&link[0], "franchise_id"), Some(UPCOMING));
     let saved_preview = html(request(&state, &request_uri(&link[0]), None).await).await;
     let saved_doc = scraper::Html::parse_document(&saved_preview);
@@ -348,6 +351,8 @@ async fn mocked_provider_results_and_save() {
     );
     assert!(results.contains(ORIGINAL));
     assert!(results.contains(UNRELATED));
+    assert!(results.contains("86%</span>"));
+    assert!(!results.contains("81%</span>"));
     let franchise_link = franchise_links[0];
     assert_eq!(parameter(franchise_link, "q").as_deref(), Some(QUERY));
     assert_eq!(parameter(franchise_link, "source").as_deref(), Some("al"));
@@ -367,6 +372,8 @@ async fn mocked_provider_results_and_save() {
         ["Ada no Kidou", "Orbit of Ada"]
     );
     assert!(franchise.contains(SEQUEL));
+    assert!(franchise.contains("81%</span>"));
+    assert!(franchise.contains(&format!("Sequel to {ORIGINAL}")));
     assert!(!franchise.contains(UNRELATED));
     assert!(franchise.contains("In library"));
     assert!(franchise.contains("Open release"));
@@ -450,10 +457,12 @@ async fn split_mal_id_requires_exact_confirmation_to_open_legacy_franchise() {
 
     let group = discovery::open(&state, &view, TRACKED).await.unwrap();
     assert_eq!(group.title, ORIGINAL);
-    assert_eq!(group.releases.len(), 2);
-    assert!(group.releases.iter().all(|release| !release.existing));
+    let releases = &group.sections[0].releases;
+    assert_eq!(releases.len(), 2);
+    assert!(releases.iter().all(|release| !release.row.existing));
     assert!(
-        group.releases[0]
+        releases[0]
+            .row
             .href
             .ends_with(&format!("&provider_id={TRACKED}"))
     );
@@ -464,12 +473,13 @@ async fn split_mal_id_requires_exact_confirmation_to_open_legacy_franchise() {
     for seed in [TRACKED, legacy] {
         let group = discovery::open(&state, &view, seed).await.unwrap();
         assert_eq!(group.title, ORIGINAL);
-        assert_eq!(group.releases.len(), 2);
-        assert_eq!(group.releases[0].title, ORIGINAL);
-        assert!(group.releases[0].existing);
-        assert_eq!(group.releases[0].href, detail::path(legacy));
-        assert_eq!(group.releases[1].title, SEQUEL);
-        assert!(!group.releases[1].existing);
+        let releases = &group.sections[0].releases;
+        assert_eq!(releases.len(), 2);
+        assert_eq!(releases[0].row.title, ORIGINAL);
+        assert!(releases[0].row.existing);
+        assert_eq!(releases[0].row.href, detail::path(legacy));
+        assert_eq!(releases[1].row.title, SEQUEL);
+        assert!(!releases[1].row.existing);
     }
     let row = series::get_by_id(&db, series_id).await.unwrap().unwrap();
     assert_eq!(row.anilist_id, legacy);

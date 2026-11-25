@@ -1,4 +1,6 @@
-//! Provider search and a single confirmation before adding a release.
+//! Discover anime and confirm the releases to add.
+use std::collections::HashSet;
+
 use askama::Template;
 use axum::{
     Form,
@@ -30,6 +32,7 @@ pub(super) struct Browse {
     source: String,
     provider_id: Option<i64>,
     franchise_id: Option<i64>,
+    select: bool,
 }
 
 #[derive(Deserialize)]
@@ -67,6 +70,7 @@ struct ResultRow {
     subtitle: String,
     cover: String,
     facts: String,
+    rating: Option<i32>,
     href: String,
     existing: bool,
 }
@@ -83,6 +87,7 @@ struct Setup {
     search_hint: &'static str,
 }
 
+pub(super) mod bulk;
 mod discovery;
 mod upcoming;
 
@@ -96,6 +101,10 @@ struct AddPage {
     back: String,
     franchise_id: Option<i64>,
     franchise: Option<discovery::Franchise>,
+    select: bool,
+    selection_notice: String,
+    selected_releases: HashSet<i64>,
+    selection_mode: Choice,
     results: Vec<ResultRow>,
     upcoming: Vec<ResultRow>,
     setup: Option<Setup>,
@@ -120,6 +129,10 @@ impl AddPage {
             back,
             franchise_id: franchise_id.filter(|id| supported_provider(*id)),
             franchise: None,
+            select: false,
+            selection_notice: String::new(),
+            selected_releases: HashSet::new(),
+            selection_mode: Choice::default(),
             results: Vec::new(),
             upcoming: Vec::new(),
             setup: None,
@@ -143,6 +156,17 @@ impl AddPage {
         self.franchise_id
             .map(|id| self.franchise_path(id))
             .unwrap_or_else(|| self.back.clone())
+    }
+
+    fn select_releases_path(&self) -> String {
+        format!(
+            "{}&select=true#add-anime-releases-title",
+            self.back_to_setup_parent()
+        )
+    }
+
+    fn selection_monitor_mode(&self) -> &'static str {
+        MonitorMode::from(self.selection_mode).as_str()
     }
 
     fn into_response(self) -> Response {
@@ -293,7 +317,10 @@ pub(super) async fn page(
         }
     } else if let Some(seed) = view.franchise_id {
         match discovery::open(&state, &view, seed).await {
-            Ok(franchise) => view.franchise = Some(franchise),
+            Ok(franchise) => {
+                view.select = query.select && franchise.can_select;
+                view.franchise = Some(franchise);
+            }
             Err(error) => {
                 tracing::warn!(%error, "Could not open Add Anime franchise");
                 view.error = "Could not open this franchise. Search again or try later.";
@@ -334,27 +361,9 @@ pub(super) async fn save(
         view.error = "Could not load this anime. Search again or try later.";
         return view.into_response();
     };
-    let add = AddSeriesForm {
-        anilist_id: data.id,
-        mal_id: data.id_mal,
-        title: title(
-            "english",
-            &data.title_english,
-            &data.title_romaji,
-            &data.title_native,
-        ),
-        title_romaji: data.title_romaji.clone(),
-        title_english: data.title_english.clone(),
-        title_native: data.title_native.clone(),
-        cover_url: data.cover_url.clone(),
-        format: data.format.clone(),
-        status: data.status.clone(),
-        episodes: data.episodes,
-        season_year: data.season_year,
-    };
     match add_entry(
         state.clone(),
-        add,
+        add_series_form(&data),
         Some(AddOptions {
             mode: form.monitor_mode.into(),
             search_now: form.search_now,
@@ -375,6 +384,27 @@ pub(super) async fn save(
                 .await;
             view.into_response()
         }
+    }
+}
+
+fn add_series_form(data: &anilist::AnimeDetail) -> AddSeriesForm {
+    AddSeriesForm {
+        anilist_id: data.id,
+        mal_id: data.id_mal,
+        title: title(
+            "english",
+            &data.title_english,
+            &data.title_romaji,
+            &data.title_native,
+        ),
+        title_romaji: data.title_romaji.clone(),
+        title_english: data.title_english.clone(),
+        title_native: data.title_native.clone(),
+        cover_url: data.cover_url.clone(),
+        format: data.format.clone(),
+        status: data.status.clone(),
+        episodes: data.episodes,
+        season_year: data.season_year,
     }
 }
 

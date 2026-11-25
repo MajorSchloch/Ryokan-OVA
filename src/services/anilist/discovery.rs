@@ -25,7 +25,7 @@ const QUERY: &str = "query UpcomingAnime($page:Int!, $perPage:Int!) {
         pageInfo { hasNextPage }
         media(type:ANIME,status:NOT_YET_RELEASED,sort:[POPULARITY_DESC,ID]) {
             id idMal title { english romaji native } format status episodes coverImage { large }
-            startDate { year month day } season seasonYear
+            startDate { year month day } season seasonYear averageScore
         }
     }
 }";

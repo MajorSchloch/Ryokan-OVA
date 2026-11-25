@@ -103,6 +103,7 @@ pub(super) struct Entry {
     pub(super) title: String,
     pub(super) format: String,
     pub(super) episodes: Option<i32>,
+    pub(super) rating: Option<i32>,
     pub(super) date: String,
     pub(super) season: String,
     pub(super) series_id: Option<i64>,
@@ -115,6 +116,7 @@ struct RelationLabel {
     label: String,
     peer: String,
     outside: bool,
+    within_group: bool,
 }
 
 #[derive(Default)]
@@ -134,7 +136,41 @@ fn date_label(date: Option<&str>, year: Option<i32>) -> String {
         .unwrap_or_default()
 }
 
+pub(super) fn valid_rating(score: Option<i32>) -> Option<i32> {
+    score.filter(|score| (1..=100).contains(score))
+}
+
+pub(super) fn detail_rating(detail: &AnimeDetail) -> Option<i32> {
+    if !detail.score_is_ten_point {
+        return valid_rating(detail.average_score);
+    }
+    // MAL's display value preserves the decimal places lost in average_score.
+    let score = detail
+        .average_score_display
+        .as_deref()
+        .and_then(|score| score.strip_suffix("/10"))
+        .and_then(|score| score.parse::<f64>().ok())
+        .or_else(|| detail.average_score.map(f64::from))
+        .filter(|score| (0.0..=10.0).contains(score))?;
+    valid_rating(Some((score * 10.0).round() as i32))
+}
+
 impl Entry {
+    pub(super) fn relationship(&self) -> Option<(&str, &str)> {
+        self.links
+            .iter()
+            .filter(|link| link.within_group && !link.peer.trim().is_empty())
+            .min_by_key(|link| match link.label.as_str() {
+                "Sequel to" => 0,
+                "Side story of" => 1,
+                "Spin-off of" => 2,
+                "Summary of" => 3,
+                "Alternative to" => 4,
+                _ => 5,
+            })
+            .map(|link| (link.label.as_str(), link.peer.as_str()))
+    }
+
     fn release_key(&self) -> String {
         if self.date.len() == 4 {
             let month = match self.season.as_str() {
@@ -170,6 +206,7 @@ impl Catalog {
             old.format = entry.format;
         }
         old.episodes = entry.episodes.or(old.episodes);
+        old.rating = entry.rating.or(old.rating);
     }
 
     fn relation(&mut self, owner: i64, rel: &RelatedEntry, lang: &str) {
@@ -233,6 +270,7 @@ impl Catalog {
                 .into(),
                 format: detail.format.clone(),
                 episodes: detail.episodes,
+                rating: detail_rating(detail),
                 date: date_label(detail.release_date.as_deref(), detail.season_year),
                 season: match detail.season.as_str() {
                     "WINTER" => "Winter",
@@ -279,6 +317,7 @@ impl Catalog {
             own.format.clone_from(&e.format);
         }
         own.episodes = own.episodes.or(e.episodes);
+        own.rating = own.rating.or(valid_rating(e.average_score));
         own.related.get_or_insert_with(|| RelatedEntry {
             id: e.id,
             id_mal: e.id_mal,
@@ -381,6 +420,7 @@ impl Catalog {
                     *id,
                 )
             });
+            let member_ids: HashSet<_> = members.iter().copied().collect();
             for &id in &members {
                 let mut links: Vec<_> = self
                     .neighbors
@@ -396,6 +436,7 @@ impl Catalog {
                             label: (*label).into(),
                             peer: other.title.clone(),
                             outside: other.series_id.is_none(),
+                            within_group: member_ids.contains(peer),
                         })
                     })
                     .collect();

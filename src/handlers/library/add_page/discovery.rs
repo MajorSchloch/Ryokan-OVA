@@ -26,7 +26,28 @@ pub(super) struct Franchise {
     pub alternate_titles: Vec<String>,
     pub cover: String,
     pub library_url: Option<String>,
-    pub releases: Vec<ResultRow>,
+    pub rating: Option<i32>,
+    pub can_select: bool,
+    pub sections: Vec<ReleaseSection>,
+}
+
+pub(super) struct ReleaseSection {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub releases: Vec<FranchiseRelease>,
+}
+
+pub(super) struct FranchiseRelease {
+    pub id: i64,
+    pub row: ResultRow,
+    pub relationship: String,
+}
+
+pub(super) struct ResolvedFranchise {
+    pub(super) group: Group,
+    tracked: Option<series::Series>,
+    detail: Option<AnimeDetail>,
+    fetch_overview: bool,
 }
 
 async fn search(state: &AppState, view: &AddPage) -> Result<Vec<AnimeSearchHit>, String> {
@@ -228,6 +249,7 @@ pub(super) async fn find_results(state: &AppState, view: &mut AddPage) -> Result
             subtitle: subtitle(main, &title),
             cover: cover(main),
             facts: info,
+            rating: main.rating,
             href: view.franchise_path(id),
             existing: group.tracked > 0,
             title,
@@ -236,7 +258,11 @@ pub(super) async fn find_results(state: &AppState, view: &mut AddPage) -> Result
     Ok(())
 }
 
-pub(super) async fn open(state: &AppState, view: &AddPage, seed: i64) -> Result<Franchise, String> {
+pub(super) async fn resolve_group(
+    state: &AppState,
+    view: &AddPage,
+    seed: i64,
+) -> Result<ResolvedFranchise, String> {
     let mut hits = if view.q.is_empty() {
         Vec::new()
     } else {
@@ -275,6 +301,76 @@ pub(super) async fn open(state: &AppState, view: &AddPage, seed: i64) -> Result<
                 .any(|e| e.provider_id == id || e.library_provider_id == Some(id))
         })
         .ok_or_else(|| "Franchise unavailable".to_string())?;
+    Ok(ResolvedFranchise {
+        group,
+        tracked,
+        detail,
+        fetch_overview,
+    })
+}
+
+fn release_sections(group: &Group, view: &AddPage, seed: i64) -> Vec<ReleaseSection> {
+    let mut sections = [
+        ("series", "Series"),
+        ("movies", "Movies"),
+        ("specials", "OVAs and specials"),
+        ("other", "Other releases"),
+    ]
+    .map(|(id, title)| ReleaseSection {
+        id,
+        title,
+        releases: Vec::new(),
+    });
+    for entry in &group.entries {
+        let index = match entry.format.as_str() {
+            "TV" | "TV_SHORT" | "ONA" => 0,
+            "MOVIE" => 1,
+            "OVA" | "SPECIAL" => 2,
+            _ => 3,
+        };
+        let href = entry
+            .library_provider_id
+            .map(detail::path)
+            .unwrap_or_else(|| view.setup_path(seed, entry.provider_id));
+        sections[index].releases.push(FranchiseRelease {
+            id: entry.provider_id,
+            row: ResultRow {
+                title: entry.title.clone(),
+                subtitle: subtitle(entry, &entry.title),
+                cover: cover(entry),
+                facts: facts(&entry.format, entry.episodes, year(entry)),
+                rating: entry.rating,
+                href,
+                existing: entry.series_id.is_some(),
+            },
+            relationship: entry
+                .relationship()
+                .map_or_else(String::new, |(label, peer)| format!("{label} {peer}")),
+        });
+    }
+    sections
+        .into_iter()
+        .filter(|section| !section.releases.is_empty())
+        .collect()
+}
+
+pub(super) async fn open(state: &AppState, view: &AddPage, seed: i64) -> Result<Franchise, String> {
+    let resolved = resolve_group(state, view, seed).await?;
+    Ok(project(state, view, seed, resolved).await)
+}
+
+pub(super) async fn project(
+    state: &AppState,
+    view: &AddPage,
+    seed: i64,
+    resolved: ResolvedFranchise,
+) -> Franchise {
+    let ResolvedFranchise {
+        group,
+        tracked,
+        detail,
+        fetch_overview,
+    } = resolved;
 
     let main = representative(&group);
     let title = display_title(&group, main);
@@ -287,25 +383,7 @@ pub(super) async fn open(state: &AppState, view: &AddPage, seed: i64) -> Result<
     } else {
         None
     };
-    let releases = group
-        .entries
-        .iter()
-        .map(|entry| {
-            let href = entry
-                .library_provider_id
-                .map(detail::path)
-                .unwrap_or_else(|| view.setup_path(seed, entry.provider_id));
-            ResultRow {
-                title: entry.title.clone(),
-                subtitle: subtitle(entry, &entry.title),
-                cover: cover(entry),
-                facts: facts(&entry.format, entry.episodes, year(entry)),
-                href,
-                existing: entry.series_id.is_some(),
-            }
-        })
-        .collect();
-    Ok(Franchise {
+    Franchise {
         synopsis: main_detail.as_ref().map_or_else(String::new, |detail| {
             sanitize_rich_description(&detail.description, true)
         }),
@@ -324,6 +402,11 @@ pub(super) async fn open(state: &AppState, view: &AddPage, seed: i64) -> Result<
             .unwrap_or_else(|| cover(main)),
         title,
         library_url: group.page_id.as_ref().map(|id| format!("/franchises/{id}")),
-        releases,
-    })
+        rating: main_detail
+            .as_ref()
+            .and_then(groups::detail_rating)
+            .or(main.rating),
+        can_select: group.entries.iter().any(|entry| entry.series_id.is_none()),
+        sections: release_sections(&group, view, seed),
+    }
 }
