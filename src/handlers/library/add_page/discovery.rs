@@ -241,12 +241,19 @@ fn alternate_titles(
         .collect()
 }
 
-fn cover(entry: &Entry) -> String {
+pub(super) fn cover(entry: &Entry) -> String {
     entry
         .related
         .as_ref()
         .map(|data| data.cover_url.clone())
         .unwrap_or_default()
+}
+
+pub(super) fn release_href(view: &AddPage, seed: i64, entry: &Entry) -> String {
+    entry
+        .library_provider_id
+        .map(detail::path)
+        .unwrap_or_else(|| view.setup_path(seed, entry.provider_id))
 }
 
 fn year(entry: &Entry) -> Option<i32> {
@@ -368,10 +375,7 @@ fn release_sections(
     storylines: Vec<groups::storylines::Storyline>,
 ) -> (Vec<ReleaseSection>, &'static str) {
     let rows = group.entries.iter().map(|entry| {
-        let href = entry
-            .library_provider_id
-            .map(detail::path)
-            .unwrap_or_else(|| view.setup_path(seed, entry.provider_id));
+        let href = release_href(view, seed, entry);
         let rating = overview
             .filter(|data| data.id == entry.provider_id)
             .and_then(anilist::detail_rating)
@@ -548,10 +552,17 @@ pub(super) async fn project(
     let title = display_title(&group, main);
     let main_detail = representative_detail(&state.db, main, detail, fetch_overview).await;
     let storylines = groups::storylines::sections(&group.entries);
-    let edges = groups::storylines::branches::edges(&group.entries, &storylines);
+    let edges = groups::storylines::branches::timeline_edges(&group.entries, &storylines);
     let has_branch_map = !edges.is_empty();
     let branch_map = if view.order == ReleaseOrder::Branches {
-        branch_map::build(&storylines, &edges, view, seed)
+        branch_map::build(
+            &group.entries,
+            &storylines,
+            &edges,
+            view,
+            seed,
+            main.provider_id,
+        )
     } else {
         None
     };

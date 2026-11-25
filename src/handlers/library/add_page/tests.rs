@@ -261,10 +261,9 @@ async fn orders_releases_across_formats_and_keeps_unknown_watch_positions_separa
     }
     let state = build_test_app_state(db, None);
     let path = format!("/discover?franchise_id={TRACKED}");
-    let empty_map = html(request(&state, &format!("{path}&order=branches"), None).await).await;
-    assert!(empty_map.contains("Storyline connections are unavailable"));
-    assert!(empty_map.contains("discover-storyline-section"));
-    assert!(!empty_map.contains("id=\"discover-branch-map\""));
+    let timeline = html(request(&state, &format!("{path}&order=branches"), None).await).await;
+    assert!(timeline.contains("id=\"discover-branch-map\""));
+    assert!(timeline.contains("Related release"));
     let premiere = html(request(&state, &format!("{path}&order=premiere"), None).await).await;
     let release_ids = |page: &str, selector: &str| {
         add_links(page, selector)
@@ -337,9 +336,12 @@ async fn selects_only_untracked_releases_in_the_requested_storyline() {
     let mut next = provider_entry(UPCOMING, "Ada Orbit Red Route Finale");
     next["relations"]["edges"] = json!([{"relationType":"PREQUEL","node":first.clone()}]);
     let mut other = provider_entry(OTHER, "Ada Orbit Blue Route");
-    other["relations"]["edges"] = json!([{"relationType":"PREQUEL","node":root.clone()}]);
+    other["relations"]["edges"] = json!([
+        {"relationType":"PREQUEL","node":root.clone()},
+        {"relationType":"ALTERNATIVE","node":next.clone()}
+    ]);
     let mut extra = provider_entry(EXTRA, "Ada Orbit Short");
-    extra["relations"]["edges"] = json!([{"relationType":"PARENT","node":root.clone()}]);
+    extra["relations"]["edges"] = json!([{"relationType":"FULL_STORY","node":next.clone()}]);
     for item in [root, first, next, other, extra] {
         let detail = anilist::parse_media_node(&item).unwrap();
         metadata_cache::upsert_provider(&db, detail.id, None, &detail)
@@ -378,10 +380,23 @@ async fn selects_only_untracked_releases_in_the_requested_storyline() {
     let map_path = format!("/discover?franchise_id={TRACKED}&order=branches&branch={NEW}");
     let map = html(request(&state, &map_path, None).await).await;
     assert!(map.contains("id=\"discover-branch-map\""));
-    assert!(map.contains("Linked prequels"));
-    let neighbors = add_links(&map, ".discover-branch-card");
-    assert_eq!(neighbors.len(), 1);
-    assert_eq!(link_id(&neighbors[0], "branch"), Some(TRACKED));
+    assert!(map.contains("Storyline timeline"));
+    let document = scraper::Html::parse_document(&map);
+    let timeline_stops = scraper::Selector::parse(".discover-timeline-stop").unwrap();
+    let stops: Vec<_> = document.select(&timeline_stops).collect();
+    assert_eq!(stops.len(), 2);
+    let first = stops[0].html();
+    let finale = stops[1].html();
+    assert!(first.contains("Prequel"));
+    assert!(first.contains("discover-timeline-branch is-direct"));
+    assert!(first.contains(&format!("branch={TRACKED}")));
+    assert!(!first.contains("Alternative version"));
+    assert!(!first.contains("Ada Orbit Short"));
+    assert!(finale.contains("Alternative version"));
+    assert!(finale.contains(&format!("branch={OTHER}")));
+    assert!(finale.contains("Recap"));
+    assert!(finale.contains("Ada Orbit Short"));
+    assert!(!finale.contains("discover-timeline-branch is-direct"));
     assert!(map.contains(&format!("id=\"discover-release-{UPCOMING}\"")));
     assert!(!map.contains(&format!("id=\"discover-release-{OTHER}\"")));
     let launches = add_links(&map, ".discover-storyline-action a");
