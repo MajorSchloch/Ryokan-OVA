@@ -73,6 +73,28 @@ fn fate_node(id: i64) -> Value {
         "startDate":{"year":year,"month":month,"day":day}})
 }
 
+#[test]
+fn normalizes_provider_ratings_without_double_scaling_search_scores() {
+    let mut node = fate_node(FIRST);
+    node["averageScore"] = json!(83);
+    let mut detail = anilist::parse_media_node(&node).unwrap();
+    assert_eq!(detail_rating(&detail), Some(83));
+
+    detail.score_is_ten_point = true;
+    detail.average_score = Some(8);
+    detail.average_score_display = Some("7.85/10".into());
+    assert_eq!(detail_rating(&detail), Some(79));
+    detail.average_score_display = None;
+    assert_eq!(detail_rating(&detail), Some(80));
+    detail.average_score_display = Some("10.1/10".into());
+    assert_eq!(detail_rating(&detail), None);
+
+    assert_eq!(valid_rating(Some(79)), Some(79));
+    assert_eq!(valid_rating(Some(100)), Some(100));
+    assert_eq!(valid_rating(Some(0)), None);
+    assert_eq!(valid_rating(Some(101)), None);
+}
+
 async fn cache(db: &SqlitePool, id: i64, relations: &[(&str, i64)]) -> AnimeDetail {
     let mut node = fate_node(id);
     node["relations"] = json!({"edges":relations.iter().map(|(kind,peer)| {
@@ -160,6 +182,7 @@ async fn grouped_library_fate_release_order_ownership_and_local_numbers_are_read
     );
     assert_eq!(rows[0].files, "13 episodes on disk");
     assert_eq!(rows[1].files, "Episode 13 missing on disk");
+    assert_eq!(rows[1].relationship(), Some(("Sequel to", TITLE)));
     assert!(
         rows[1]
             .links
@@ -167,6 +190,10 @@ async fn grouped_library_fate_release_order_ownership_and_local_numbers_are_read
             .any(|l| l.label == "Sequel to" && l.peer == TITLE)
     );
     assert_eq!(rows[2].format, "SPECIAL");
+    assert_eq!(
+        rows[2].relationship(),
+        Some(("Alternative to", SECOND_TITLE))
+    );
     assert!(
         rows[2]
             .links

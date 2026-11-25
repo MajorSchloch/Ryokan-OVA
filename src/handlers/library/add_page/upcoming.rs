@@ -13,6 +13,7 @@ use crate::{
 };
 
 use super::{AddPage, ResultRow, title};
+use crate::handlers::library::groups::valid_rating;
 
 const POSTER_LIMIT: usize = 8;
 
@@ -95,6 +96,7 @@ pub(super) async fn load(state: &AppState, view: &AddPage) -> Vec<ResultRow> {
                 subtitle,
                 cover: entry.cover_url,
                 facts,
+                rating: valid_rating(entry.average_score),
                 href: view.franchise_path(entry.id),
                 existing: tracked.contains_key(&entry.id),
             }
