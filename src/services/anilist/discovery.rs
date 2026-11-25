@@ -1,8 +1,9 @@
 //! A bounded catalogue of announced anime. Querying Media instead of
 //! airingSchedules gives one premiere per entry, including undated titles.
 use super::{
-    AnimeEntry, HTTP_CLIENT, anilist_cooldown_active, anilist_post, classify_anilist_failure,
-    cooldown_from_headers, extract_graphql_error, parse_search_entry, premiere_date,
+    AnimeEntry, HTTP_CLIENT, RelatedEntry, anilist_cooldown_active, anilist_post,
+    classify_anilist_failure, cooldown_from_headers, extract_graphql_error, parse_media_relations,
+    parse_search_entry, premiere_date,
     rate_limit::{ANILIST_COOLDOWN_DEFAULT, AniListFailureKind},
     record_rate_limit_headers, set_cooldown_until_now_plus, throttle_before_anilist_request,
 };
@@ -16,6 +17,8 @@ pub struct Premiere {
     pub entry: AnimeEntry,
     pub date: Option<String>,
     pub season: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relations: Option<Vec<RelatedEntry>>,
 }
 
 const PAGES: usize = 4;
@@ -26,6 +29,13 @@ const QUERY: &str = "query UpcomingAnime($page:Int!, $perPage:Int!) {
         media(type:ANIME,status:NOT_YET_RELEASED,sort:[POPULARITY_DESC,ID]) {
             id idMal title { english romaji native } format status episodes coverImage { large }
             startDate { year month day } season seasonYear averageScore
+            relations { edges {
+                relationType(version: 2)
+                node {
+                    id idMal type format status episodes seasonYear
+                    title { romaji english native } coverImage { large } startDate { year month day }
+                }
+            } }
         }
     }
 }";
@@ -74,6 +84,7 @@ pub async fn fetch() -> Result<Vec<Premiere>, String> {
                     entry,
                     date: premiere_date(&node["startDate"]),
                     season: node["season"].as_str().unwrap_or_default().into(),
+                    relations: Some(parse_media_relations(node)),
                 },
             );
         }

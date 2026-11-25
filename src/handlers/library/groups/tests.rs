@@ -182,7 +182,10 @@ async fn grouped_library_fate_release_order_ownership_and_local_numbers_are_read
     );
     assert_eq!(rows[0].files, "13 episodes on disk");
     assert_eq!(rows[1].files, "Episode 13 missing on disk");
-    assert_eq!(rows[1].relationship(), Some(("Sequel to", TITLE)));
+    assert_eq!(
+        rows[1].relationships().next(),
+        Some(("Sequel to", TITLE, FIRST))
+    );
     assert!(
         rows[1]
             .links
@@ -191,7 +194,10 @@ async fn grouped_library_fate_release_order_ownership_and_local_numbers_are_read
     );
     assert_eq!(rows[2].format, "SPECIAL");
     assert_eq!(
-        rows[2].relationship(),
+        rows[2]
+            .relationships()
+            .next()
+            .map(|(label, peer, _)| (label, peer)),
         Some(("Alternative to", SECOND_TITLE))
     );
     assert!(

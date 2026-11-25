@@ -382,6 +382,9 @@ a:hover {
    while hiding it visually. Used by the library custom-list filter
    where the dropdown is self-evident but assistive tech still
    benefits from a label association. */
+.provider-rating { font-weight: 600; white-space: nowrap; }
+.provider-rating > [aria-hidden] { color: var(--accent); }
+
 .visually-hidden {
     position: absolute;
     width: 1px;

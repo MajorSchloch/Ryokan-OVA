@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use sqlx::{Row, SqlitePool};
 
 use crate::services::anilist::AnimeDetail;
@@ -167,6 +169,40 @@ pub(crate) async fn clear_mapping_hold(
         .execute(db)
         .await?;
     Ok(())
+}
+
+/// Load display metadata for exact provider IDs without fetching from a provider.
+pub(crate) async fn exact_cached_details(
+    db: &SqlitePool,
+    provider_ids: &[i64],
+) -> Result<HashMap<i64, AnimeDetail>, sqlx::Error> {
+    if provider_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let ids = serde_json::json!(provider_ids).to_string();
+    let rows: Vec<(i64, String)> = sqlx::query_as(
+        "WITH wanted AS (SELECT DISTINCT value AS id FROM json_each(?))
+         SELECT provider_id, detail_json FROM (
+             SELECT c.provider_id, c.detail_json, c.cached_at, 0 AS priority
+             FROM series_metadata_cache c JOIN wanted w ON w.id=c.provider_id
+             UNION ALL
+             SELECT c.provider_id, c.detail_json, c.cached_at, 1 AS priority
+             FROM provider_metadata_cache c JOIN wanted w ON w.id=c.provider_id
+         ) ORDER BY priority, cached_at DESC",
+    )
+    .bind(ids)
+    .fetch_all(db)
+    .await?;
+    let mut details = HashMap::new();
+    for (id, json) in rows {
+        if let std::collections::hash_map::Entry::Vacant(entry) = details.entry(id)
+            && let Ok(detail) = serde_json::from_str::<AnimeDetail>(&json)
+            && detail.id == id
+        {
+            entry.insert(detail);
+        }
+    }
+    Ok(details)
 }
 
 pub async fn get_by_series_id(

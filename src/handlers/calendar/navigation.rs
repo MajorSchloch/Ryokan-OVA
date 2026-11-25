@@ -21,6 +21,7 @@ pub(super) struct Navigation {
     pub day: String,
     pub week: String,
     pub month: String,
+    pub reset: String,
     pub parameters: Vec<Parameter>,
     pub notice: Option<&'static str>,
 }
@@ -63,24 +64,50 @@ impl Navigation {
         let parameters: Vec<Parameter> = query
             .context
             .iter()
-            .filter(|(name, value)| name.len() <= 64 && value.len() <= 1024)
+            .filter(|(name, value)| {
+                name.as_str() != "status" && name.len() <= 64 && value.len() <= 1024
+            })
             .take(24)
             .map(|(name, value)| Parameter {
                 name: name.clone(),
                 value: value.clone(),
             })
-            .chain(query.monitored.unwrap_or(false).then(|| Parameter {
-                name: "monitored".into(),
-                value: "true".into(),
-            }))
+            .chain(
+                match (query.monitoring_filter(), query.monitoring.is_some()) {
+                    ("all", _) => None,
+                    ("monitored", false) => Some(Parameter {
+                        name: "monitored".into(),
+                        value: "true".into(),
+                    }),
+                    (value, _) => Some(Parameter {
+                        name: "monitoring".into(),
+                        value: value.into(),
+                    }),
+                },
+            )
+            .chain({
+                let value = super::status::filter(query.context.get("status"));
+                (value != "all").then(|| Parameter {
+                    name: "status".into(),
+                    value: value.into(),
+                })
+            })
             .chain((!query.search_text().is_empty()).then(|| Parameter {
                 name: "search".into(),
                 value: query.search_text(),
             }))
             .collect();
-        let url = |range: &str, date: NaiveDate| {
+        let url = |range: &str, date: NaiveDate, keep_filters: bool| {
             let mut query = format!("range={range}&date={date}");
             for parameter in &parameters {
+                if !keep_filters
+                    && matches!(
+                        parameter.name.as_str(),
+                        "search" | "monitored" | "monitoring" | "status"
+                    )
+                {
+                    continue;
+                }
                 query.push_str(&format!(
                     "&{}={}",
                     urlencoding::encode(&parameter.name),
@@ -102,7 +129,9 @@ impl Navigation {
                     (if range == "day" { 1 } else { 7 }) * if forward { 1 } else { -1 },
                 ))
             };
-            candidate.and_then(in_bounds).map(|date| url(range, date))
+            candidate
+                .and_then(in_bounds)
+                .map(|date| url(range, date, true))
         };
         let label = match range {
             "day" => date.format("%A, %B %-d, %Y").to_string(),
@@ -121,10 +150,11 @@ impl Navigation {
             label,
             previous: shift(false),
             next: shift(true),
-            today: url(range, now.date_naive()),
-            day: url("day", date),
-            week: url("this_week", date),
-            month: url("month", date),
+            today: url(range, now.date_naive(), true),
+            day: url("day", date, true),
+            week: url("this_week", date, true),
+            month: url("month", date, true),
+            reset: url(range, date, false),
             notice: (query.date.is_some() && parsed.is_none())
                 .then_some("Choose a valid date from 1970 to 2100. Showing today."),
             parameters,
@@ -277,5 +307,10 @@ mod tests {
             assert_eq!(params["timezone"], "Europe/Vienna");
             assert_eq!(params["external"], "true");
         }
+        let cleared = parameters(&nav.reset);
+        assert_eq!(cleared["date"], "2026-01-01");
+        assert_eq!(cleared["timezone"], "Europe/Vienna");
+        assert!(!cleared.contains_key("monitored"));
+        assert!(!cleared.contains_key("search"));
     }
 }

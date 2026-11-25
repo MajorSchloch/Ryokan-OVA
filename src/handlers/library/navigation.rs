@@ -20,6 +20,7 @@ pub(super) struct FranchiseCard {
     pub statuses: Vec<PosterStatus>,
     pub title: String,
     pub alternate_titles: Vec<String>,
+    pub provider_rating: Option<i32>,
     pub cover_url: String,
     pub search_titles: String,
     pub matches_search: bool,
@@ -204,6 +205,11 @@ pub(super) async fn cards(
     let tracked_rows: Vec<_> = library.values().map(|s| (**s).clone()).collect();
     let aliases = super::summary::titles(db, &tracked_rows).await?;
     let owner_aliases = super::summary::franchise_owner_titles(db, &groups, &library).await?;
+    let owner_ids = groups
+        .iter()
+        .filter_map(super::summary::franchise_title_provider)
+        .collect::<Vec<_>>();
+    let provider_ratings = super::summary::provider_ratings(db, &owner_ids).await;
     let mut cards = Vec::new();
     for group in groups {
         if matching_ids.is_some_and(|ids| {
@@ -270,6 +276,8 @@ pub(super) async fn cards(
             statuses: poster_statuses(&p),
             title: group.title.clone(),
             alternate_titles: super::summary::franchise_display_aliases(&group, &owner_aliases),
+            provider_rating: super::summary::franchise_title_provider(&group)
+                .and_then(|id| provider_ratings.get(&id).copied()),
             cover_url: representative
                 .map(|s| s.cover_url.clone())
                 .unwrap_or_default(),
@@ -313,6 +321,7 @@ pub(super) async fn cards(
 struct Release {
     title: String,
     cover_url: String,
+    provider_rating: Option<i32>,
     path: String,
     format: String,
     date: String,
@@ -456,6 +465,7 @@ struct FranchisePage {
     title_language: String,
     title: String,
     cover_url: String,
+    provider_rating: Option<i32>,
     releases: Vec<Release>,
     has_watch_order: bool,
     filters: FranchiseFilters,
@@ -561,16 +571,17 @@ pub async fn page(
     )
     .await
     .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Requirements unavailable."))?;
-    let provider_aliases = super::summary::provider_titles(
-        &state.db,
-        &group
-            .entries
-            .iter()
-            .map(|e| e.provider_id)
-            .collect::<Vec<_>>(),
-    )
-    .await
-    .map_err(read_error)?;
+    let provider_ids = group
+        .entries
+        .iter()
+        .map(|e| e.provider_id)
+        .collect::<Vec<_>>();
+    let provider_aliases = super::summary::provider_titles(&state.db, &provider_ids)
+        .await
+        .map_err(read_error)?;
+    let provider_ratings = super::summary::provider_ratings(&state.db, &provider_ids).await;
+    let provider_rating = super::summary::franchise_title_provider(&group)
+        .and_then(|id| provider_ratings.get(&id).copied());
     let inherited =
         crate::services::language_preferences::franchise_config(&state.db, &cfg, &id).await;
     filters.normalize();
@@ -644,6 +655,7 @@ pub async fn page(
                 }),
             allow_upgrades: tracked.is_some_and(|s| s.allow_upgrades),
             title: e.title.clone(),
+            provider_rating: provider_ratings.get(&e.provider_id).copied(),
             cover_url: tracked
                 .map(|s| s.cover_url.clone())
                 .or_else(|| e.related.as_ref().map(|r| r.cover_url.clone()))
@@ -684,6 +696,7 @@ pub async fn page(
         title_language: loaded.title_language,
         title: group.title,
         cover_url,
+        provider_rating,
         releases,
         has_watch_order: watch_order.is_some(),
         filters,

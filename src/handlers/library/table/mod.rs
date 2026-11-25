@@ -26,6 +26,7 @@ struct Entry {
     title: String,
     aliases: String,
     href: String,
+    provider_rating: Option<i32>,
     format: String,
     status: String,
     mode: &'static str,
@@ -73,6 +74,12 @@ async fn load(db: &SqlitePool) -> Result<Table, sqlx::Error> {
     let cfg = cfg.unwrap_or_default();
     let progress = super::availability::load(db, &cfg.media_root, &library).await?;
     let aliases = super::summary::titles(db, &library).await?;
+    let provider_ids = library
+        .iter()
+        .map(|s| s.anilist_id)
+        .chain(follows.iter().map(|follow| follow.anilist_id))
+        .collect::<Vec<_>>();
+    let provider_ratings = super::summary::provider_ratings(db, &provider_ids).await;
     let mut follows: HashMap<_, _> = follows.into_iter().map(|f| (f.anilist_id, f)).collect();
     let mapped: HashMap<_, _> = sqlx::query_as::<_, (i64, i64)>(sqlx::AssertSqlSafe(format!(
         "{} SELECT l.series_id, l.anilist_id FROM local_anilist_ids l
@@ -105,6 +112,7 @@ async fn load(db: &SqlitePool) -> Result<Table, sqlx::Error> {
             aliases: aliases.get(&s.id).cloned().unwrap_or_default(),
             files: facts.files.clone(),
             href: super::detail::path(s.anilist_id),
+            provider_rating: provider_ratings.get(&s.anilist_id).copied(),
             mode: s.monitor_mode_enum().as_str(),
             format: s.format.replace('_', " "),
             status: status_label(&s.status),
@@ -136,6 +144,7 @@ async fn load(db: &SqlitePool) -> Result<Table, sqlx::Error> {
         rows.push(Entry {
             href: super::detail::path(f.anilist_id),
             title: f.title,
+            provider_rating: provider_ratings.get(&f.anilist_id).copied(),
             format: detail.format.replace('_', " "),
             status: status_label(&detail.status),
             total: detail.episodes.and_then(plausible_episode_count),

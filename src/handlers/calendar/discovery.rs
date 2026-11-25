@@ -19,6 +19,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct Filters {
     format: String,
     hide_tracked: bool,
+    library: String,
+    search: String,
 }
 
 struct Card {
@@ -28,6 +30,8 @@ struct Card {
     cover: String,
     date: String,
     library_id: Option<i64>,
+    rating: Option<i32>,
+    franchise: Option<discovery::FranchiseLink>,
 }
 
 struct Day {
@@ -46,6 +50,7 @@ struct DiscoveryPage {
     filters: Filters,
     refreshed: Option<String>,
     failed: bool,
+    has_filters: bool,
 }
 
 fn announced_date(item: &Premiere) -> String {
@@ -71,8 +76,20 @@ fn announced_date(item: &Premiere) -> String {
     }
 }
 
-async fn load(db: &SqlitePool, filters: Filters) -> Result<DiscoveryPage, String> {
+async fn load(db: &SqlitePool, mut filters: Filters) -> Result<DiscoveryPage, String> {
     let snapshot = discovery::read(db).await?;
+    let context = discovery::premiere_contexts(db, &snapshot.entries)
+        .await
+        .unwrap_or_default();
+    filters.library = match filters.library.as_str() {
+        "tracked" => "tracked",
+        "outside" => "outside",
+        "" if filters.hide_tracked => "outside",
+        _ => "all",
+    }
+    .into();
+    filters.search = filters.search.trim().chars().take(128).collect();
+    let needle = filters.search.to_lowercase();
     let lang = config::get_naming_prefs(db).await.title_language;
     let tracked = series::library_ids_by_anilist(db)
         .await
@@ -91,19 +108,37 @@ async fn load(db: &SqlitePool, filters: Filters) -> Result<DiscoveryPage, String
             formats.insert(entry.format.clone());
         }
         let id = tracked.get(&entry.id).copied();
-        if (filters.hide_tracked && id.is_some())
+        if (filters.library == "outside" && id.is_some())
+            || (filters.library == "tracked" && id.is_none())
             || (!filters.format.is_empty() && filters.format != entry.format)
         {
             continue;
         }
-        let card = Card {
-            title: pick_title(
-                &lang,
+        let info = context.get(&entry.id);
+        if !needle.is_empty()
+            && ![
                 &entry.title_english,
                 &entry.title_romaji,
                 &entry.title_native,
+            ]
+            .into_iter()
+            .chain(info.into_iter().flat_map(|info| &info.aliases))
+            .chain(
+                info.and_then(|info| info.franchise.as_ref())
+                    .map(|link| &link.title),
             )
-            .to_string(),
+            .any(|name| name.to_lowercase().contains(&needle))
+        {
+            continue;
+        }
+        let title = pick_title(
+            &lang,
+            &entry.title_english,
+            &entry.title_romaji,
+            &entry.title_native,
+        );
+        let card = Card {
+            title: title.to_owned(),
             id: entry.id,
             format: entry.format.replace('_', " "),
             cover: entry.cover_url.clone(),
@@ -113,6 +148,11 @@ async fn load(db: &SqlitePool, filters: Filters) -> Result<DiscoveryPage, String
                 String::new()
             },
             library_id: id,
+            rating: info.and_then(|info| info.rating),
+            franchise: info
+                .and_then(|info| info.franchise.as_ref())
+                .filter(|link| link.title.trim().to_lowercase() != title.trim().to_lowercase())
+                .cloned(),
         };
         match exact {
             Some(date) => dated.entry(date).or_default().push(card),
@@ -133,6 +173,9 @@ async fn load(db: &SqlitePool, filters: Filters) -> Result<DiscoveryPage, String
         days,
         announced,
         formats,
+        has_filters: !filters.format.is_empty()
+            || filters.library != "all"
+            || !filters.search.is_empty(),
         filters,
         refreshed: snapshot
             .refreshed_at

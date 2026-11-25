@@ -11,7 +11,7 @@
     <p>You don't have any series in your library yet.</p>
     <p><a class="link-accent" href="/">Go to the library</a> to add some.</p>
     {% else %}
-    <p>No saved episodes{% if monitored_only || !search.is_empty() || status_filter != "all" %} match these filters{% endif %} in this date range.</p>
+    <p>No saved episodes{% if has_filters %} match these filters{% endif %} in this date range.</p>
     <p class="form-hint">Try another date or turn off filters. Older airings may no longer be saved.</p>
     {% endif %}
 </div>
@@ -26,7 +26,6 @@
         {% for ep in bucket.episodes %}
         <li class="calendar-episode"
             data-airing-at="{{ ep.airing_at }}"
-            data-series-name="{{ ep.search_haystack }}"
             data-episode="{{ ep.episode }}"
             data-monitored="{% if ep.monitored %}1{% else %}0{% endif %}">
             <a class="calendar-episode-link" href="/series/{{ ep.series_id }}">
@@ -45,6 +44,7 @@
                            already names the season. #}
                         <span class="calendar-episode-num">E{% if ep.episode < 10 %}0{% endif %}{{ ep.episode }}</span>
                         <span class="calendar-episode-time" data-airing-at="{{ ep.airing_at }}">·</span>
+                        {% if let Some(score) = ep.rating %}{% call provider_rating::badge(score) %}{% endcall %}{% endif %}
                         {% if ep.episode == 1 %}
                         <span class="calendar-episode-badge calendar-episode-badge-premiere" title="First episode of this series">Premiere</span>
                         {% endif %}

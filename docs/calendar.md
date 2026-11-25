@@ -12,21 +12,21 @@ Day buckets use UTC, as before. Episode times use your browser's local timezone.
 
 ## Upcoming anime
 
-Select **Upcoming anime** to browse announced titles, including titles outside your library. The background job checks up to 200 upcoming AniList entries by popularity every 12 hours. It reads the anime's premiere date once per entry. A sequel has its own card.
+Select **Upcoming anime** to browse announced titles, including titles outside your library. The background job checks up to 200 upcoming AniList entries by popularity every 12 hours. A sequel has its own card. Cards show a provider rating and a franchise link when the saved metadata supplies them.
 
 Exact dates appear in calendar order. The **Announced** section shows a month, season, year, or **Date TBA**, depending on what AniList supplies. A premiere date has no time zone.
 
-Choose a format or **Hide titles in my library**, then select **Apply filters**. **Open in library** opens the tracked entry. **Add to library** uses the library's monitoring dialog and your default upgrade setting. Browsing and filtering only read local data.
+Combine **Title**, **Format**, and **Library**, then select **Apply filters**. **Open in library** opens the tracked entry. **Add to library** opens the release setup page. Filters use saved data.
 
 The page shows the time of the last successful refresh. If a refresh fails, Ryokan keeps that snapshot and retries after 15 minutes. The iCal feed continues to show library episodes.
 
 ## What you'll see on each episode
 
-- The series cover thumbnail and title.
+- The series cover thumbnail, title, and provider rating when available.
 - The episode number (E01, E02, ...). Each anime "season" in Ryokan is its own series with its own E1, E2 numbering, so an episode of *Re:Zero 4th Season* shows as E01 of that series, not S04E01 of the franchise.
 - A **Premiere** badge (in the list) or a small **★** (in the grid) on E01 of any series, so you can spot where a new cour starts.
 - Whether the episode is **Monitored**, including individual episode overrides.
-- **Available**, **Download / import pending**, **Missing**, **Upcoming**, **Unmonitored**, or **Unknown**. Select the label for its explanation and the last recorded automatic check.
+- **Available**, **Download / import pending**, **Held for review**, **Missing**, **Upcoming**, **Unmonitored**, or **Unknown**. Select the label for its explanation and the last recorded automatic check.
 
 Available means a managed library file covers the episode. It does not claim that the file passed its language or quality checks. Missing requires an aired, monitored episode, a complete file scan, and no pending download. An unavailable library mount shows Unknown. Browsing does not start searches or media probes.
 
@@ -34,9 +34,13 @@ Click an episode to jump to its series page.
 
 ## Filtering
 
-- **Search**: type into the box to filter the list down. The search matches across all the title variants Ryokan knows about (romaji, English, native), so "attack on titan" finds *Shingeki no Kyojin* even if your title language is set to romaji.
-- **Monitored only**: show monitored episodes, including individual overrides.
-- **Availability**: show one file status, such as Missing or Download / import pending. It works with search, date navigation, and browser Back and Forward.
+Combine **Title**, **Monitoring**, and **Availability** in any view, then select **Apply filters**.
+
+- **Title** matches titles, translations, and saved aliases. For example, "attack on titan" finds *Shingeki no Kyojin*.
+- **Monitoring** uses the setting for each episode, including individual overrides.
+- **Availability** includes **Held for review**, **Missing**, and **Download / import pending**.
+
+Date navigation and view changes keep the filters. **Reset filters** keeps the current range and date.
 
 ## Subscribing from your calendar app
 

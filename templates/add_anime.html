@@ -1,10 +1,7 @@
 {% extends "base.html" %}
+{% import "partials/provider_rating.html" as provider_rating %}
 
 {% block title %} - {% if setup.is_some() %}Add Anime{% else if let Some(group) = franchise %}{{ group.title }}{% else %}Discover{% endif %}{% endblock %}
-
-{% macro rating(score) %}
-<span class="discover-rating" title="Provider rating"><span aria-hidden="true">★</span> <span class="visually-hidden">Provider rating </span>{{ score }}%</span>
-{% endmacro %}
 
 {% macro poster_grid(entries, heading) %}
 <ul class="discover-poster-grid" aria-labelledby="{{ heading }}">
@@ -14,11 +11,12 @@
             <div class="discover-poster-art">
                 {% if !entry.cover.is_empty() %}<img src="{{ entry.cover }}" alt="" width="320" height="480" loading="lazy" decoding="async">{% endif %}
                 {% if entry.existing %}<span class="discover-poster-library">In library</span>{% endif %}
-                {% if let Some(score) = entry.rating %}{% call rating(score) %}{% endcall %}{% endif %}
+                {% if let Some(score) = entry.rating %}{% call provider_rating::badge(score) %}{% endcall %}{% endif %}
             </div>
             <div class="discover-poster-copy">
                 <strong>{{ entry.title }}</strong>
                 {% if !entry.subtitle.is_empty() %}<span class="discover-poster-subtitle" title="{{ entry.subtitle }}">{{ entry.subtitle }}</span>{% endif %}
+                {% if let Some(franchise) = entry.franchise %}<span class="discover-poster-franchise" title="{{ franchise.title }}">{{ franchise.label }} · {{ franchise.title }}</span>{% endif %}
                 {% if !entry.facts.is_empty() %}<span class="discover-poster-facts">{{ entry.facts }}</span>{% endif %}
             </div>
         </a>
@@ -33,7 +31,7 @@
     <h4 id="discover-releases-{{ section.id }}">{{ section.title }}</h4>
     <ul class="add-anime-results{% if choosing %} add-anime-results--select{% endif %}">
         {% for release in section.releases %}
-        <li class="anilist-result">
+        <li class="anilist-result" id="discover-release-{{ release.id }}">
             {% if choosing && !release.row.existing %}
             <label class="discover-release-choice">
                 <input type="checkbox" name="release" value="{{ release.id }}" form="add-anime-selected"{% if selected_releases.contains(&release.id) %} checked{% endif %}>
@@ -46,9 +44,10 @@
                 {% if !release.row.subtitle.is_empty() %}<p class="anilist-subtitle" title="{{ release.row.subtitle }}">{{ release.row.subtitle }}</p>{% endif %}
                 <div class="discover-release-facts">
                     {% if !release.row.facts.is_empty() %}<span class="anilist-meta">{{ release.row.facts }}</span>{% endif %}
-                    {% if let Some(score) = release.row.rating %}{% call rating(score) %}{% endcall %}{% endif %}
+                    <span class="anilist-meta">Premiere · {{ release.date }}</span>
+                    {% if let Some(score) = release.row.rating %}{% call provider_rating::badge(score) %}{% endcall %}{% endif %}
                 </div>
-                {% if !release.relationship.is_empty() %}<p class="discover-release-relation">{{ release.relationship }}</p>{% endif %}
+                {% for relation in release.relationships %}<p class="discover-release-relation">{{ relation.label }} <a href="#discover-release-{{ relation.id }}">{{ relation.title }}</a></p>{% endfor %}
             </div>
             <div class="discover-release-actions">
                 {% if release.row.existing %}<span class="chip">In library</span><a href="{{ release.row.href }}" class="btn btn-secondary">Open release</a>{% else if !choosing %}<a href="{{ release.row.href }}" class="btn btn-secondary">Set up</a>{% endif %}
@@ -75,6 +74,7 @@
             <div>
                 <h3>{{ release.title }}</h3>
                 {% if !release.facts.is_empty() %}<p class="series-meta">{{ release.facts }}</p>{% endif %}
+                {% if let Some(score) = release.rating %}<p>{% call provider_rating::badge(score) %}{% endcall %}</p>{% endif %}
                 <a href="{{ release.details_url }}">View release details</a>
             </div>
         </div>
@@ -83,6 +83,7 @@
             {% if let Some(id) = franchise_id %}<input type="hidden" name="franchise_id" value="{{ id }}">{% endif %}
             <input type="hidden" name="q" value="{{ q }}">
             <input type="hidden" name="source" value="{{ source }}">
+            <input type="hidden" name="order" value="{{ self.order.as_str() }}">
             <fieldset class="add-anime-monitor">
                 <legend>Monitor episodes</legend>
                 <label><input type="radio" name="monitor_mode" value="all"{% if release.monitor_mode == "all" %} checked{% endif %}><span>All episodes <small>Aired and future episodes</small></span></label>
@@ -102,7 +103,7 @@
     <div class="add-anime-franchise">
         {% if !group.cover.is_empty() %}<img class="discover-franchise-art" src="{{ group.cover }}" alt="" width="320" height="480">{% endif %}
         <div class="discover-franchise-copy">
-            {% if let Some(score) = group.rating %}<p class="discover-franchise-rating">{% call rating(score) %}{% endcall %}</p>{% endif %}
+            {% if let Some(score) = group.rating %}<p class="discover-franchise-rating">{% call provider_rating::badge(score) %}{% endcall %}</p>{% endif %}
             {% if !group.synopsis.is_empty() %}
             <h3>Synopsis</h3>
             <div class="synopsis-body">{{ group.synopsis|safe }}</div>
@@ -123,6 +124,15 @@
             {% if group.can_select && !select %}<a class="btn btn-primary" href="{{ self.select_releases_path() }}" hx-boost="false">Add releases</a>{% endif %}
         </div>
         {% if !selection_notice.is_empty() %}<p class="alert alert-warn" role="alert">{{ selection_notice }}</p>{% endif %}
+        {% if !select && group.has_multiple %}
+        {% let order = self.order.as_str() %}
+        <nav class="discover-release-order" aria-label="Release order">
+            <a class="btn btn-secondary" href="{{ self.order_path("formats") }}"{% if order == "formats" %} aria-current="true"{% endif %} hx-boost="false">By format</a>
+            <a class="btn btn-secondary" href="{{ self.order_path("premiere") }}"{% if order == "premiere" %} aria-current="true"{% endif %} hx-boost="false">Premiere date</a>
+            <a class="btn btn-secondary" href="{{ self.order_path("watch") }}"{% if order == "watch" %} aria-current="true"{% endif %} hx-boost="false">Watch order</a>
+        </nav>
+        {% endif %}
+        {% if !group.order_hint.is_empty() %}<p class="form-hint">{{ group.order_hint }}</p>{% endif %}
         {% if select %}<p class="form-hint">Select the releases you want to add to your library.</p>{% endif %}
         {% call release_sections(group.sections.as_slice(), select) %}{% endcall %}
         {% if select %}
@@ -130,6 +140,7 @@
             {% if let Some(id) = franchise_id %}<input type="hidden" name="franchise_id" value="{{ id }}">{% endif %}
             <input type="hidden" name="q" value="{{ q }}">
             <input type="hidden" name="source" value="{{ source }}">
+            <input type="hidden" name="order" value="{{ self.order.as_str() }}">
             <div class="form-group">
                 <label for="discover-monitor-mode">Monitor episodes in selected releases</label>
                 {% let mode = self.selection_monitor_mode() %}

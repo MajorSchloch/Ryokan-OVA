@@ -342,6 +342,11 @@ pub async fn index(
         })
         .count();
     let cards = if individual { cards } else { Vec::new() };
+    let provider_ratings = super::summary::provider_ratings(
+        &state.db,
+        &cards.iter().map(|(s, _)| s.anilist_id).collect::<Vec<_>>(),
+    )
+    .await;
 
     let recycle_enabled = cfg
         .as_ref()
@@ -359,6 +364,7 @@ pub async fn index(
     };
     let template = IndexTemplate {
         search_titles,
+        provider_ratings,
         page: "library".to_string(),
         cards,
         franchise_cards,
@@ -844,6 +850,7 @@ pub async fn series_detail(
         } else {
             detail.id
         },
+        provider_rating: anilist::detail_rating(&detail),
         detail,
         is_tracked,
         db_id,

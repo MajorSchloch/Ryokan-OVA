@@ -14,9 +14,13 @@ use crate::{
 };
 
 use super::{
-    AddPage, ResultRow, detail, exact_detail, existing, facts, supported_provider, upcoming,
+    AddPage, ReleaseOrder, ResultRow, detail, exact_detail, existing, facts, supported_provider,
+    upcoming,
 };
-use crate::handlers::library::groups::{self, Entry, Group};
+use crate::handlers::library::{
+    availability::premiere_label,
+    groups::{self, Entry, Group},
+};
 
 const DETAIL_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -28,6 +32,8 @@ pub(super) struct Franchise {
     pub library_url: Option<String>,
     pub rating: Option<i32>,
     pub can_select: bool,
+    pub has_multiple: bool,
+    pub order_hint: &'static str,
     pub sections: Vec<ReleaseSection>,
 }
 
@@ -40,7 +46,14 @@ pub(super) struct ReleaseSection {
 pub(super) struct FranchiseRelease {
     pub id: i64,
     pub row: ResultRow,
-    pub relationship: String,
+    pub date: String,
+    pub relationships: Vec<Relationship>,
+}
+
+pub(super) struct Relationship {
+    pub label: String,
+    pub title: String,
+    pub id: i64,
 }
 
 pub(super) struct ResolvedFranchise {
@@ -249,6 +262,7 @@ pub(super) async fn find_results(state: &AppState, view: &mut AddPage) -> Result
             subtitle: subtitle(main, &title),
             cover: cover(main),
             facts: info,
+            franchise: None,
             rating: main.rating,
             href: view.franchise_path(id),
             existing: group.tracked > 0,
@@ -275,15 +289,19 @@ pub(super) async fn resolve_group(
     let id = tracked.as_ref().map_or(seed, |row| row.anilist_id);
     let mut fetch_overview = true;
     let detail = if tracked.is_none() && !hits.iter().any(|hit| hit.entry.id == id) {
-        if let Some(saved) = upcoming::saved_hit(&state.db, id).await {
+        if let Some(mut saved) = upcoming::saved_hit(&state.db, id).await {
             // Keep a saved premiere usable when the provider cannot supply the
             // full franchise. Setup still resolves the exact ID separately.
-            hits.push(saved);
             let detail = tokio::time::timeout(DETAIL_TIMEOUT, exact_detail(&state.db, id))
                 .await
                 .ok()
                 .and_then(Result::ok);
             fetch_overview = detail.is_some();
+            if fetch_overview {
+                // An exact detail can supersede relation edges in the older snapshot.
+                saved.relations.clear();
+            }
+            hits.push(saved);
             detail
         } else {
             Some(exact_detail(&state.db, id).await?)
@@ -309,7 +327,119 @@ pub(super) async fn resolve_group(
     })
 }
 
-fn release_sections(group: &Group, view: &AddPage, seed: i64) -> Vec<ReleaseSection> {
+/// Use a single unambiguous chain supported by explicit prequel/sequel edges.
+/// Related releases outside that chain have no known position.
+fn watch_sequence(entries: &[Entry]) -> Option<Vec<i64>> {
+    let members: HashSet<_> = entries.iter().map(|entry| entry.provider_id).collect();
+    let mut successors = HashMap::new();
+    let mut preceded = HashSet::new();
+    for entry in entries {
+        for id in entry
+            .watch_predecessors
+            .iter()
+            .copied()
+            .filter(|id| members.contains(id))
+        {
+            if entry.has_conflicting_predecessor(id)
+                || successors.insert(id, entry.provider_id).is_some()
+                || !preceded.insert(entry.provider_id)
+            {
+                return None;
+            }
+        }
+    }
+    let mut roots = successors
+        .keys()
+        .copied()
+        .filter(|id| !preceded.contains(id));
+    let head = roots.next()?;
+    if roots.next().is_some() {
+        return None;
+    }
+    let sequence: Vec<_> = std::iter::successors(Some(head), |id| successors.get(id).copied())
+        .take(successors.len() + 1)
+        .collect();
+    (sequence.len() == successors.len() + 1).then_some(sequence)
+}
+
+fn release_sections(
+    group: &Group,
+    view: &AddPage,
+    seed: i64,
+    overview: Option<&AnimeDetail>,
+) -> (Vec<ReleaseSection>, &'static str) {
+    let rows = group.entries.iter().map(|entry| {
+        let href = entry
+            .library_provider_id
+            .map(detail::path)
+            .unwrap_or_else(|| view.setup_path(seed, entry.provider_id));
+        let rating = overview
+            .filter(|data| data.id == entry.provider_id)
+            .and_then(anilist::detail_rating)
+            .or(entry.rating);
+        FranchiseRelease {
+            id: entry.provider_id,
+            row: ResultRow {
+                title: entry.title.clone(),
+                subtitle: subtitle(entry, &entry.title),
+                cover: cover(entry),
+                facts: facts(&entry.format, entry.episodes, None),
+                franchise: None,
+                rating,
+                href,
+                existing: entry.series_id.is_some(),
+            },
+            date: premiere_label(&entry.date),
+            relationships: entry
+                .relationships()
+                .map(|(label, title, id)| Relationship {
+                    label: label.to_owned(),
+                    title: title.to_owned(),
+                    id,
+                })
+                .collect(),
+        }
+    });
+    if view.order == ReleaseOrder::Watch
+        && let Some(sequence) = watch_sequence(&group.entries)
+    {
+        let positions: HashMap<_, _> = sequence
+            .into_iter()
+            .enumerate()
+            .map(|(i, id)| (id, i))
+            .collect();
+        let (mut known, others): (Vec<_>, Vec<_>) =
+            rows.partition(|row| positions.contains_key(&row.id));
+        known.sort_by_key(|row| positions[&row.id]);
+        let mut sections = vec![ReleaseSection {
+            id: "watch",
+            title: "Known watch sequence",
+            releases: known,
+        }];
+        if !others.is_empty() {
+            sections.push(ReleaseSection {
+                id: "other",
+                title: "No known watch position",
+                releases: others,
+            });
+        }
+        return (sections, "");
+    }
+    if view.order != ReleaseOrder::Formats {
+        let hint = if view.order == ReleaseOrder::Watch {
+            "A single watch sequence is unavailable. Releases appear in premiere order."
+        } else {
+            ""
+        };
+        return (
+            vec![ReleaseSection {
+                id: "premiere",
+                title: "Premiere order",
+                releases: rows.collect(),
+            }],
+            hint,
+        );
+    }
     let mut sections = [
         ("series", "Series"),
         ("movies", "Movies"),
@@ -321,37 +451,22 @@ fn release_sections(group: &Group, view: &AddPage, seed: i64) -> Vec<ReleaseSect
         title,
         releases: Vec::new(),
     });
-    for entry in &group.entries {
+    for (entry, row) in group.entries.iter().zip(rows) {
         let index = match entry.format.as_str() {
             "TV" | "TV_SHORT" | "ONA" => 0,
             "MOVIE" => 1,
             "OVA" | "SPECIAL" => 2,
             _ => 3,
         };
-        let href = entry
-            .library_provider_id
-            .map(detail::path)
-            .unwrap_or_else(|| view.setup_path(seed, entry.provider_id));
-        sections[index].releases.push(FranchiseRelease {
-            id: entry.provider_id,
-            row: ResultRow {
-                title: entry.title.clone(),
-                subtitle: subtitle(entry, &entry.title),
-                cover: cover(entry),
-                facts: facts(&entry.format, entry.episodes, year(entry)),
-                rating: entry.rating,
-                href,
-                existing: entry.series_id.is_some(),
-            },
-            relationship: entry
-                .relationship()
-                .map_or_else(String::new, |(label, peer)| format!("{label} {peer}")),
-        });
+        sections[index].releases.push(row);
     }
-    sections
-        .into_iter()
-        .filter(|section| !section.releases.is_empty())
-        .collect()
+    (
+        sections
+            .into_iter()
+            .filter(|section| !section.releases.is_empty())
+            .collect(),
+        "",
+    )
 }
 
 pub(super) async fn open(state: &AppState, view: &AddPage, seed: i64) -> Result<Franchise, String> {
@@ -375,6 +490,7 @@ pub(super) async fn project(
     let main = representative(&group);
     let title = display_title(&group, main);
     let main_detail = representative_detail(&state.db, main, detail, fetch_overview).await;
+    let (sections, order_hint) = release_sections(&group, view, seed, main_detail.as_ref());
     let main_row = if let Some(id) = main.series_id {
         match tracked.filter(|row| row.id == id) {
             Some(row) => Some(row),
@@ -404,9 +520,11 @@ pub(super) async fn project(
         library_url: group.page_id.as_ref().map(|id| format!("/franchises/{id}")),
         rating: main_detail
             .as_ref()
-            .and_then(groups::detail_rating)
+            .and_then(anilist::detail_rating)
             .or(main.rating),
         can_select: group.entries.iter().any(|entry| entry.series_id.is_none()),
-        sections: release_sections(&group, view, seed),
+        has_multiple: group.entries.len() > 1,
+        order_hint,
+        sections,
     }
 }

@@ -15,7 +15,7 @@ use crate::{
     AppState,
     handlers::responses::htmx_aware_redirect,
     models::{config, metadata_cache, monitoring::MonitorMode, series},
-    services::{anilist, library_link},
+    services::{anilist, calendar::discovery::FranchiseLink, library_link},
 };
 
 use super::{
@@ -33,6 +33,7 @@ pub(super) struct Browse {
     provider_id: Option<i64>,
     franchise_id: Option<i64>,
     select: bool,
+    order: ReleaseOrder,
 }
 
 #[derive(Deserialize)]
@@ -42,6 +43,8 @@ pub(super) struct Save {
     q: String,
     source: String,
     monitor_mode: Choice,
+    #[serde(default)]
+    order: ReleaseOrder,
     #[serde(default)]
     search_now: bool,
 }
@@ -53,6 +56,42 @@ enum Choice {
     All,
     Future,
     None,
+}
+
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum ReleaseOrder {
+    Premiere,
+    Watch,
+    #[default]
+    #[serde(other)]
+    Formats,
+}
+
+impl ReleaseOrder {
+    fn from_param(order: &str) -> Self {
+        match order {
+            "premiere" => Self::Premiere,
+            "watch" => Self::Watch,
+            _ => Self::Formats,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Formats => "formats",
+            Self::Premiere => "premiere",
+            Self::Watch => "watch",
+        }
+    }
+
+    fn query(self) -> String {
+        if self == Self::Formats {
+            String::new()
+        } else {
+            format!("&order={}", self.as_str())
+        }
+    }
 }
 
 impl From<Choice> for MonitorMode {
@@ -70,6 +109,7 @@ struct ResultRow {
     subtitle: String,
     cover: String,
     facts: String,
+    franchise: Option<FranchiseLink>,
     rating: Option<i32>,
     href: String,
     existing: bool,
@@ -80,6 +120,7 @@ struct Setup {
     title: String,
     cover: String,
     facts: String,
+    rating: Option<i32>,
     details_url: String,
     monitor_mode: &'static str,
     search_now: bool,
@@ -102,6 +143,7 @@ struct AddPage {
     franchise_id: Option<i64>,
     franchise: Option<discovery::Franchise>,
     select: bool,
+    order: ReleaseOrder,
     selection_notice: String,
     selected_releases: HashSet<i64>,
     selection_mode: Choice,
@@ -130,6 +172,7 @@ impl AddPage {
             franchise_id: franchise_id.filter(|id| supported_provider(*id)),
             franchise: None,
             select: false,
+            order: ReleaseOrder::default(),
             selection_notice: String::new(),
             selected_releases: HashSet::new(),
             selection_mode: Choice::default(),
@@ -141,14 +184,15 @@ impl AddPage {
     }
 
     fn franchise_path(&self, id: i64) -> String {
-        format!("{}&franchise_id={id}", self.back)
+        format!("{}&franchise_id={id}{}", self.back, self.order.query())
     }
 
     fn setup_path(&self, seed: i64, release: i64) -> String {
         format!(
-            "/library/add?source={}&q={}&franchise_id={seed}&provider_id={release}",
+            "/library/add?source={}&q={}&franchise_id={seed}&provider_id={release}{}",
             self.source,
             urlencoding::encode(&self.q),
+            self.order.query(),
         )
     }
 
@@ -167,6 +211,19 @@ impl AddPage {
 
     fn selection_monitor_mode(&self) -> &'static str {
         MonitorMode::from(self.selection_mode).as_str()
+    }
+
+    fn order_path(&self, order: &str) -> String {
+        self.franchise_id.map_or_else(
+            || self.back.clone(),
+            |id| {
+                format!(
+                    "{}&franchise_id={id}{}#add-anime-releases-title",
+                    self.back,
+                    ReleaseOrder::from_param(order).query()
+                )
+            },
+        )
     }
 
     fn into_response(self) -> Response {
@@ -211,6 +268,7 @@ impl AddPage {
             ),
             cover: data.cover_url.clone(),
             facts: facts(&data.format, data.episodes, data.season_year),
+            rating: anilist::detail_rating(data),
             details_url: detail::path(data.id),
             monitor_mode: MonitorMode::from(choice).as_str(),
             search_now: search_now && can_search,
@@ -294,6 +352,7 @@ pub(super) async fn page(
         .flatten()
         .unwrap_or_default();
     let mut view = AddPage::new(&cfg, query.q, &query.source, query.franchise_id);
+    view.order = query.order;
     if let Some(id) = query.provider_id {
         if !supported_provider(id) {
             return (StatusCode::BAD_REQUEST, "Choose a valid anime.").into_response();
@@ -349,6 +408,7 @@ pub(super) async fn save(
         .flatten()
         .unwrap_or_default();
     let mut view = AddPage::new(&cfg, form.q, &form.source, form.franchise_id);
+    view.order = form.order;
     match existing(&state, form.provider_id).await {
         Ok(Some(row)) => return htmx_aware_redirect(htmx, &detail::path(row.anilist_id)),
         Ok(None) => {}

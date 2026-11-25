@@ -23,7 +23,7 @@ use wiremock::{
 };
 
 fn media(id: i64, format: &str, start: Value) -> Value {
-    json!({"id":id,"idMal":800,"format":format,"status":"NOT_YET_RELEASED",
+    json!({"id":id,"idMal":800,"type":"ANIME","format":format,"status":"NOT_YET_RELEASED",
         "title":{"english":format!("English {id}"),"native":format!("Native {id}")},"startDate":start})
 }
 
@@ -109,7 +109,9 @@ async fn discover_filter_add_and_serve_the_last_complete_snapshot_on_429() {
             .contains("temporarily unavailable")
     );
     let tv = media(12, "TV", json!({"year":2099,"month":4,"day":6}));
-    let ova = media(13, "OVA", json!({"year":2099}));
+    let mut ova = media(13, "OVA", json!({"year":2099}));
+    ova["averageScore"] = json!(82);
+    ova["relations"] = json!({"edges":[{"relationType":"PARENT","node":tv.clone()}]});
     let mut season = media(14, "MOVIE", Value::Null);
     season["season"] = json!("SPRING");
     season["seasonYear"] = json!(2099);
@@ -158,8 +160,29 @@ async fn discover_filter_add_and_serve_the_last_complete_snapshot_on_429() {
     }
     assert!(!html.contains("2099-01-01"));
     assert_setup_link(&doc, 12);
-    let filtered = fetch(&app, "/calendar/upcoming?format=OVA", None).await;
-    assert!(filtered.contains("Native 13") && !filtered.contains("Native 12"));
+    let rating = doc
+        .select(&select("[data-anilist-id='13'] .provider-rating"))
+        .next()
+        .unwrap();
+    assert!(rating.text().collect::<String>().contains("82%"));
+    let parent = doc
+        .select(&select("[data-anilist-id='13'] .discovery-franchise a"))
+        .next()
+        .unwrap();
+    assert_eq!(parent.text().collect::<String>(), "Native 12");
+    assert_eq!(
+        parent.value().attr("href"),
+        Some("/discover?franchise_id=13")
+    );
+    let filtered = fetch(
+        &app,
+        "/calendar/upcoming?format=OVA&search=Native%2012",
+        None,
+    )
+    .await;
+    assert!(
+        filtered.contains("data-anilist-id=\"13\"") && !filtered.contains("data-anilist-id=\"12\"")
+    );
     assert_eq!(server.received_requests().await.unwrap().len(), 4);
     for table in ["series", "release_follows", "grabbed_torrents"] {
         let q = format!("SELECT count(*) FROM {table}");
@@ -226,8 +249,32 @@ async fn discover_filter_add_and_serve_the_last_complete_snapshot_on_429() {
         Some(format!("/series/{}", library[0].id).as_str())
     );
     assert_setup_link(&doc, 13);
+    let has_card = |html: &str, id| {
+        Html::parse_document(html)
+            .select(&select(&format!("[data-anilist-id='{id}']")))
+            .next()
+            .is_some()
+    };
     let filtered = fetch(&app, "/calendar/upcoming?hide_tracked=true", None).await;
-    assert!(!filtered.contains("Native 12") && filtered.contains("Native 13"));
+    assert!(!has_card(&filtered, 12) && has_card(&filtered, 13));
+    assert!(
+        filtered.contains("Native 12"),
+        "The franchise reference stays visible"
+    );
+    let filtered = fetch(
+        &app,
+        "/calendar/upcoming?format=OVA&library=outside&search=English%2013",
+        None,
+    )
+    .await;
+    assert!(has_card(&filtered, 13) && !has_card(&filtered, 12));
+    let filtered = fetch(
+        &app,
+        "/calendar/upcoming?library=tracked&search=English%2012",
+        None,
+    )
+    .await;
+    assert!(filtered.contains("Native 12") && !filtered.contains("Native 13"));
     let mut other = form.clone();
     other["anilist_id"] = json!(13);
     fetch(&app, "/api/library/add", Some(&other)).await;

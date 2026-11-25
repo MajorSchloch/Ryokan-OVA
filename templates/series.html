@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "partials/provider_rating.html" as provider_rating %}
 {# Per-page CSS now bundled in base.html — see comment there. #}
 
 {% block title %} - {% if title_language == "romaji" %}{% if !detail.title_romaji.is_empty() %}{{ detail.title_romaji }}{% else if !detail.title_english.is_empty() %}{{ detail.title_english }}{% else %}{{ detail.title_native }}{% endif %}{% else if title_language == "native" %}{% if !detail.title_native.is_empty() %}{{ detail.title_native }}{% else if !detail.title_romaji.is_empty() %}{{ detail.title_romaji }}{% else %}{{ detail.title_english }}{% endif %}{% else %}{% if !detail.title_english.is_empty() %}{{ detail.title_english }}{% else if !detail.title_romaji.is_empty() %}{{ detail.title_romaji }}{% else %}{{ detail.title_native }}{% endif %}{% endif %}{% endblock %}
@@ -44,9 +45,7 @@
             {% if let Some(year) = detail.season_year %}
             <span class="tag tag-res">{% if !detail.season.is_empty() %}{{ detail.season }} {% endif %}{{ year }}</span>
             {% endif %}
-            {% if let Some(score_text) = detail.average_score_display %}
-            <span class="tag tag-score {{ detail.score_class }}">{{ score_text }}</span>
-            {% endif %}
+            {% if let Some(score) = provider_rating %}{% call provider_rating::badge(score) %}{% endcall %}{% endif %}
             {# #62 — user's personal score from their linked AL/MAL
                account. Hidden when no account is linked, the series
                isn't on the user's list, or the user hasn't rated it.

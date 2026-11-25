@@ -11,6 +11,7 @@ pub(super) struct EpisodeStatus {
     pub label: String,
     pub explanation: String,
     pub last_check: String,
+    on_hold: bool,
 }
 impl Default for EpisodeStatus {
     fn default() -> Self {
@@ -28,6 +29,15 @@ impl EpisodeStatus {
             label: label.into(),
             explanation: explanation.into(),
             last_check: String::new(),
+            on_hold: false,
+        }
+    }
+
+    pub fn matches(&self, filter: &str) -> bool {
+        match filter {
+            "all" => true,
+            "held" => self.on_hold,
+            kind => self.kind == kind,
         }
     }
 }
@@ -38,6 +48,9 @@ pub(super) async fn load(
     episodes: &mut [UpcomingEpisode],
     now: i64,
 ) -> Result<HashMap<(i64, i32), EpisodeStatus>, String> {
+    if episodes.is_empty() {
+        return Ok(HashMap::new());
+    }
     let ids: HashSet<_> = episodes.iter().map(|e| e.series_id).collect();
     let scope = serde_json::to_string(&ids).map_err(|e| e.to_string())?;
     let library: HashMap<_, _> = series::get_all(db)
@@ -136,6 +149,10 @@ pub(super) async fn load(
             if state == "pending"
                 && let Some(hold) = holds.get(id)
             {
+                status.on_hold = true;
+                if status.kind == "pending" {
+                    status.label = "Held for review".into();
+                }
                 status.explanation.push_str(&format!(" {hold}"));
             }
             if status.kind == "missing" && state == "failed" {
@@ -164,7 +181,8 @@ pub(super) async fn load(
 pub(super) fn filter(value: Option<&String>) -> &str {
     match value.map(String::as_str) {
         Some(
-            v @ ("available" | "pending" | "missing" | "upcoming" | "unmonitored" | "unknown"),
+            v @ ("available" | "pending" | "held" | "missing" | "upcoming" | "unmonitored"
+            | "unknown"),
         ) => v,
         _ => "all",
     }

@@ -1033,6 +1033,25 @@ impl AnimeDetail {
     }
 }
 
+pub(crate) fn valid_rating(score: Option<i32>) -> Option<i32> {
+    score.filter(|score| (1..=100).contains(score))
+}
+
+pub(crate) fn detail_rating(detail: &AnimeDetail) -> Option<i32> {
+    if !detail.score_is_ten_point {
+        return valid_rating(detail.average_score);
+    }
+    // The MAL display value preserves the precision lost in average_score.
+    let score = detail
+        .average_score_display
+        .as_deref()
+        .and_then(|score| score.strip_suffix("/10"))
+        .and_then(|score| score.parse::<f64>().ok())
+        .or_else(|| detail.average_score.map(f64::from))
+        .filter(|score| (0.0..=10.0).contains(score))?;
+    valid_rating(Some((score * 10.0).round() as i32))
+}
+
 fn prettify_status(status: &str) -> String {
     status.replace('_', " ")
 }
