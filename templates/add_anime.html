@@ -28,7 +28,12 @@
 {% macro release_sections(sections, choosing) %}
 {% for section in sections %}
 <section class="discover-release-section" aria-labelledby="discover-releases-{{ section.id }}">
+    {% if section.extras %}
+    <details open>
+    <summary id="discover-releases-{{ section.id }}">{{ section.title }}</summary>
+    {% else %}
     <h4 id="discover-releases-{{ section.id }}">{{ section.title }}</h4>
+    {% endif %}
     <ul class="add-anime-results{% if choosing %} add-anime-results--select{% endif %}">
         {% for release in section.releases %}
         <li class="anilist-result" id="discover-release-{{ release.id }}">
@@ -46,6 +51,7 @@
                     {% if !release.row.facts.is_empty() %}<span class="anilist-meta">{{ release.row.facts }}</span>{% endif %}
                     <span class="anilist-meta">Premiere · {{ release.date }}</span>
                     {% if let Some(score) = release.row.rating %}{% call provider_rating::badge(score) %}{% endcall %}{% endif %}
+                    {% if release.optional %}<span class="chip">Optional in this guide</span>{% endif %}
                 </div>
                 {% for relation in release.relationships %}<p class="discover-release-relation">{{ relation.label }} <a href="#discover-release-{{ relation.id }}">{{ relation.title }}</a></p>{% endfor %}
             </div>
@@ -55,8 +61,34 @@
         </li>
         {% endfor %}
     </ul>
+    {% if section.extras %}</details>{% endif %}
 </section>
 {% endfor %}
+{% endmacro %}
+
+{% macro watch_guide_editor(input) %}
+<details class="discover-watch-guide" id="add-anime-guide"{% if guide.is_none() %} open{% endif %}>
+    <summary>{% if guide.is_some() %}Edit watch guide{% else %}Watch guide{% endif %}</summary>
+    <form action="/discover/guide#add-anime-releases-title" method="post" hx-boost="false">
+        {% if let Some(id) = franchise_id %}<input type="hidden" name="franchise_id" value="{{ id }}">{% endif %}
+        <input type="hidden" name="q" value="{{ q }}">
+        <input type="hidden" name="source" value="{{ source }}">
+        <input type="hidden" name="order" value="{{ self.order.as_str() }}">
+        <div class="form-group">
+            <label for="discover-guide-name">Guide name</label>
+            <input id="discover-guide-name" name="guide_name" value="{{ input.name }}" maxlength="80" required>
+        </div>
+        <div class="form-group">
+            <label for="discover-guide-entries">Releases in watch order</label>
+            <textarea id="discover-guide-entries" name="guide_entries" rows="6" maxlength="24576" aria-describedby="discover-guide-hint" required>{{ input.entries }}</textarea>
+            <p class="form-hint" id="discover-guide-hint">Enter one AniList anime ID or link per line. Put <code>?</code> first on lines for optional releases.</p>
+        </div>
+        <div class="add-anime-actions">
+            <a class="btn btn-secondary" href="{{ self.back_to_setup_parent() }}#add-anime-releases-title" hx-boost="false">Back to all releases</a>
+            <button type="submit" class="btn btn-primary">Preview guide</button>
+        </div>
+    </form>
+</details>
 {% endmacro %}
 
 {% block content %}
@@ -121,19 +153,33 @@
     <section aria-labelledby="add-anime-releases-title">
         <div class="discover-shelf-heading">
             <h3 id="add-anime-releases-title">{% if select %}Choose releases to add{% else %}Releases{% endif %}</h3>
-            {% if group.can_select && !select %}<a class="btn btn-primary" href="{{ self.select_releases_path() }}" hx-boost="false">Add releases</a>{% endif %}
+            {% if !select && guide_input.is_none() %}
+            <div class="discover-release-toolbar">
+                {% if self.can_preview_guide() %}<a class="btn btn-secondary" href="{{ self.guide_path() }}" hx-boost="false">Preview watch guide</a>{% endif %}
+                {% if group.can_select %}<a class="btn btn-primary" href="{{ self.select_releases_path() }}" hx-boost="false">Add releases</a>{% endif %}
+            </div>
+            {% endif %}
         </div>
         {% if !selection_notice.is_empty() %}<p class="alert alert-warn" role="alert">{{ selection_notice }}</p>{% endif %}
-        {% if !select && group.has_multiple %}
+        {% if let Some(input) = guide_input %}
+        {% call watch_guide_editor(input) %}{% endcall %}
+        {% endif %}
+        {% if !select && guide_input.is_none() && group.has_multiple %}
         {% let order = self.order.as_str() %}
         <nav class="discover-release-order" aria-label="Release order">
             <a class="btn btn-secondary" href="{{ self.order_path("formats") }}"{% if order == "formats" %} aria-current="true"{% endif %} hx-boost="false">By format</a>
             <a class="btn btn-secondary" href="{{ self.order_path("premiere") }}"{% if order == "premiere" %} aria-current="true"{% endif %} hx-boost="false">Premiere date</a>
             <a class="btn btn-secondary" href="{{ self.order_path("watch") }}"{% if order == "watch" %} aria-current="true"{% endif %} hx-boost="false">Watch order</a>
+            <a class="btn btn-secondary" href="{{ self.order_path("storylines") }}"{% if order == "storylines" %} aria-current="true"{% endif %} hx-boost="false">Storylines</a>
         </nav>
         {% endif %}
         {% if !group.order_hint.is_empty() %}<p class="form-hint">{{ group.order_hint }}</p>{% endif %}
-        {% if select %}<p class="form-hint">Select the releases you want to add to your library.</p>{% endif %}
+        {% if select %}
+        <p class="form-hint">{% if guide.is_some() %}Optional releases start unchecked. Review your choices before adding.{% else %}Select the releases you want to add to your library.{% endif %}</p>
+        {% else if guide.is_some() %}
+        <p class="form-hint">Every release in this guide is already in your library.</p>
+        <a href="{{ self.back_to_setup_parent() }}#add-anime-releases-title" hx-boost="false">Back to all releases</a>
+        {% endif %}
         {% call release_sections(group.sections.as_slice(), select) %}{% endcall %}
         {% if select %}
         <form class="discover-add-selection" id="add-anime-selected" action="/discover/add-releases#add-anime-releases-title" method="post" hx-boost="false">
@@ -141,6 +187,10 @@
             <input type="hidden" name="q" value="{{ q }}">
             <input type="hidden" name="source" value="{{ source }}">
             <input type="hidden" name="order" value="{{ self.order.as_str() }}">
+            {% if let Some(input) = guide_input %}
+            <input type="hidden" name="guide_name" value="{{ input.name }}">
+            <textarea hidden name="guide_entries">{{ input.entries }}</textarea>
+            {% endif %}
             <div class="form-group">
                 <label for="discover-monitor-mode">Monitor episodes in selected releases</label>
                 {% let mode = self.selection_monitor_mode() %}
@@ -160,6 +210,8 @@
         <a class="btn btn-secondary" href="{{ back }}">{% if q.is_empty() %}Back to Discover{% else %}Back to search{% endif %}</a>
         {% endif %}
     </section>
+    {% else if let Some(input) = guide_input %}
+    {% call watch_guide_editor(input) %}{% endcall %}
     {% else %}
     <form class="add-anime-query" action="/discover" method="get">
         <div class="form-group">

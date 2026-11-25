@@ -79,20 +79,24 @@
             if (active === 'downloads') { refreshDownloads(); timer = setInterval(refreshDownloads, 15000); }
             const filters = titlePage?.querySelector('[data-franchise-filters]');
             const filterNames = ['f_q', 'f_monitor', 'f_type', 'f_status', 'f_order', 'f_hide_unfollowed'];
-            const releaseList = titlePage?.querySelector('[data-franchise-list]');
-            const rows = releaseList ? [...releaseList.querySelectorAll('[data-franchise-release]')] : [];
-            let releaseOrder = filters?.elements.f_order.value;
+            const rows = [...(titlePage?.querySelectorAll('[data-franchise-list] > [data-franchise-release]') ?? [])];
+            const sections = [...(titlePage?.querySelectorAll('[data-franchise-section]') ?? [])];
+            const releaseOrder = filters?.elements.f_order.value;
             function filterReleases(update) {
                 const values = Object.fromEntries(new FormData(filters));
                 values.f_q = values.f_q.trim();
-                const term = values.f_q.toLowerCase();
-                if (values.f_order !== releaseOrder) {
-                    releaseOrder = values.f_order;
-                    const rank = releaseOrder === 'watch' ? 'watchRank' : 'premiereRank';
-                    rows.sort((a, b) => Number(a.dataset[rank]) - Number(b.dataset[rank]));
-                    releaseList.append(...rows);
+                const url = new URL(location.href);
+                if (update) {
+                    filterNames.forEach(name => { values[name] ? url.searchParams.set(name, values[name]) : url.searchParams.delete(name); });
+                    // Order changes can regroup the rows. Let the server render
+                    // the chosen order while carrying the current filters along.
+                    if (values.f_order !== releaseOrder) {
+                        url.hash = 'franchise-releases-title';
+                        location.assign(url);
+                        return;
+                    }
                 }
-                titlePage.querySelector('[data-watch-order-hint]').hidden = releaseOrder !== 'watch';
+                const term = values.f_q.toLowerCase();
                 let shown = 0;
                 rows.forEach(row => {
                     const matches = (!term || row.dataset.title.toLowerCase().includes(term))
@@ -103,16 +107,15 @@
                     row.hidden = !matches;
                     if (matches) shown++;
                 });
+                sections.forEach(section => { section.hidden = !section.querySelector('[data-franchise-release]:not([hidden])'); });
                 filters.querySelector('[data-franchise-count]').textContent = `${shown} of ${rows.length} releases`;
                 titlePage.querySelector('[data-franchise-empty]').hidden = shown > 0;
                 if (update) {
-                    const u = new URL(location.href);
-                    filterNames.forEach(name => { values[name] ? u.searchParams.set(name, values[name]) : u.searchParams.delete(name); });
-                    history.replaceState(history.state, '', u.pathname + u.search);
-                    tabs.forEach(a => { const destination = new URL(u); destination.searchParams.set('tab', a.dataset.titleTab); a.href = destination.pathname + destination.search; });
+                    history.replaceState(history.state, '', url.pathname + url.search);
+                    tabs.forEach(a => { const destination = new URL(url); destination.searchParams.set('tab', a.dataset.titleTab); a.href = destination.pathname + destination.search; });
                 }
             }
-            if (filters && releaseList) {
+            if (filters && titlePage.querySelector('[data-franchise-list]')) {
                 filters.addEventListener('input', () => filterReleases(true));
                 filters.addEventListener('submit', e => { e.preventDefault(); filterReleases(true); });
                 filters.querySelector('[data-franchise-reset]').addEventListener('click', event => {

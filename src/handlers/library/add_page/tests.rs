@@ -268,6 +268,87 @@ async fn orders_releases_across_formats_and_keeps_unknown_watch_positions_separa
         release_ids(&ambiguous, ".add-anime-results .anilist-title-link").len(),
         4
     );
+
+    let storylines = html(request(&state, &format!("{path}&order=storylines"), None).await).await;
+    let releases = release_ids(&storylines, ".add-anime-results .anilist-title-link");
+    assert_eq!(releases.len(), 4);
+    assert_eq!(
+        releases.into_iter().collect::<HashSet<_>>(),
+        HashSet::from([TRACKED, NEW, OTHER, UPCOMING])
+    );
+    assert!(storylines.contains("Preview watch guide"));
+}
+
+#[tokio::test]
+async fn watch_guide_previews_exact_releases_and_only_presets_required_choices() {
+    let db = in_memory_pool().await;
+    let root = provider_entry(TRACKED, ORIGINAL);
+    let mut season = provider_entry(NEW, SEQUEL);
+    season["relations"]["edges"] = json!([{"relationType":"PREQUEL","node":root.clone()}]);
+    let mut movie = provider_entry(OTHER, "Ada Orbit at the Cinema");
+    movie["format"] = json!("MOVIE");
+    movie["relations"]["edges"] = json!([{"relationType":"PARENT","node":root.clone()}]);
+    for item in [root, season, movie] {
+        let detail = anilist::parse_media_node(&item).unwrap();
+        metadata_cache::upsert_provider(&db, detail.id, None, &detail)
+            .await
+            .unwrap();
+    }
+    let state = build_test_app_state(db.clone(), None);
+    let form = |entries: &str| {
+        let mut url = reqwest::Url::parse("http://localhost").unwrap();
+        url.query_pairs_mut()
+            .append_pair("franchise_id", &TRACKED.to_string())
+            .append_pair("order", "storylines")
+            .append_pair("guide_name", "Ada's viewing guide")
+            .append_pair("guide_entries", entries);
+        url.query().unwrap().to_owned()
+    };
+    let entries = format!("? https://anilist.co/anime/{OTHER}/Ada-Orbit/\n{NEW}");
+    let preview = html(request(&state, "/discover/guide", Some(&form(&entries))).await).await;
+    let document = scraper::Html::parse_document(&preview);
+    let choices = scraper::Selector::parse("input[name='release']").unwrap();
+    assert_eq!(
+        document
+            .select(&choices)
+            .map(|choice| (
+                choice
+                    .value()
+                    .attr("value")
+                    .unwrap()
+                    .parse::<i64>()
+                    .unwrap(),
+                choice.value().attr("checked").is_some(),
+            ))
+            .collect::<Vec<_>>(),
+        [(OTHER, false), (NEW, true)]
+    );
+    assert!(preview.contains("Optional in this guide"));
+    assert!(!preview.contains(&format!("id=\"discover-release-{TRACKED}\"")));
+    assert_no_additions(&db).await;
+
+    let outside = html(
+        request(
+            &state,
+            "/discover/guide",
+            Some(&form(&UPCOMING.to_string())),
+        )
+        .await,
+    )
+    .await;
+    assert!(outside.contains(&format!("AniList ID {UPCOMING} is outside this franchise")));
+    assert!(!outside.contains("Add selected releases"));
+
+    let forged = format!("{}&monitor_mode=all&release={TRACKED}", form(&entries));
+    let response = request(&state, "/discover/add-releases", Some(&forged)).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(
+        std::str::from_utf8(&body)
+            .unwrap()
+            .contains("Select only releases in this watch guide.")
+    );
+    assert_no_additions(&db).await;
 }
 
 #[tokio::test]

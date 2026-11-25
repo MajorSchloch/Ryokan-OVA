@@ -12,7 +12,7 @@ use axum::{
     response::Html,
 };
 use sqlx::SqlitePool;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 pub(super) struct FranchiseCard {
     pub path: String,
@@ -319,14 +319,14 @@ pub(super) async fn cards(
 }
 
 struct Release {
+    provider_id: i64,
     title: String,
     cover_url: String,
     provider_rating: Option<i32>,
     path: String,
     format: String,
     date: String,
-    premiere_rank: usize,
-    watch_rank: usize,
+    relationships: Vec<String>,
     followed: bool,
     upcoming: bool,
     in_library: bool,
@@ -399,7 +399,7 @@ impl FranchiseFilters {
             ),
             (&mut self.f_type, &["tv", "movie", "ova", "other"][..]),
             (&mut self.f_status, &availability::OVERVIEW_STATUSES[..]),
-            (&mut self.f_order, &["watch"][..]),
+            (&mut self.f_order, &["watch", "storylines"][..]),
             (&mut self.f_hide_unfollowed, &["1"][..]),
         ] {
             if !allowed.contains(&value.as_str()) {
@@ -419,43 +419,76 @@ impl FranchiseFilters {
     }
 }
 
-/// Use only the known sequence within this franchise. The input is already
-/// in premiere order. If there is no usable sequence, keep that order.
-fn watch_ranks(entries: &[groups::Entry]) -> Option<Vec<usize>> {
-    let positions: HashMap<_, _> = entries
-        .iter()
-        .enumerate()
-        .map(|(position, entry)| (entry.provider_id, position))
-        .collect();
-    let mut successors = vec![Vec::new(); entries.len()];
-    let mut pending = vec![0; entries.len()];
-    for (position, entry) in entries.iter().enumerate() {
-        for predecessor in &entry.watch_predecessors {
-            if let Some(&before) = positions.get(predecessor) {
-                successors[before].push(position);
-                pending[position] += 1;
-            }
-        }
+struct ReleaseSection {
+    title: String,
+    releases: Vec<Release>,
+    extras: bool,
+}
+
+impl ReleaseSection {
+    fn has_matches(&self) -> bool {
+        self.releases.iter().any(|release| release.matches_filter)
     }
-    if pending.iter().all(|&count| count == 0) {
-        return None;
+}
+
+fn release_sections(
+    entries: &[groups::Entry],
+    releases: Vec<Release>,
+    order: &str,
+) -> Vec<ReleaseSection> {
+    let sections = match order {
+        "storylines" => groups::storylines::sections(entries)
+            .into_iter()
+            .map(|section| (section.title, section.releases, section.extras))
+            .collect(),
+        "watch" => groups::watch_sequence(entries).map_or_else(Vec::new, |sequence| {
+            let known: HashSet<_> = sequence.iter().copied().collect();
+            let other = entries
+                .iter()
+                .map(|entry| entry.provider_id)
+                .filter(|id| !known.contains(id))
+                .collect();
+            vec![
+                ("Known watch sequence".into(), sequence, false),
+                ("No known watch position".into(), other, false),
+            ]
+        }),
+        _ => Vec::new(),
+    };
+    if sections.is_empty() {
+        return vec![ReleaseSection {
+            title: String::new(),
+            releases,
+            extras: false,
+        }];
     }
 
-    let mut available: BTreeSet<_> = (0..entries.len())
-        .filter(|&position| pending[position] == 0)
+    let mut by_id: HashMap<_, _> = releases
+        .into_iter()
+        .map(|release| (release.provider_id, release))
         .collect();
-    let mut ranks = vec![0; entries.len()];
-    for rank in 0..entries.len() {
-        let position = available.pop_first()?;
-        ranks[position] = rank;
-        for &after in &successors[position] {
-            pending[after] -= 1;
-            if pending[after] == 0 {
-                available.insert(after);
-            }
-        }
+    let mut grouped: Vec<_> = sections
+        .into_iter()
+        .filter_map(|(title, ids, extras)| {
+            let releases: Vec<_> = ids.into_iter().filter_map(|id| by_id.remove(&id)).collect();
+            (!releases.is_empty()).then_some(ReleaseSection {
+                title,
+                releases,
+                extras,
+            })
+        })
+        .collect();
+    if !by_id.is_empty() {
+        grouped.push(ReleaseSection {
+            title: "Other releases".into(),
+            releases: entries
+                .iter()
+                .filter_map(|entry| by_id.remove(&entry.provider_id))
+                .collect(),
+            extras: false,
+        });
     }
-    Some(ranks)
+    grouped
 }
 
 #[derive(Template)]
@@ -466,8 +499,8 @@ struct FranchisePage {
     title: String,
     cover_url: String,
     provider_rating: Option<i32>,
-    releases: Vec<Release>,
-    has_watch_order: bool,
+    release_sections: Vec<ReleaseSection>,
+    watch_fallback: bool,
     filters: FranchiseFilters,
     total_releases: usize,
     visible_releases: usize,
@@ -586,9 +619,8 @@ pub async fn page(
         crate::services::language_preferences::franchise_config(&state.db, &cfg, &id).await;
     filters.normalize();
     let search = filters.f_q.to_lowercase();
-    let watch_order = watch_ranks(&group.entries);
     let mut releases = Vec::with_capacity(group.entries.len());
-    for (premiere_rank, e) in group.entries.iter().enumerate() {
+    for e in &group.entries {
         let tracked = e.series_id.and_then(|id| by_id.get(&id));
         let mut summary = e
             .series_id
@@ -611,6 +643,7 @@ pub async fn page(
             String::new()
         };
         let mut release = Release {
+            provider_id: e.provider_id,
             series_id: e.series_id,
             monitor_mode: if summary.monitoring_label.contains(" of ") {
                 "custom".into()
@@ -663,10 +696,13 @@ pub async fn page(
             path: super::detail::path(e.library_provider_id.unwrap_or(e.provider_id)),
             format: e.format.replace('_', " "),
             date: availability::premiere_label(&e.date),
-            premiere_rank,
-            watch_rank: watch_order
-                .as_ref()
-                .map_or(premiere_rank, |ranks| ranks[premiere_rank]),
+            relationships: if filters.f_order == "storylines" {
+                e.relationships()
+                    .map(|(label, title, _)| format!("{label} {title}"))
+                    .collect()
+            } else {
+                Vec::new()
+            },
             followed,
             upcoming,
             monitoring_label: summary.monitoring_label.clone(),
@@ -679,13 +715,15 @@ pub async fn page(
         release.matches_filter = filters.matches(&release, &search);
         releases.push(release);
     }
-    if filters.f_order == "watch" {
-        releases.sort_by_key(|release| release.watch_rank);
-    }
     let visible_releases = releases
         .iter()
         .filter(|release| release.matches_filter)
         .count();
+    let release_sections = release_sections(&group.entries, releases, &filters.f_order);
+    let watch_fallback = filters.f_order == "watch"
+        && release_sections
+            .first()
+            .is_some_and(|section| section.title.is_empty());
     let page = FranchisePage {
         id,
         requirements,
@@ -697,8 +735,8 @@ pub async fn page(
         title: group.title,
         cover_url,
         provider_rating,
-        releases,
-        has_watch_order: watch_order.is_some(),
+        release_sections,
+        watch_fallback,
         filters,
         total_releases: group.entries.len(),
         visible_releases,
