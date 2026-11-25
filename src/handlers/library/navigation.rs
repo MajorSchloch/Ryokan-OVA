@@ -435,12 +435,13 @@ impl ReleaseSection {
 
 fn release_sections(
     entries: &[groups::Entry],
+    storylines: Vec<groups::storylines::Storyline>,
     releases: Vec<Release>,
     order: &str,
     seed: i64,
 ) -> Vec<ReleaseSection> {
     let sections = match order {
-        "storylines" => groups::storylines::sections(entries)
+        "storylines" => storylines
             .into_iter()
             .map(|section| {
                 let head = section.kind.can_select().then(|| section.head());
@@ -538,6 +539,7 @@ struct FranchisePage {
     cover_url: String,
     provider_rating: Option<i32>,
     release_sections: Vec<ReleaseSection>,
+    branch_map_path: Option<String>,
     watch_fallback: bool,
     filters: FranchiseFilters,
     total_releases: usize,
@@ -757,7 +759,12 @@ pub async fn page(
         .iter()
         .filter(|release| release.matches_filter)
         .count();
-    let release_sections = release_sections(&group.entries, releases, &filters.f_order, seed);
+    let storylines = groups::storylines::sections(&group.entries);
+    let branch_map_path = (seed != 0
+        && !groups::storylines::branches::edges(&group.entries, &storylines).is_empty())
+    .then(|| format!("/discover?franchise_id={seed}&order=branches#add-anime-releases-title"));
+    let release_sections =
+        release_sections(&group.entries, storylines, releases, &filters.f_order, seed);
     let watch_fallback = filters.f_order == "watch"
         && release_sections
             .first()
@@ -774,6 +781,7 @@ pub async fn page(
         cover_url,
         provider_rating,
         release_sections,
+        branch_map_path,
         watch_fallback,
         filters,
         total_releases: group.entries.len(),

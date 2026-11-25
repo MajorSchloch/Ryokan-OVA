@@ -1,0 +1,47 @@
+{% macro branch_connections(cards, identity, heading) %}
+{% if !cards.is_empty() %}
+<section class="discover-branch-group" data-branch-relation="{{ identity }}" aria-labelledby="discover-branch-{{ identity }}">
+    <h4 id="discover-branch-{{ identity }}">{{ heading }}</h4>
+    <ul class="discover-branch-cards">
+        {% for card in cards %}
+        <li>
+            <a class="discover-branch-card" href="{{ card.href }}" hx-boost="false">
+                <strong>{{ card.title }}</strong>
+                {% if !card.labels.is_empty() %}
+                <span class="discover-branch-card-labels">{% for label in card.labels %}{{ label }}{% if !loop.last %} · {% endif %}{% endfor %}</span>
+                {% endif %}
+            </a>
+        </li>
+        {% endfor %}
+    </ul>
+</section>
+{% endif %}
+{% endmacro %}
+
+<section class="discover-branch-map" id="discover-branch-map" aria-label="Branch map">
+    <form class="discover-branch-picker" action="/discover#add-anime-releases-title" method="get" hx-boost="false">
+        {% if let Some(id) = franchise_id %}<input type="hidden" name="franchise_id" value="{{ id }}">{% endif %}
+        <input type="hidden" name="q" value="{{ q }}">
+        <input type="hidden" name="source" value="{{ source }}">
+        <input type="hidden" name="order" value="branches">
+        <div class="form-group">
+            <label for="discover-branch-focus">Focus on a storyline</label>
+            <select id="discover-branch-focus" name="branch">
+                {% for choice in map.choices %}<option value="{{ choice.id }}"{% if choice.id == map.focus %} selected{% endif %}>{{ choice.title }}</option>{% endfor %}
+            </select>
+        </div>
+        <button type="submit" class="btn btn-secondary">Show connections</button>
+    </form>
+    <div class="discover-branch-directions">
+        {% call branch_connections(map.before.as_slice(), "prequels", "Linked prequels") %}{% endcall %}
+        <div class="discover-branch-focus">
+            <span class="anilist-meta">Focused storyline</span>
+            <h4>{{ map.title }}</h4>
+        </div>
+        {% call branch_connections(map.after.as_slice(), "sequels", "Linked sequels") %}{% endcall %}
+    </div>
+    {% call branch_connections(map.related.as_slice(), "related", "Other connections") %}{% endcall %}
+    {% if map.before.is_empty() && map.after.is_empty() && map.related.is_empty() %}
+    <p class="form-hint">This storyline has no links to other storylines.</p>
+    {% endif %}
+</section>

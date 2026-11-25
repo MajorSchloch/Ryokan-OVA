@@ -21,6 +21,7 @@ struct Selection {
     source: String,
     mode: Choice,
     order: ReleaseOrder,
+    branch: Option<i64>,
     releases: HashSet<i64>,
     guide_input: Option<GuideInput>,
 }
@@ -38,6 +39,7 @@ fn parse(fields: Vec<(String, String)>) -> Result<Selection, &'static str> {
     let mut source = None;
     let mut mode = None;
     let mut order = None;
+    let mut branch = None;
     let mut guide_name = None;
     let mut guide_entries = None;
     let mut releases = HashSet::new();
@@ -49,6 +51,9 @@ fn parse(fields: Vec<(String, String)>) -> Result<Selection, &'static str> {
             "q" if query.is_none() => query = Some(value),
             "source" if source.is_none() => source = Some(value),
             "order" if order.is_none() => order = Some(ReleaseOrder::from_param(&value)),
+            "branch" if branch.is_none() => {
+                branch = Some(provider_id(&value).ok_or("Choose a valid storyline.")?);
+            }
             "guide_name" if guide_name.is_none() => guide_name = Some(value),
             "guide_entries" if guide_entries.is_none() => guide_entries = Some(value),
             "monitor_mode" if mode.is_none() => {
@@ -62,8 +67,8 @@ fn parse(fields: Vec<(String, String)>) -> Result<Selection, &'static str> {
             "release" => {
                 releases.insert(provider_id(&value).ok_or("Choose a valid release.")?);
             }
-            "franchise_id" | "q" | "source" | "monitor_mode" | "order" | "guide_name"
-            | "guide_entries" => {
+            "franchise_id" | "q" | "source" | "monitor_mode" | "order" | "branch"
+            | "guide_name" | "guide_entries" => {
                 return Err("Reload the franchise and review your choices.");
             }
             _ => {}
@@ -81,6 +86,7 @@ fn parse(fields: Vec<(String, String)>) -> Result<Selection, &'static str> {
         source: source.unwrap_or_default(),
         mode: mode.ok_or("Choose how to monitor the selected releases.")?,
         order: order.unwrap_or_default(),
+        branch,
         releases,
         guide_input,
     })
@@ -123,7 +129,7 @@ pub(in crate::handlers::library) async fn save(
     let mut view = AddPage::new(&cfg, selection.query, &selection.source, Some(seed));
     view.selected_releases = selection.releases;
     view.selection_mode = selection.mode;
-    view.order = selection.order;
+    view.set_order(selection.order, selection.branch);
     view.guide_input = selection.guide_input;
     let mut resolved = match discovery::resolve_group(&state, &view, seed).await {
         Ok(resolved) => resolved,

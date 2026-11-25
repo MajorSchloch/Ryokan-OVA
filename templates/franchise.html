@@ -80,7 +80,10 @@
 <section data-title-panel="releases" aria-labelledby="franchise-releases-title">
     <div class="franchise-section-heading library-franchise-release-heading">
         <h3 id="franchise-releases-title">Releases</h3>
-        {% if seed > 0 %}<a class="btn btn-secondary btn-sm" href="/discover?source=al&amp;franchise_id={{ seed }}&amp;order=storylines&amp;guide=true">Preview watch guide</a>{% endif %}
+        <div class="library-franchise-release-actions">
+            {% if let Some(path) = branch_map_path %}<a class="btn btn-secondary btn-sm" href="{{ path }}">Branch map</a>{% endif %}
+            {% if seed > 0 %}<a class="btn btn-secondary btn-sm" href="/discover?source=al&amp;franchise_id={{ seed }}&amp;order=storylines&amp;guide=true">Preview watch guide</a>{% endif %}
+        </div>
     </div>
     <form class="franchise-filters management-panel" data-franchise-filters method="get" hx-boost="false">
         <input type="hidden" name="tab" value="releases">

@@ -27,9 +27,14 @@
 
 {% macro release_sections(sections, choosing, compact) %}
 {% for section in sections %}
+{% call release_section(section, choosing, compact, false) %}{% endcall %}
+{% endfor %}
+{% endmacro %}
+
+{% macro release_section(section, choosing, compact, focused) %}
 <section class="discover-release-section{% if compact %} discover-storyline-section{% endif %}" aria-labelledby="discover-releases-{{ section.id }}">
     <div class="discover-section-heading">
-        <h4 id="discover-releases-{{ section.id }}">{{ section.title }}</h4>
+        <h4 id="discover-releases-{{ section.id }}">{% if focused %}Releases in this storyline{% else %}{{ section.title }}{% endif %}</h4>
         {% if !choosing && guide_input.is_none() %}
         {% if let Some(path) = section.selection_path %}
         <div class="discover-storyline-action">
@@ -39,7 +44,7 @@
         {% endif %}
         {% endif %}
     </div>
-    {% if !section.links.is_empty() %}
+    {% if !focused && !section.links.is_empty() %}
     <ul class="discover-storyline-context" aria-label="Storyline connections">
         {% for link in section.links.iter().take(2) %}<li>{{ link.label }} <a href="#discover-release-{{ link.id }}">{{ link.title }}</a></li>{% endfor %}
         {% if section.links.len() > 2 %}
@@ -75,7 +80,9 @@
                     {% if let Some(score) = release.row.rating %}{% call provider_rating::badge(score) %}{% endcall %}{% endif %}
                     {% if release.optional %}<span class="chip">Optional in this guide</span>{% endif %}
                 </div>
+                {% if !focused %}
                 {% for relation in release.relationships %}<p class="discover-release-relation">{{ relation.label }} <a href="#discover-release-{{ relation.id }}">{{ relation.title }}</a></p>{% endfor %}
+                {% endif %}
             </div>
             <div class="discover-release-actions">
                 {% if release.row.existing %}<span class="chip">In library</span><a href="{{ release.row.href }}" class="btn btn-secondary">Open release</a>{% else if !choosing %}<a href="{{ release.row.href }}" class="btn btn-secondary">Set up</a>{% endif %}
@@ -85,7 +92,6 @@
     </ul>
     {% if compact %}</details>{% endif %}
 </section>
-{% endfor %}
 {% endmacro %}
 
 {% macro watch_guide_editor(input) %}
@@ -96,6 +102,7 @@
         <input type="hidden" name="q" value="{{ q }}">
         <input type="hidden" name="source" value="{{ source }}">
         <input type="hidden" name="order" value="{{ self.order.as_str() }}">
+        {% if let Some(id) = branch %}<input type="hidden" name="branch" value="{{ id }}">{% endif %}
         <div class="form-group">
             <label for="discover-guide-name">Guide name</label>
             <input id="discover-guide-name" name="guide_name" value="{{ input.name }}" maxlength="80" required>
@@ -106,7 +113,7 @@
             <p class="form-hint" id="discover-guide-hint">Enter one AniList anime ID or link per line. Put <code>?</code> first on lines for optional releases.</p>
         </div>
         <div class="add-anime-actions">
-            <a class="btn btn-secondary" href="{{ self.back_to_setup_parent() }}#add-anime-releases-title" hx-boost="false">Back to all releases</a>
+            <a class="btn btn-secondary" href="{{ self.back_to_setup_parent() }}#add-anime-releases-title" hx-boost="false">{% if self.order.as_str() == "branches" %}Back to branch map{% else %}Back to all releases{% endif %}</a>
             <button type="submit" class="btn btn-primary">Preview guide</button>
         </div>
     </form>
@@ -138,6 +145,7 @@
             <input type="hidden" name="q" value="{{ q }}">
             <input type="hidden" name="source" value="{{ source }}">
             <input type="hidden" name="order" value="{{ self.order.as_str() }}">
+            {% if let Some(id) = branch %}<input type="hidden" name="branch" value="{{ id }}">{% endif %}
             <fieldset class="add-anime-monitor">
                 <legend>Monitor episodes</legend>
                 <label><input type="radio" name="monitor_mode" value="all"{% if release.monitor_mode == "all" %} checked{% endif %}><span>All episodes <small>Aired and future episodes</small></span></label>
@@ -163,10 +171,12 @@
             <div class="synopsis-body">{{ group.synopsis|safe }}</div>
             {% endif %}
             {% if !group.alternate_titles.is_empty() %}
-            <h3>Alternate titles</h3>
-            <ul class="discover-alternate-titles">
-                {% for title in group.alternate_titles %}<li><span title="{{ title }}">{{ title }}</span></li>{% endfor %}
-            </ul>
+            <details class="discover-alternate-title-disclosure">
+                <summary>Alternate titles ({{ group.alternate_titles.len() }})</summary>
+                <ul class="discover-alternate-titles">
+                    {% for title in group.alternate_titles %}<li>{{ title }}</li>{% endfor %}
+                </ul>
+            </details>
             {% endif %}
             {% if let Some(path) = group.library_url %}<a href="{{ path }}">Manage franchise in Library</a>{% endif %}
         </div>
@@ -195,6 +205,7 @@
             <a class="btn btn-secondary" href="{{ self.order_path("premiere") }}"{% if order == "premiere" %} aria-current="true"{% endif %} hx-boost="false">Premiere date</a>
             <a class="btn btn-secondary" href="{{ self.order_path("watch") }}"{% if order == "watch" %} aria-current="true"{% endif %} hx-boost="false">Watch order</a>
             <a class="btn btn-secondary" href="{{ self.order_path("storylines") }}"{% if order == "storylines" %} aria-current="true"{% endif %} hx-boost="false">Storylines</a>
+            {% if group.has_branch_map || order == "branches" %}<a class="btn btn-secondary" href="{{ self.order_path("branches") }}"{% if order == "branches" %} aria-current="true"{% endif %} hx-boost="false">Branch map</a>{% endif %}
         </nav>
         {% endif %}
         {% if !group.order_hint.is_empty() %}<p class="form-hint">{{ group.order_hint }}</p>{% endif %}
@@ -202,16 +213,26 @@
         <p class="form-hint">{% if guide.is_some() %}Optional releases start unchecked. Review your choices before adding.{% else %}Select the releases you want to add to your library.{% endif %}</p>
         {% else if guide.is_some() %}
         <p class="form-hint">Every release in this guide is already in your library.</p>
-        <a href="{{ self.back_to_setup_parent() }}#add-anime-releases-title" hx-boost="false">Back to all releases</a>
+        <a href="{{ self.back_to_setup_parent() }}#add-anime-releases-title" hx-boost="false">{% if self.order.as_str() == "branches" %}Back to branch map{% else %}Back to all releases{% endif %}</a>
         {% endif %}
-        {% let compact = self.order.as_str() == "storylines" && guide.is_none() %}
+        {% if let Some(map) = self.visible_branch_map() %}
+        {% include "partials/library/discover_branch_map.html" %}
+        {% for section in group.sections %}
+            {% if let Some(head) = section.storyline %}
+                {% if *head == map.focus %}{% call release_section(section, false, false, true) %}{% endcall %}{% endif %}
+            {% endif %}
+        {% endfor %}
+        {% else %}
+        {% let compact = self.order.grouped() && guide.is_none() %}
         {% call release_sections(group.sections.as_slice(), select, compact) %}{% endcall %}
+        {% endif %}
         {% if select %}
         <form class="discover-add-selection" id="add-anime-selected" action="/discover/add-releases#add-anime-releases-title" method="post" hx-boost="false">
             {% if let Some(id) = franchise_id %}<input type="hidden" name="franchise_id" value="{{ id }}">{% endif %}
             <input type="hidden" name="q" value="{{ q }}">
             <input type="hidden" name="source" value="{{ source }}">
             <input type="hidden" name="order" value="{{ self.order.as_str() }}">
+            {% if let Some(id) = branch %}<input type="hidden" name="branch" value="{{ id }}">{% endif %}
             {% if let Some(input) = guide_input %}
             <input type="hidden" name="guide_name" value="{{ input.name }}">
             <textarea hidden name="guide_entries">{{ input.entries }}</textarea>

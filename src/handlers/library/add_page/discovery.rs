@@ -14,7 +14,7 @@ use crate::{
 };
 
 use super::{
-    AddPage, ReleaseOrder, ResultRow, detail, exact_detail, existing, facts,
+    AddPage, ReleaseOrder, ResultRow, branch_map, detail, exact_detail, existing, facts,
     storyline_selection_path, supported_provider, upcoming,
 };
 use crate::handlers::library::{
@@ -33,6 +33,8 @@ pub(super) struct Franchise {
     pub rating: Option<i32>,
     pub can_select: bool,
     pub has_multiple: bool,
+    pub has_branch_map: bool,
+    pub branch_map: Option<branch_map::BranchMap>,
     pub order_hint: &'static str,
     pub sections: Vec<ReleaseSection>,
 }
@@ -361,6 +363,7 @@ fn release_sections(
     view: &AddPage,
     seed: i64,
     overview: Option<&AnimeDetail>,
+    storylines: Vec<groups::storylines::Storyline>,
 ) -> (Vec<ReleaseSection>, &'static str) {
     let rows = group.entries.iter().map(|entry| {
         let href = entry
@@ -414,10 +417,10 @@ fn release_sections(
             "",
         );
     }
-    if view.order == ReleaseOrder::Storylines {
+    if view.order.grouped() {
         let mut rows: HashMap<_, _> = rows.map(|row| (row.id, row)).collect();
         let path = view.franchise_path(seed);
-        let sections = groups::storylines::sections(&group.entries)
+        let sections = storylines
             .into_iter()
             .enumerate()
             .map(|(index, section)| {
@@ -445,9 +448,13 @@ fn release_sections(
                             id: link.peer_id,
                         })
                         .collect(),
-                    selection_path: storyline
-                        .filter(|_| selection_count > 0)
-                        .map(|head| storyline_selection_path(&path, head)),
+                    selection_path: storyline.filter(|_| selection_count > 0).map(|head| {
+                        if view.order == ReleaseOrder::Branches {
+                            storyline_selection_path(&view.branch_path(seed, head), head)
+                        } else {
+                            storyline_selection_path(&path, head)
+                        }
+                    }),
                     selection_count,
                 }
             })
@@ -536,7 +543,16 @@ pub(super) async fn project(
     let main = representative(&group);
     let title = display_title(&group, main);
     let main_detail = representative_detail(&state.db, main, detail, fetch_overview).await;
-    let (sections, order_hint) = release_sections(&group, view, seed, main_detail.as_ref());
+    let storylines = groups::storylines::sections(&group.entries);
+    let edges = groups::storylines::branches::edges(&group.entries, &storylines);
+    let has_branch_map = !edges.is_empty();
+    let branch_map = if view.order == ReleaseOrder::Branches {
+        branch_map::build(&storylines, &edges, view, seed)
+    } else {
+        None
+    };
+    let (sections, order_hint) =
+        release_sections(&group, view, seed, main_detail.as_ref(), storylines);
     let main_row = if let Some(id) = main.series_id {
         match tracked.filter(|row| row.id == id) {
             Some(row) => Some(row),
@@ -573,7 +589,13 @@ pub(super) async fn project(
             .flat_map(|section| &section.releases)
             .any(|release| !release.row.existing),
         has_multiple: group.entries.len() > 1,
-        order_hint,
+        has_branch_map,
+        branch_map,
+        order_hint: if view.order == ReleaseOrder::Branches && !has_branch_map {
+            "Storyline connections are unavailable. Browse the release outline below."
+        } else {
+            order_hint
+        },
         sections,
     }
 }

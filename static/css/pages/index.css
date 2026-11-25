@@ -1353,6 +1353,7 @@ a.franchise-status:hover { border-color: currentColor; text-decoration: underlin
 .franchise-section-heading { display: flex; align-items: baseline; gap: 16px; margin-bottom: 16px; }
 .franchise-section-heading h3 { margin: 0; }
 .library-franchise-release-heading { justify-content: space-between; flex-wrap: wrap; }
+.library-franchise-release-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 #franchise-releases-title { scroll-margin-top: 5rem; }
 .library-franchise-section { margin-block: 24px; }
 .library-storyline-heading { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; }
@@ -1512,8 +1513,7 @@ a.franchise-status:hover { border-color: currentColor; text-decoration: underlin
 .discover-poster-subtitle, .discover-poster-facts { font-size: 12px; color: var(--text-dim); }
 .discover-poster-subtitle,
 .discover-poster-franchise,
-.add-anime-results .anilist-subtitle,
-.discover-alternate-titles li > span {
+.add-anime-results .anilist-subtitle {
     display: -webkit-box;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
@@ -1547,6 +1547,59 @@ a.franchise-status:hover { border-color: currentColor; text-decoration: underlin
 .discover-storyline-releases > summary { color: var(--text-dim); }
 .discover-release-order, .discover-release-toolbar { display: flex; flex-wrap: wrap; gap: 6px; }
 .discover-release-order [aria-current="true"] { border-color: var(--accent); color: var(--accent); }
+.discover-branch-map {
+    display: grid;
+    gap: 14px;
+    padding: clamp(14px, 3vw, 22px);
+    margin-block: 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-card);
+    overflow-wrap: anywhere;
+}
+.discover-branch-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 8px 12px; }
+.discover-branch-picker .form-group { margin: 0; min-width: 0; }
+.discover-branch-picker select { width: 100%; }
+.discover-branch-focus { padding: 10px 12px; border-inline-start: 3px solid var(--accent); background: var(--bg-elevated); }
+.discover-branch-focus h4, .discover-branch-group h4 { margin: 0; }
+.discover-branch-directions { display: grid; align-items: start; gap: 26px; }
+.discover-branch-directions:has(> :nth-child(2)) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.discover-branch-directions:has(> :nth-child(3)) { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.discover-branch-directions > * { position: relative; }
+.discover-branch-directions > :not(:last-child)::before,
+.discover-branch-directions > :not(:last-child)::after { content: ""; position: absolute; pointer-events: none; }
+.discover-branch-directions > :not(:last-child)::before {
+    inset-block-start: 26px;
+    inset-inline-end: -22px;
+    width: 17px;
+    border-top: 1px solid var(--text-dim);
+}
+.discover-branch-directions > :not(:last-child)::after {
+    inset-block-start: 24px;
+    inset-inline-end: -22px;
+    width: 5px;
+    height: 5px;
+    border: solid var(--text-dim);
+    border-width: 1px 1px 0 0;
+    transform: rotate(45deg);
+}
+.discover-branch-cards { display: grid; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
+.discover-branch-group[data-branch-relation="related"] .discover-branch-cards { grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); }
+.discover-branch-card {
+    display: grid;
+    align-content: center;
+    gap: 2px;
+    height: 100%;
+    min-height: 44px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    text-decoration: none;
+}
+.discover-branch-card:hover { border-color: var(--accent); }
+.discover-branch-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.discover-branch-card-labels { color: var(--text-dim); font-size: 13px; }
 .discover-watch-guide {
     margin-block: 16px;
     padding: 16px;
@@ -1616,8 +1669,10 @@ a.franchise-status:hover { border-color: currentColor; text-decoration: underlin
     object-fit: cover;
     border-radius: var(--radius);
 }
-.discover-alternate-titles { padding-inline-start: 20px; margin-block: 6px 10px; }
-.discover-alternate-titles li { color: var(--text-dim); font-size: 14px; margin-bottom: 3px; }
+.discover-alternate-title-disclosure { margin-block: 10px; }
+.discover-alternate-title-disclosure summary { font-weight: 600; cursor: pointer; }
+.discover-alternate-titles { columns: 16rem; column-gap: 28px; padding-inline-start: 20px; margin-block: 6px 0; }
+.discover-alternate-titles li { break-inside: avoid; color: var(--text-dim); font-size: 14px; margin-bottom: 3px; }
 
 .add-anime-panel {
     padding: clamp(16px, 4vw, 28px);
@@ -1656,6 +1711,24 @@ a.franchise-status:hover { border-color: currentColor; text-decoration: underlin
 @media (max-width: 560px) {
     .add-anime-query { grid-template-columns: minmax(0, 1fr) auto; }
     .add-anime-query .form-group:first-child { grid-column: 1 / -1; }
+    .discover-branch-picker { grid-template-columns: minmax(0, 1fr); }
+    .discover-branch-picker button { justify-self: start; }
+    .discover-branch-directions:has(> :nth-child(2)) { grid-template-columns: minmax(0, 1fr); }
+    .discover-branch-directions > :not(:last-child)::before {
+        inset-block-start: auto;
+        inset-block-end: -21px;
+        inset-inline-end: 50%;
+        width: 0;
+        height: 16px;
+        border-width: 0 1px 0 0;
+        border-style: solid;
+    }
+    .discover-branch-directions > :not(:last-child)::after {
+        inset-block-start: auto;
+        inset-block-end: -21px;
+        inset-inline-end: calc(50% - 2px);
+        transform: rotate(135deg);
+    }
     .discover-poster-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .add-anime-results .anilist-result {
         grid-template-columns: 48px minmax(0, 1fr);

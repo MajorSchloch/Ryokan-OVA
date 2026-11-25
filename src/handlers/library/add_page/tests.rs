@@ -218,6 +218,10 @@ async fn orders_releases_across_formats_and_keeps_unknown_watch_positions_separa
     }
     let state = build_test_app_state(db, None);
     let path = format!("/discover?franchise_id={TRACKED}");
+    let empty_map = html(request(&state, &format!("{path}&order=branches"), None).await).await;
+    assert!(empty_map.contains("Storyline connections are unavailable"));
+    assert!(empty_map.contains("discover-storyline-section"));
+    assert!(!empty_map.contains("id=\"discover-branch-map\""));
     let premiere = html(request(&state, &format!("{path}&order=premiere"), None).await).await;
     let release_ids = |page: &str, selector: &str| {
         add_links(page, selector)
@@ -327,6 +331,25 @@ async fn selects_only_untracked_releases_in_the_requested_storyline() {
     assert!(choose.contains(&format!("name=\"release\" value=\"{OTHER}\"")));
     assert!(choose.contains(&format!("name=\"release\" value=\"{EXTRA}\"")));
     assert!(!choose.contains(&format!("name=\"release\" value=\"{TRACKED}\"")));
+
+    let map_path = format!("/discover?franchise_id={TRACKED}&order=branches&branch={NEW}");
+    let map = html(request(&state, &map_path, None).await).await;
+    assert!(map.contains("id=\"discover-branch-map\""));
+    assert!(map.contains("Linked prequels"));
+    let neighbors = add_links(&map, ".discover-branch-card");
+    assert_eq!(neighbors.len(), 1);
+    assert_eq!(link_id(&neighbors[0], "branch"), Some(TRACKED));
+    assert!(map.contains(&format!("id=\"discover-release-{UPCOMING}\"")));
+    assert!(!map.contains(&format!("id=\"discover-release-{OTHER}\"")));
+    let launches = add_links(&map, ".discover-storyline-action a");
+    assert_eq!(launches.len(), 1);
+    let launch = &launches[0];
+    assert_eq!(link_id(launch, "branch"), Some(NEW));
+    assert_eq!(link_id(launch, "storyline"), Some(NEW));
+    let review = html(request(&state, &request_uri(launch), None).await).await;
+    assert_eq!(chosen_ids(&review), [NEW, UPCOMING]);
+    assert!(!review.contains("id=\"discover-branch-map\""));
+    assert!(review.contains(&format!("name=\"branch\" value=\"{NEW}\"")));
 
     for head in [EXTRA, 42] {
         let stale = html(request(&state, &format!("{base}&storyline={head}"), None).await).await;

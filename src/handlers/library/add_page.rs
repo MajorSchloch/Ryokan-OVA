@@ -34,6 +34,7 @@ pub(super) struct Browse {
     franchise_id: Option<i64>,
     select: bool,
     storyline: Option<i64>,
+    branch: Option<i64>,
     order: ReleaseOrder,
     guide: bool,
 }
@@ -47,6 +48,7 @@ pub(super) struct Save {
     monitor_mode: Choice,
     #[serde(default)]
     order: ReleaseOrder,
+    branch: Option<i64>,
     #[serde(default)]
     search_now: bool,
 }
@@ -66,6 +68,7 @@ enum ReleaseOrder {
     Premiere,
     Watch,
     Storylines,
+    Branches,
     #[default]
     #[serde(other)]
     Formats,
@@ -77,6 +80,7 @@ impl ReleaseOrder {
             "premiere" => Self::Premiere,
             "watch" => Self::Watch,
             "storylines" => Self::Storylines,
+            "branches" => Self::Branches,
             _ => Self::Formats,
         }
     }
@@ -87,7 +91,12 @@ impl ReleaseOrder {
             Self::Premiere => "premiere",
             Self::Watch => "watch",
             Self::Storylines => "storylines",
+            Self::Branches => "branches",
         }
+    }
+
+    fn grouped(self) -> bool {
+        matches!(self, Self::Storylines | Self::Branches)
     }
 
     fn query(self) -> String {
@@ -133,6 +142,7 @@ struct Setup {
     search_hint: &'static str,
 }
 
+mod branch_map;
 pub(super) mod bulk;
 mod discovery;
 mod guide;
@@ -159,6 +169,7 @@ pub(super) struct GuideForm {
     q: String,
     #[serde(default)]
     order: ReleaseOrder,
+    branch: Option<i64>,
     guide_name: String,
     guide_entries: String,
 }
@@ -175,6 +186,7 @@ struct AddPage {
     franchise: Option<discovery::Franchise>,
     select: bool,
     order: ReleaseOrder,
+    branch: Option<i64>,
     selection_notice: String,
     selected_releases: HashSet<i64>,
     selection_mode: Choice,
@@ -206,6 +218,7 @@ impl AddPage {
             franchise: None,
             select: false,
             order: ReleaseOrder::default(),
+            branch: None,
             selection_notice: String::new(),
             selected_releases: HashSet::new(),
             selection_mode: Choice::default(),
@@ -219,7 +232,35 @@ impl AddPage {
     }
 
     fn franchise_path(&self, id: i64) -> String {
-        format!("{}&franchise_id={id}{}", self.back, self.order.query())
+        format!("{}&franchise_id={id}{}", self.back, self.order_query())
+    }
+
+    fn set_order(&mut self, order: ReleaseOrder, branch: Option<i64>) {
+        self.order = order;
+        self.branch =
+            branch.filter(|id| order == ReleaseOrder::Branches && supported_provider(*id));
+    }
+
+    fn order_query(&self) -> String {
+        let mut query = self.order.query();
+        if let Some(branch) = self.branch {
+            query.push_str(&format!("&branch={branch}"));
+        }
+        query
+    }
+
+    fn branch_path(&self, seed: i64, branch: i64) -> String {
+        format!(
+            "{}&franchise_id={seed}&order=branches&branch={branch}",
+            self.back
+        )
+    }
+
+    fn visible_branch_map(&self) -> Option<&branch_map::BranchMap> {
+        if self.select || self.guide_input.is_some() {
+            return None;
+        }
+        self.franchise.as_ref()?.branch_map.as_ref()
     }
 
     fn setup_path(&self, seed: i64, release: i64) -> String {
@@ -227,7 +268,7 @@ impl AddPage {
             "/library/add?source={}&q={}&franchise_id={seed}&provider_id={release}{}",
             self.source,
             urlencoding::encode(&self.q),
-            self.order.query(),
+            self.order_query(),
         )
     }
 
@@ -260,10 +301,15 @@ impl AddPage {
         self.franchise_id.map_or_else(
             || self.back.clone(),
             |id| {
+                let order = ReleaseOrder::from_param(order);
+                let query = if order == self.order {
+                    self.order_query()
+                } else {
+                    order.query()
+                };
                 format!(
-                    "{}&franchise_id={id}{}#add-anime-releases-title",
-                    self.back,
-                    ReleaseOrder::from_param(order).query()
+                    "{}&franchise_id={id}{query}#add-anime-releases-title",
+                    self.back
                 )
             },
         )
@@ -399,7 +445,7 @@ pub(super) async fn page(
         .flatten()
         .unwrap_or_default();
     let mut view = AddPage::new(&cfg, query.q, &query.source, query.franchise_id);
-    view.order = query.order;
+    view.set_order(query.order, query.branch);
     if let Some(id) = query.provider_id {
         if !supported_provider(id) {
             return (StatusCode::BAD_REQUEST, "Choose a valid anime.").into_response();
@@ -426,11 +472,14 @@ pub(super) async fn page(
             view.guide_input = Some(GuideInput::default());
         }
         let storyline = query.storyline.filter(|_| view.guide_input.is_none());
-        if storyline.is_some() {
-            view.order = ReleaseOrder::Storylines;
+        if storyline.is_some() && !view.order.grouped() {
+            view.set_order(ReleaseOrder::Storylines, None);
         }
         match discovery::open(&state, &view, seed).await {
             Ok(franchise) => {
+                if let Some(map) = &franchise.branch_map {
+                    view.branch = Some(map.focus);
+                }
                 view.select = (query.select || storyline.is_some())
                     && franchise.can_select
                     && view.guide_input.is_none();
@@ -488,7 +537,7 @@ pub(super) async fn preview_guide(
         .flatten()
         .unwrap_or_default();
     let mut view = AddPage::new(&cfg, form.q, &form.source, Some(seed));
-    view.order = form.order;
+    view.set_order(form.order, form.branch);
     let input = GuideInput {
         name: form.guide_name,
         entries: form.guide_entries,
@@ -530,7 +579,7 @@ pub(super) async fn save(
         .flatten()
         .unwrap_or_default();
     let mut view = AddPage::new(&cfg, form.q, &form.source, form.franchise_id);
-    view.order = form.order;
+    view.set_order(form.order, form.branch);
     match existing(&state, form.provider_id).await {
         Ok(Some(row)) => return htmx_aware_redirect(htmx, &detail::path(row.anilist_id)),
         Ok(None) => {}
