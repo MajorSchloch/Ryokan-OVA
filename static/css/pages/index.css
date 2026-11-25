@@ -1553,7 +1553,8 @@ a.franchise-status:hover { border-color: currentColor; text-decoration: underlin
 .discover-franchise-rating { margin: 0 0 8px; }
 #add-anime-releases-title { scroll-margin-top: 5rem; }
 .add-anime-franchise {
-    display: flow-root;
+    display: grid;
+    gap: 16px;
     padding: clamp(14px, 3vw, 22px);
     margin: 0 0 26px;
     border: 1px solid var(--border);
@@ -1561,16 +1562,15 @@ a.franchise-status:hover { border-color: currentColor; text-decoration: underlin
     background: var(--bg-card);
     overflow-wrap: anywhere;
 }
-.add-anime-franchise > h3 { margin: 0; }
-.add-anime-franchise > * + h3 { margin-top: 12px; }
+.add-anime-franchise:has(.discover-franchise-art) { grid-template-columns: auto minmax(0, 1fr); }
+.discover-franchise-copy h3 { margin: 0; }
+.discover-franchise-copy > * + h3 { margin-top: 12px; }
 .discover-franchise-art {
-    float: left;
-    width: min(32%, 148px);
+    width: clamp(84px, 13vw, 148px);
     height: auto;
     aspect-ratio: 2 / 3;
     object-fit: cover;
     border-radius: var(--radius);
-    margin: 0 16px 8px 0;
 }
 .discover-alternate-titles { padding-inline-start: 20px; margin-block: 6px 10px; }
 .discover-alternate-titles li { color: var(--text-dim); font-size: 14px; margin-bottom: 3px; }

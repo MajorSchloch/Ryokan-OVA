@@ -101,18 +101,20 @@
     {% if !group.cover.is_empty() || !group.synopsis.is_empty() || !group.alternate_titles.is_empty() || group.rating.is_some() || group.library_url.is_some() %}
     <div class="add-anime-franchise">
         {% if !group.cover.is_empty() %}<img class="discover-franchise-art" src="{{ group.cover }}" alt="" width="320" height="480">{% endif %}
-        {% if let Some(score) = group.rating %}<p class="discover-franchise-rating">{% call rating(score) %}{% endcall %}</p>{% endif %}
-        {% if !group.synopsis.is_empty() %}
-        <h3>Synopsis</h3>
-        <div class="synopsis-body">{{ group.synopsis|safe }}</div>
-        {% endif %}
-        {% if !group.alternate_titles.is_empty() %}
-        <h3>Alternate titles</h3>
-        <ul class="discover-alternate-titles">
-            {% for title in group.alternate_titles %}<li><span title="{{ title }}">{{ title }}</span></li>{% endfor %}
-        </ul>
-        {% endif %}
-        {% if let Some(path) = group.library_url %}<a href="{{ path }}">Manage franchise in Library</a>{% endif %}
+        <div class="discover-franchise-copy">
+            {% if let Some(score) = group.rating %}<p class="discover-franchise-rating">{% call rating(score) %}{% endcall %}</p>{% endif %}
+            {% if !group.synopsis.is_empty() %}
+            <h3>Synopsis</h3>
+            <div class="synopsis-body">{{ group.synopsis|safe }}</div>
+            {% endif %}
+            {% if !group.alternate_titles.is_empty() %}
+            <h3>Alternate titles</h3>
+            <ul class="discover-alternate-titles">
+                {% for title in group.alternate_titles %}<li><span title="{{ title }}">{{ title }}</span></li>{% endfor %}
+            </ul>
+            {% endif %}
+            {% if let Some(path) = group.library_url %}<a href="{{ path }}">Manage franchise in Library</a>{% endif %}
+        </div>
     </div>
     {% endif %}
     <section aria-labelledby="add-anime-releases-title">
@@ -124,7 +126,7 @@
         {% if select %}<p class="form-hint">Select the releases you want to add to your library.</p>{% endif %}
         {% call release_sections(group.sections.as_slice(), select) %}{% endcall %}
         {% if select %}
-        <form class="discover-add-selection" id="add-anime-selected" action="/discover/add-releases" method="post" hx-boost="false">
+        <form class="discover-add-selection" id="add-anime-selected" action="/discover/add-releases#add-anime-releases-title" method="post" hx-boost="false">
             {% if let Some(id) = franchise_id %}<input type="hidden" name="franchise_id" value="{{ id }}">{% endif %}
             <input type="hidden" name="q" value="{{ q }}">
             <input type="hidden" name="source" value="{{ source }}">
