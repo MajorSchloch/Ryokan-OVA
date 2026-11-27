@@ -325,6 +325,8 @@ pub struct ReleaseMapping {
     provider_heading: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bound_source: Option<crate::services::source_numbering::BoundSourceProof>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    grouped_upgrade: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -362,6 +364,7 @@ impl ReleaseMapping {
             basis: NumberingBasis::ProviderSeason,
             provider_heading: Some(heading),
             bound_source: None,
+            grouped_upgrade: false,
         };
         mapping.validate()?;
         Ok(mapping)
@@ -424,6 +427,12 @@ impl ReleaseMapping {
                 || self.tv_series != media::is_tv_format(&owner.format)
                 || (self.source_first, self.source_last, self.target_first) != (first, last, target)
                 || self.source_season != season
+                || (self.grouped_upgrade
+                    && (proof.selected_files.len() < 2
+                        || proof
+                            .selected_files
+                            .iter()
+                            .any(|file| file.target_first != file.target_last)))
             {
                 return Err("Episode mapping: source-bound release decision changed".into());
             }
@@ -431,6 +440,7 @@ impl ReleaseMapping {
         }
         if self.version != 1
             || self.bound_source.is_some()
+            || self.grouped_upgrade
             || self.anilist_id == 0
             || self.source_season.is_none_or(|season| season <= 0)
         {
@@ -567,6 +577,7 @@ impl ReleaseMapping {
             basis: NumberingBasis::SourceBound,
             provider_heading: None,
             bound_source: Some(proof.clone()),
+            grouped_upgrade: false,
         };
         mapping.validate()?;
         Ok(mapping)
@@ -581,7 +592,17 @@ impl ReleaseMapping {
         self.bound_source
             .as_ref()
             .ok_or_else(|| "Episode mapping: no exact source proof is saved".to_string())?
-            .validate_files(info_hash, files)
+            .validate_files_with_selection(info_hash, files, self.grouped_upgrade)
+    }
+
+    pub(crate) fn grouped_upgrade(&self) -> bool {
+        self.grouped_upgrade
+    }
+
+    pub(crate) fn into_grouped_upgrade(mut self) -> Result<Self, String> {
+        self.grouped_upgrade = true;
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn resolve_bound_file(&self, relative_name: &str) -> Result<MappedFile, String> {
@@ -789,6 +810,7 @@ impl NumberingContext {
             },
             provider_heading: None,
             bound_source: None,
+            grouped_upgrade: false,
         };
         mapping.validate()?;
         Ok(mapping)
@@ -845,6 +867,7 @@ impl NumberingContext {
             },
             provider_heading: None,
             bound_source: None,
+            grouped_upgrade: false,
         };
         mapping.validate()?;
         Ok(mapping)
@@ -1035,6 +1058,7 @@ pub async fn filter_automatic_candidates(
         target,
         candidates,
         &HashMap::new(),
+        None,
     )
     .await
 }
@@ -1048,6 +1072,10 @@ pub(crate) async fn filter_automatic_candidates_with_pack_mappings(
     target: &auto_search::SearchTarget,
     candidates: Vec<crate::services::nyaa::SearchResult>,
     pack_mappings: &HashMap<String, ReleaseMapping>,
+    mut upgrade_proofs: Option<(
+        &crate::services::source_numbering::loader::Resolver,
+        &mut Vec<String>,
+    )>,
 ) -> Vec<crate::services::nyaa::SearchResult> {
     let standalone = detail.format == "MOVIE"
         || (matches!(detail.format.as_str(), "SPECIAL" | "OVA" | "ONA")
@@ -1186,6 +1214,33 @@ pub(crate) async fn filter_automatic_candidates_with_pack_mappings(
             }
             Ok(false) => {}
         }
+        if let Some((proofs, diagnostics)) = upgrade_proofs.as_mut()
+            && wanted.is_none()
+            && candidate.indexer_id.is_none()
+            && candidate.is_batch
+            && candidate
+                .match_provenance
+                .as_ref()
+                .is_some_and(|p| p.kind == auto_search::MatchKind::Verbatim)
+            && auto_search::canonical_owner_supports_release(
+                &candidate.title,
+                &auto_search::collect_aliases(detail),
+                &auto_search::SearchTarget::Episode(1),
+            )
+        {
+            match proofs
+                .prove_complete_entry(db, detail, &candidate)
+                .await
+                .and_then(|proof| ReleaseMapping::from_bound_source(&proof))
+            {
+                Ok(mapping) => {
+                    candidate.release_mapping = Some(mapping);
+                    accepted.push(candidate);
+                    continue;
+                }
+                Err(reason) => diagnostics.push(reason),
+            }
+        }
         let decision = context.as_ref().map_err(Clone::clone).and_then(|ctx| {
             if let Some(mapping) = pack_mappings.get(&candidate.info_hash.to_ascii_lowercase()) {
                 mapping.validate()?;
@@ -1221,6 +1276,9 @@ pub(crate) async fn filter_automatic_candidates_with_pack_mappings(
             }
             Ok(_) => {}
             Err(reason) => {
+                if let Some((_, diagnostics)) = upgrade_proofs.as_mut() {
+                    diagnostics.push(reason.clone());
+                }
                 crate::services::logger::warn(
                     db,
                     crate::models::log::LogCategory::Grab,

@@ -424,22 +424,7 @@ async fn finish_with_probe(
     client: &StrictAutomaticClient,
     probe: Option<&serde_json::Value>,
 ) {
-    let payloads = {
-        let mut payloads = Vec::new();
-        let mut item = client.item.lock().unwrap();
-        item.state_kind = DownloadItemState::Seeding;
-        item.state = "seeding".into();
-        item.progress = 1.0;
-        let mut files = client.files.lock().unwrap();
-        for file in files.iter_mut().filter(|file| file.wanted) {
-            let path = std::path::Path::new(&item.save_path).join(&file.name);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, format!("exact automatic source {}", file.name)).unwrap();
-            file.progress = 1.0;
-            payloads.push(path);
-        }
-        payloads
-    };
+    let payloads = complete_wanted_files(client);
     if let Some(probe) = probe {
         for path in payloads {
             seed_probe(state, &path, probe).await;
@@ -448,6 +433,23 @@ async fn finish_with_probe(
     let restarted = build_test_app_state(state.db.clone(), None);
     *restarted.download_clients.write().await = state.download_clients.read().await.clone();
     ryokan::services::post_processing::run_once(&restarted).await;
+}
+
+fn complete_wanted_files(client: &StrictAutomaticClient) -> Vec<std::path::PathBuf> {
+    let mut payloads = Vec::new();
+    let mut item = client.item.lock().unwrap();
+    item.state_kind = DownloadItemState::Seeding;
+    item.state = "seeding".into();
+    item.progress = 1.0;
+    let mut files = client.files.lock().unwrap();
+    for file in files.iter_mut().filter(|file| file.wanted) {
+        let path = std::path::Path::new(&item.save_path).join(&file.name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, format!("exact automatic source {}", file.name)).unwrap();
+        file.progress = 1.0;
+        payloads.push(path);
+    }
+    payloads
 }
 
 async fn seed_probe(state: &AppState, path: &std::path::Path, probe: &serde_json::Value) {
@@ -1015,6 +1017,130 @@ async fn automatic_source_numbering_daily_upgrade_narrows_the_pack_and_stops_at_
             saved(&state, &source, &[3]).await;
         }
     }
+    unset_nyaa_base();
+}
+
+#[tokio::test]
+async fn daily_upgrade_verifies_a_complete_relative_pack_and_limits_selection() {
+    let _gate = ENV_LOCK.lock().await;
+    let owner = 99_834;
+    let title = "Lunar Couriers R2";
+    let source = Source {
+        hash: "1212121212121212121212121212121212121212".into(),
+        view: 99_834,
+        title: format!("[Fixture] {title} - 01 ~ 04 [1080p] [Multiple Subtitle]"),
+        files: (1..=4)
+            .map(|ep| format!("[Fixture] {title} - {ep:02} [1080p].mkv"))
+            .chain(std::iter::once("release-notes.txt".into()))
+            .collect(),
+        entries: vec![
+            (99_833, "Lunar Couriers".into(), 4, 0),
+            (owner, title.into(), 4, 4),
+        ],
+        root: owner,
+        description: "Full season with selectable subtitles",
+    };
+    let server = MockServer::start().await;
+    serve(
+        &server,
+        &source,
+        Some(published_page(&source, &source.hash, &source.files)),
+    )
+    .await;
+    let (temp, state, sid, client) = fixture(&source, owner, &[1, 3], &[1, 3]).await;
+    let mut config = ryokan::models::config::get_config(&state.db)
+        .await
+        .unwrap()
+        .unwrap();
+    config.media_requirements_enabled = true;
+    config.minimum_resolution = "720".into();
+    config.target_resolution = "1080".into();
+    config.required_audio_languages = "ja".into();
+    config.required_subtitle_languages = "en".into();
+    config.minimum_subtitle_check = true;
+    config.target_subtitle_check = true;
+    ryokan::models::config::save_config(&state.db, &config)
+        .await
+        .unwrap();
+    let folder: String =
+        sqlx::query_scalar("UPDATE series SET allow_upgrades=1 WHERE id=? RETURNING folder_name")
+            .bind(sid)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    let probe = |sub: &str| {
+        serde_json::json!({"format":{"duration":"1440"},"streams":[
+            {"index":0,"codec_type":"video","codec_name":"h264","width":1920,"height":1080},
+            {"index":1,"codec_type":"audio","codec_name":"aac","tags":{"language":"jpn"}},
+            {"index":2,"codec_type":"subtitle","codec_name":"ass","tags":{"language":sub,"title":"Full subtitles"},"disposition":{"forced":0}}
+        ]})
+    };
+    let originals: Vec<_> = (1..=3)
+        .map(|ep| {
+            temp.path().join("library").join(&folder).join(format!(
+                "Season 01/{title} - S01E{ep:02} [1080p BluRay] [Old].mkv"
+            ))
+        })
+        .collect();
+    for (index, path) in originals.iter().enumerate() {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"existing file").unwrap();
+        seed_probe(&state, path, &probe(if index == 1 { "eng" } else { "deu" })).await;
+    }
+    let old_grab: i64 = sqlx::query_scalar(
+        "INSERT INTO grabbed_torrents(hash,torrent_name,series_id,episode_numbers,state,is_batch,download_client_id)
+         VALUES('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','Existing pack',?,'[1,2,3]','imported',1,1) RETURNING id",
+    )
+    .bind(sid)
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    let summary = ryokan::services::upgrade::run_once(&state).await.unwrap();
+    assert_eq!(summary.episodes_checked, 2);
+    assert_eq!(
+        summary.upgrades_grabbed,
+        1,
+        "{}",
+        dump_logs(&state.db).await
+    );
+    assert_eq!(client.adds.load(Ordering::SeqCst), 1);
+    assert_eq!(client.resumes.load(Ordering::SeqCst), 1);
+    let mapping = saved(&state, &source, &[1, 3]).await;
+    let wrong_selection: Vec<_> = source
+        .files
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.as_str(), [0, 2, 4].contains(&index)))
+        .collect();
+    assert!(
+        mapping
+            .validate_bound_files(&source.hash, &wrong_selection)
+            .is_err()
+    );
+    for (index, path) in complete_wanted_files(&client).iter().enumerate() {
+        seed_probe(&state, path, &probe(if index == 0 { "eng" } else { "deu" })).await;
+    }
+    ryokan::services::post_processing::run_once(&state).await;
+    assert!(!originals[0].exists(), "{}", dump_logs(&state.db).await);
+    assert_eq!(std::fs::read(&originals[1]).unwrap(), b"existing file");
+    assert_eq!(std::fs::read(&originals[2]).unwrap(), b"existing file");
+    let retained_state: String =
+        sqlx::query_scalar("SELECT state FROM grabbed_torrents WHERE id=?")
+            .bind(old_grab)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(retained_state, "imported");
+    let coverage: String =
+        sqlx::query_scalar("SELECT imported_episode_coverage FROM grabbed_torrents WHERE hash=?")
+            .bind(&source.hash)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&coverage).unwrap(),
+        serde_json::json!({sid.to_string():[1]})
+    );
     unset_nyaa_base();
 }
 

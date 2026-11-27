@@ -3,7 +3,10 @@ use super::{
     automatic::{AutomaticInterpretation, DomainCandidate},
     *,
 };
-use crate::services::{nyaa, release_numbering::ReleaseMapping};
+use crate::services::{
+    nyaa,
+    release_numbering::{NumberingContext, ReleaseMapping},
+};
 use sqlx::SqlitePool;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tokio::sync::{Mutex, OnceCell};
@@ -159,6 +162,31 @@ pub(crate) async fn project(
 }
 
 impl Resolver {
+    /// Prove one complete, owner-specific entry before projecting any subset.
+    /// This also covers later seasons whose exact filenames use relative numbers.
+    pub(crate) async fn prove_complete_entry(
+        &self,
+        db: &SqlitePool,
+        detail: &AnimeDetail,
+        candidate: &nyaa::SearchResult,
+    ) -> Result<BoundSourceProof, String> {
+        if anime_relations::has_source_namespace(detail.id) {
+            return Err(fail(
+                "curated episode numbering requires its own source proof",
+            ));
+        }
+        let hash = normalized_hash(&candidate.info_hash)?;
+        let url = nyaa::view_page_url(&candidate.link)
+            .ok_or_else(|| fail("entry pack needs a same-hash published file manifest"))?;
+        let interpretation = self.load_interpretation(db, &hash, &url).await?;
+        verify_complete_entry(detail, &interpretation).await?;
+        let proof = interpretation
+            .build_proof_for_owner(detail.id, &url)?
+            .ok_or_else(|| fail("entry pack does not contain this release"))?;
+        let saved = crate::models::source_numbering::save_automatic(db, &proof).await?;
+        Ok(saved.proof)
+    }
+
     pub(crate) async fn interpretation(
         &self,
         db: &SqlitePool,
@@ -177,12 +205,7 @@ impl Resolver {
         {
             return Ok(None);
         }
-        let catalogue = self
-            .catalogue
-            .get_or_init(|| catalogue(db))
-            .await
-            .as_ref()
-            .map_err(Clone::clone)?;
+        let catalogue = self.catalogue(db).await?;
         let raw_title = title;
         let title = auto_search::normalize_title(title);
         let advertised_pack =
@@ -220,22 +243,36 @@ impl Resolver {
             .ok_or_else(|| {
                 fail("automatic source proof needs a same-hash published file manifest")
             })?;
+        let interpretation = self.load_interpretation(db, &hash, &url).await?;
+        Ok(Some((interpretation, url)))
+    }
+
+    async fn catalogue(&self, db: &SqlitePool) -> Result<&BTreeMap<i64, AnimeDetail>, String> {
+        self.catalogue
+            .get_or_init(|| catalogue(db))
+            .await
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    async fn load_interpretation(
+        &self,
+        db: &SqlitePool,
+        hash: &str,
+        url: &str,
+    ) -> Result<AutomaticInterpretation, String> {
+        let catalogue = self.catalogue(db).await?;
         let mut evidence = self.evidence.lock().await;
-        if !evidence.contains_key(&hash) {
+        if !evidence.contains_key(hash) {
             if evidence.len() >= MAX_PUBLICATIONS {
                 return Err(fail(
                     "automatic source evidence budget reached; source remains on hold",
                 ));
             }
-            let result = resolve(db, catalogue, &url, &hash).await;
-            evidence.insert(hash.clone(), result);
+            let result = resolve(db, catalogue, url, hash).await;
+            evidence.insert(hash.to_string(), result);
         }
-        let interpretation = evidence
-            .get(&hash)
-            .expect("inserted evidence")
-            .as_ref()
-            .map_err(Clone::clone)?;
-        Ok(Some((interpretation.clone(), url)))
+        evidence.get(hash).expect("inserted evidence").clone()
     }
 
     pub(crate) async fn apply(
@@ -273,6 +310,46 @@ impl Resolver {
         candidate.release_mapping = Some(ReleaseMapping::from_bound_source(&proof)?);
         Ok(true)
     }
+}
+
+async fn verify_complete_entry(
+    detail: &AnimeDetail,
+    interpretation: &AutomaticInterpretation,
+) -> Result<(), String> {
+    if interpretation.domain().root_anilist_id != detail.id
+        || interpretation.domain().entries.len() != 1
+        || interpretation
+            .excluded_files()
+            .iter()
+            .any(|file| file.kind == automatic::ExclusionKind::OutsideFiniteDomain)
+        || interpretation.assignments().iter().any(|file| {
+            file.target_anilist_id != detail.id
+                || file.source_first != file.target_first
+                || file.target_first != file.target_last
+        })
+    {
+        return Err(fail("entry pack has conflicting owners or episode files"));
+    }
+    let episodes: Vec<_> = interpretation
+        .assignments()
+        .iter()
+        .map(|file| file.source_first)
+        .collect();
+    let season = interpretation
+        .assignments()
+        .iter()
+        .find_map(|file| file.source_season);
+    NumberingContext::load(
+        detail.id,
+        detail.id_mal,
+        &detail.format,
+        detail.episodes,
+        0,
+        interpretation.domain().source_season,
+    )
+    .await?
+    .choose_published_entry_pack(&episodes, season)?;
+    Ok(())
 }
 
 pub(crate) fn narrow_for_target(

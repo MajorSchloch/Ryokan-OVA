@@ -10,6 +10,7 @@ use crate::models::{
 use crate::services::download_client::{DownloadClient, DownloadItem, DownloadItemState};
 use crate::services::recycle::{self, RecycleKind};
 use crate::services::source::{self, SeriesContext};
+use crate::services::upgrade::outcomes::{self, ImportRejection};
 use crate::services::{logger, media, naming, nfo};
 
 mod artwork_copy;
@@ -1390,6 +1391,9 @@ async fn import_torrent(
             .collect();
         mapping.validate_bound_files(torrent_hash, &actual)?;
     }
+    let grouped_upgrade = release_mapping
+        .as_ref()
+        .is_some_and(|mapping| mapping.grouped_upgrade());
 
     // Grab-time auto-expand can fail when qBit's metadata wait times
     // out on a slow tracker (see the 180s wait in
@@ -2418,13 +2422,23 @@ async fn import_torrent(
         // A pack chosen to fill missing slots must not replace a present
         // episode. Permission is tied to the explicit episode request and
         // the parent entry; it never spreads to another episode or sibling.
-        let protects_existing = edition_review.is_none()
-            && !ctx.series.allow_upgrades
-            && existing_for_ep.iter().any(|(_, span)| {
-                (span.first..=span.last).any(|ep| {
-                    !(target_series_id == grab.series_id && replacement_episode == Some(ep))
-                })
-            });
+        let upgrade_slot_changed = grouped_upgrade
+            && (existing_for_ep.len() != 1
+                || existing_for_ep[0].1.first != ep_num
+                || existing_for_ep[0].1.last != ep_num
+                || ep_num != ep_last
+                || ctx
+                    .existing_tags
+                    .get(&ep_num)
+                    .is_some_and(|tag| tag.manual_override));
+        let protects_existing = upgrade_slot_changed
+            || edition_review.is_none()
+                && !ctx.series.allow_upgrades
+                && existing_for_ep.iter().any(|(_, span)| {
+                    (span.first..=span.last).any(|ep| {
+                        !(target_series_id == grab.series_id && replacement_episode == Some(ep))
+                    })
+                });
         if protects_existing {
             // A combined file cannot be split here. If it also holds a
             // missing episode, retain the source rather than calling the
@@ -2578,7 +2592,7 @@ async fn import_torrent(
         )
         .await?;
         let required_transaction = subtitle_guard::required(&import_cfg);
-        if edition_review.is_some()
+        if (edition_review.is_some() || grouped_upgrade)
             && (!required_transaction || !import_cfg.media_requirements_enabled)
         {
             return Err("Media requirements changed. The existing file was kept.".into());
@@ -2704,6 +2718,20 @@ async fn import_torrent(
                     )
                     .await;
                     let refused: Vec<i32> = resolved.episodes().collect();
+                    if target_series_id == grab.series_id
+                        && let Some(rejection) =
+                            ImportRejection::from_probe_failure(&reason, content_rejection)
+                        && let Err(error) = outcomes::record_import_rejection(
+                            &state.db,
+                            grab,
+                            ctx.series.anilist_id,
+                            &refused,
+                            rejection,
+                        )
+                        .await
+                    {
+                        tracing::warn!(grab_id = grab.id, %error, "Could not record the upgrade rejection");
+                    }
                     if content_rejection {
                         requirements_rejected_episode_count += refused.len();
                         // An unmet audio target is an upgrade miss. Leave the
@@ -2945,6 +2973,11 @@ async fn import_torrent(
             // batch grab that covers 12 episodes doesn't UPDATE the
             // same old grab 12 times.
             for old_grab in &old_grabs {
+                if grouped_upgrade
+                    && (old_grab.is_batch || old_grab.episode_numbers.as_slice() != [ep_num])
+                {
+                    continue;
+                }
                 if edition_review.is_none() && !old_grab.hash.is_empty() {
                     // Issue #28 — preserve PT seed rules
                     // across upgrade-replace. The old torrent has

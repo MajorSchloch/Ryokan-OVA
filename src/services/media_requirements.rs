@@ -19,6 +19,8 @@ use crate::models::config::Config;
 
 pub(crate) const TARGET_AUDIO_REJECTION: &str =
     "The file does not improve or preserve the selected good enough audio languages";
+pub(crate) const MINIMUM_SUBTITLE_REJECTION: &str =
+    "Media requirement: required selectable subtitle languages could not be verified.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Policy {
@@ -267,10 +269,7 @@ impl Policy {
             ));
         }
         if self.minimum_subtitle_check && !observed.subtitles_satisfied {
-            return Err(
-                "Media requirement: required selectable subtitle languages could not be verified."
-                    .into(),
-            );
+            return Err(MINIMUM_SUBTITLE_REJECTION.into());
         }
         Ok(())
     }

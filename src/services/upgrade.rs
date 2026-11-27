@@ -9,6 +9,8 @@ use crate::services::source::{self, ClassificationResult, Resolution};
 use crate::services::{auto_search, logger, media};
 
 mod nzbget_duplicates;
+pub(crate) mod outcomes;
+use outcomes::Outcome;
 
 static UPGRADE_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
@@ -101,6 +103,30 @@ pub fn judge_release_with_requirements(
     if !requirements.enabled {
         return judge_release_for_episode(policy, cfs, existing, tag, disk_file, incoming, result);
     }
+    // A single-slot search cannot authorize files for other episodes.
+    if release_covers_multiple(result) {
+        return Err(source::UpgradeRejection::SpanNotCovered);
+    }
+    judge_replacement_file(
+        requirements,
+        observed,
+        existing,
+        tag,
+        disk_file,
+        incoming,
+        result,
+    )
+}
+
+fn judge_replacement_file(
+    requirements: &RequirementsPolicy,
+    observed: Option<&Observed>,
+    existing: &ClassificationResult,
+    tag: Option<&episode_tags::EpisodeQualityTag>,
+    disk_file: Option<&media::EpisodeFile>,
+    incoming: &ClassificationResult,
+    result: &crate::services::nyaa::SearchResult,
+) -> Result<source::UpgradeKind, source::UpgradeRejection> {
     if tag.is_some_and(|tag| tag.manual_override) {
         return Err(source::UpgradeRejection::Pinned);
     }
@@ -109,11 +135,6 @@ pub fn judge_release_with_requirements(
     }
     if incoming.is_bdmv && !existing.is_bdmv {
         return Err(source::UpgradeRejection::BdmvCrossing);
-    }
-    // Automatic single-slot upgrade searches cannot authorize a complete
-    // season pack, including other episodes already at their target.
-    if release_covers_multiple(result) {
-        return Err(source::UpgradeRejection::SpanNotCovered);
     }
     let previous = tag
         .map(|tag| tag.release_title.trim())
@@ -124,6 +145,12 @@ pub fn judge_release_with_requirements(
     }
     let observed = observed.ok_or(source::UpgradeRejection::RequirementsUnverified)?;
     requirements.judge_candidate(observed, incoming, &result.title)
+}
+
+async fn record_outcomes(db: &sqlx::SqlitePool, row: &series::Series, outcomes: &[(i32, Outcome)]) {
+    if let Err(error) = outcomes::record(db, row, outcomes).await {
+        tracing::warn!(series_id = row.id, %error, "Could not save scheduled upgrade results");
+    }
 }
 
 /// Advertised and reviewed coverage must agree before an automatic
@@ -387,6 +414,16 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 auto_search::with_alternate_titles(cached.detail, &row.alternate_titles)
             }
             _ => {
+                let results: Vec<_> = upgrade_targets
+                    .iter()
+                    .filter_map(|(target, _)| match target {
+                        auto_search::SearchTarget::Episode(ep) => {
+                            Some((*ep, Outcome::MetadataUnavailable))
+                        }
+                        auto_search::SearchTarget::Single => None,
+                    })
+                    .collect();
+                record_outcomes(&state.db, row, &results).await;
                 logger::debug(
                     &state.db,
                     LogCategory::AutoSearch,
@@ -425,12 +462,17 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
         .await;
 
         let batch_lookups = auto_search::BatchLookups::default();
+        let mut results = HashMap::new();
         for target in targets {
             let label = auto_search::target_label(&target);
             let slot = match target {
                 auto_search::SearchTarget::Episode(ep) => ep,
                 auto_search::SearchTarget::Single => 1,
             };
+            if matches!(results.get(&slot), Some(Outcome::Queued(_))) {
+                continue;
+            }
+            results.insert(slot, Outcome::NoEligibleCandidate);
             let skipped_duplicate = AtomicBool::new(false);
             // Keep the library slot for every upgrade/protection decision and
             // for persistence. A standalone release still needs
@@ -492,8 +534,28 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             )
             .await;
             let used_batch_fallback = best.is_none();
+            let mut diagnostics = Vec::new();
             if used_batch_fallback {
-                (best, _) = auto_search::find_single_episode_batch_fallback(
+                let additional =
+                    |ep,
+                     result: &crate::services::nyaa::SearchResult,
+                     incoming: &ClassificationResult| {
+                        let Some(existing) = upgrade_classifications.get(&ep) else {
+                            return false;
+                        };
+                        !matches!(results.get(&ep), Some(Outcome::Queued(_)))
+                            && judge_replacement_file(
+                                &requirements,
+                                observed.get(&ep),
+                                existing,
+                                quality_tags.get(&ep),
+                                disk_files.iter().find(|file| file.holds(ep)),
+                                incoming,
+                                result,
+                            )
+                            .is_ok()
+                    };
+                (best, diagnostics) = auto_search::find_episode_batch_fallback(
                     &state.db,
                     &detail,
                     &cfg,
@@ -502,6 +564,9 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                     &state.indexers,
                     Some(&eligible),
                     Some(&batch_lookups),
+                    requirements
+                        .enabled
+                        .then_some(&additional as auto_search::AdditionalPackEpisodes<'_>),
                 )
                 .await;
             }
@@ -519,6 +584,14 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             }
 
             let Some(result) = best else {
+                if diagnostics
+                    .iter()
+                    .any(|reason| reason.starts_with("Episode mapping:"))
+                {
+                    results.insert(slot, Outcome::NumberingHold);
+                } else if skipped_duplicate {
+                    results.insert(slot, Outcome::Duplicate);
+                }
                 continue;
             };
             let used_batch_fallback = used_batch_fallback
@@ -529,6 +602,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             let availability =
                 crate::services::release_availability::Policy::load(&cfg, &state.indexers).await;
             if let Err(reason) = availability.check_result(&result) {
+                results.insert(slot, Outcome::Unavailable);
                 logger::info(
                     &state.db,
                     LogCategory::AutoSearch,
@@ -560,6 +634,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 && let Some(idx_id) = result.indexer_id
                 && pt_indexer_ids.contains(&idx_id)
             {
+                results.insert(slot, Outcome::PolicyHold);
                 logger::debug(
                     &state.db,
                     LogCategory::AutoSearch,
@@ -600,17 +675,32 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             if let auto_search::SearchTarget::Episode(ep_num) = &target
                 && let Some(existing_classification) = upgrade_classifications.get(ep_num)
             {
-                match judge_release_with_requirements(
-                    &requirements,
-                    observed.get(ep_num),
-                    &policy,
-                    &cfs,
-                    existing_classification,
-                    quality_tags.get(ep_num),
-                    disk_files.iter().find(|f| f.holds(*ep_num)),
-                    &incoming_classification,
-                    &result,
-                ) {
+                let tag = quality_tags.get(ep_num);
+                let disk_file = disk_files.iter().find(|f| f.holds(*ep_num));
+                let decision = if used_batch_fallback && requirements.enabled {
+                    judge_replacement_file(
+                        &requirements,
+                        observed.get(ep_num),
+                        existing_classification,
+                        tag,
+                        disk_file,
+                        &incoming_classification,
+                        &result,
+                    )
+                } else {
+                    judge_release_with_requirements(
+                        &requirements,
+                        observed.get(ep_num),
+                        &policy,
+                        &cfs,
+                        existing_classification,
+                        tag,
+                        disk_file,
+                        &incoming_classification,
+                        &result,
+                    )
+                };
+                match decision {
                     Ok(kind) => {
                         logger::info(
                             &state.db,
@@ -628,6 +718,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                         .await;
                     }
                     Err(rejection) => {
+                        results.insert(slot, Outcome::PolicyHold);
                         logger::debug(
                             &state.db,
                             LogCategory::AutoSearch,
@@ -646,6 +737,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 result.torrent.clone()
             };
             if url.is_empty() {
+                results.insert(slot, Outcome::SourceHold);
                 continue;
             }
 
@@ -664,6 +756,25 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 }) || crate::services::recent_episodes::has_pending(&state.db, row.id, slot)
                     .await?
                 {
+                    results.insert(slot, Outcome::PolicyHold);
+                    continue;
+                }
+                if used_batch_fallback
+                    && result.is_batch
+                    && !pack_selection_is_current(
+                        &state.db,
+                        row,
+                        &requirements,
+                        &cfg,
+                        &disk_files,
+                        &result,
+                        result
+                            .indexer_id
+                            .is_some_and(|id| pt_indexer_ids.contains(&id)),
+                    )
+                    .await?
+                {
+                    results.insert(slot, Outcome::PolicyHold);
                     continue;
                 }
                 if skipped_duplicate
@@ -675,6 +786,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                         .iter()
                         .any(|indexer| indexer.id() == id)
                 {
+                    results.insert(slot, Outcome::NoDownloadClient);
                     continue;
                 }
                 if used_batch_fallback
@@ -687,6 +799,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                         )
                         .await
                 {
+                    results.insert(slot, Outcome::SourceHold);
                     logger::info(&state.db, LogCategory::Grab, "Upgrade batch held", &reason).await;
                     continue;
                 }
@@ -710,6 +823,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             let (client, dispatch_client_id) = match routed {
                 Some(t) => t,
                 None => {
+                    results.insert(slot, Outcome::NoDownloadClient);
                     logger::warn(
                         &state.db,
                         LogCategory::DownloadClient,
@@ -726,6 +840,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 .as_ref()
                 .is_some_and(|mapping| mapping.anilist_id != row.anilist_id)
             {
+                results.insert(slot, Outcome::NumberingHold);
                 logger::warn(
                     &state.db,
                     LogCategory::Grab,
@@ -779,6 +894,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                             )
                             .await
                     {
+                        results.insert(slot, Outcome::SourceHold);
                         logger::error(
                             &state.db,
                             LogCategory::Grab,
@@ -823,8 +939,13 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                     )
                     .await;
                     let saved = match recorded {
-                        Ok(id) => id,
+                        Ok(Some(grab)) => Some(grab),
+                        Ok(None) => {
+                            results.insert(slot, Outcome::SourceHold);
+                            None
+                        }
                         Err(error) => {
+                            results.insert(slot, Outcome::SourceHold);
                             logger::error(
                                 &state.db,
                                 LogCategory::Grab,
@@ -835,8 +956,17 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                             continue;
                         }
                     };
+                    if let Some(grab) = &saved {
+                        let checked: Vec<_> = grab
+                            .episodes
+                            .iter()
+                            .map(|ep| (*ep, Outcome::Queued(grab.id)))
+                            .collect();
+                        record_outcomes(&state.db, row, &checked).await;
+                    }
                     if let Some(prepared) = &prepared_bound {
                         if prepared.newly_added && saved.is_none() {
+                            results.insert(slot, Outcome::SourceHold);
                             logger::error(
                                 &state.db,
                                 LogCategory::Grab,
@@ -847,6 +977,13 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                             continue;
                         }
                         if let Err(reason) = prepared.resume_after_record(client.as_ref()).await {
+                            let episodes =
+                                saved.as_ref().map_or(std::slice::from_ref(&slot), |grab| {
+                                    grab.episodes.as_slice()
+                                });
+                            for ep in episodes {
+                                results.insert(*ep, Outcome::ClientError);
+                            }
                             logger::error(
                                 &state.db,
                                 LogCategory::Grab,
@@ -879,6 +1016,9 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                     let ep_nums = saved.map(|s| s.episodes).unwrap_or_default();
 
                     if let Some(gid) = grab_id {
+                        for episode in &ep_nums {
+                            results.insert(*episode, Outcome::Queued(gid));
+                        }
                         let _ = crate::models::grabbed_torrents::set_download_client(
                             &state.db,
                             gid,
@@ -921,6 +1061,14 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                     }
                 }
                 Err(err) => {
+                    results.insert(
+                        slot,
+                        if used_batch_fallback || err.contains("Source identity unavailable") {
+                            Outcome::SourceHold
+                        } else {
+                            Outcome::ClientError
+                        },
+                    );
                     logger::error(
                         &state.db,
                         LogCategory::DownloadClient,
@@ -935,6 +1083,8 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             // Rate-limit between searches to avoid hammering Nyaa.
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }
+
+        record_outcomes(&state.db, row, &results.into_iter().collect::<Vec<_>>()).await;
 
         // Rate-limit between series.
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -959,6 +1109,70 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
         episodes_with_duplicate_skips,
         detail,
     })
+}
+
+/// Recheck the complete upgrade selection under the existing dispatch locks.
+/// The import gate still checks the current file and every downloaded stream.
+async fn pack_selection_is_current(
+    db: &sqlx::SqlitePool,
+    release: &series::Series,
+    requirements: &RequirementsPolicy,
+    snapshot_cfg: &config::Config,
+    snapshot_files: &[media::EpisodeFile],
+    result: &crate::services::nyaa::SearchResult,
+    private_tracker: bool,
+) -> Result<bool, String> {
+    let Some(proof) = result
+        .release_mapping
+        .as_ref()
+        .and_then(|mapping| mapping.bound_source())
+    else {
+        return Ok(false);
+    };
+    let Some(current) = series::get_by_id(db, release.id)
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(false);
+    };
+    if current.folder_name != release.folder_name || (private_tracker && !current.allow_pt_upgrades)
+    {
+        return Ok(false);
+    }
+    let base = config::get_config(db)
+        .await
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default();
+    let cfg =
+        crate::services::language_preferences::effective_config(db, &base, release.id).await?;
+    if &RequirementsPolicy::from_config(&cfg) != requirements
+        || cfg.media_root != snapshot_cfg.media_root
+    {
+        return Ok(false);
+    }
+    let files = media::scan_series_folder_checked(&cfg.media_root, &current.folder_name).await?;
+    let tags = episode_tags::get_for_series(db, release.id)
+        .await
+        .map_err(|error| error.to_string())?;
+    for ep in proof.episodes() {
+        let (Some(old), Some(new)) = (
+            snapshot_files.iter().find(|f| f.holds(ep)),
+            files.iter().find(|f| f.holds(ep)),
+        ) else {
+            return Ok(false);
+        };
+        if old.filename != new.filename
+            || old.size_bytes != new.size_bytes
+            || old.modified_secs != new.modified_secs
+            || tags
+                .get(&ep)
+                .is_some_and(|tag| tag.manual_override || tag.state == "grabbed")
+            || crate::services::recent_episodes::has_pending(db, release.id, ep).await?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 #[cfg(test)]

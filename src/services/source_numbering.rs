@@ -768,6 +768,15 @@ impl BoundSourceProof {
 
     /// Exact relative filenames; caller index ordering has no meaning.
     pub fn validate_files(&self, info_hash: &str, files: &[(&str, bool)]) -> Result<(), String> {
+        self.validate_files_with_selection(info_hash, files, false)
+    }
+
+    pub(crate) fn validate_files_with_selection(
+        &self,
+        info_hash: &str,
+        files: &[(&str, bool)],
+        exact_selection: bool,
+    ) -> Result<(), String> {
         self.validate()?;
         if normalized_hash(info_hash)? != self.info_hash {
             return Err(fail("downloaded source hash differs from the saved proof"));
@@ -779,7 +788,7 @@ impl BoundSourceProof {
             .collect();
         let mut seen = HashSet::new();
         let mut actual = HashSet::new();
-        let strict_selection = self.origin()? == ProofOrigin::AutomaticEntryPack;
+        let strict_selection = exact_selection || self.origin()? == ProofOrigin::AutomaticEntryPack;
         for &(name, wanted) in files {
             if !seen.insert(name) {
                 return Err(fail("duplicate downloaded source filename"));
