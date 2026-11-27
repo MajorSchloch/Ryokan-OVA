@@ -148,3 +148,81 @@ async fn publication_date_rss_rejects_old_source_with_actual_unique_current_seas
         }
     }
 }
+
+#[tokio::test]
+async fn rss_admits_the_next_number_after_a_finite_identity_map_only_once_aired() {
+    const ENTRY: i64 = 990084;
+    const MAL: i64 = 990085;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/feed"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"<rss xmlns:nyaa="https://nyaa.si/xmlns/nyaa"><channel><item>
+            <title>[Fixture] Evening Survey - 04 [1080p WEB]</title>
+            <guid>aired-episode-control</guid><link>https://example.invalid/episode</link>
+            <nyaa:magneturi>magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</nyaa:magneturi>
+            <nyaa:infohash>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</nyaa:infohash><nyaa:seeders>10</nyaa:seeders>
+            </item></channel></rss>"#,
+        ))
+        .mount(&server)
+        .await;
+    crate::services::anibridge::seed_mapping_data_for_tests(&serde_json::json!({
+        (format!("mal:{MAL}")): {(format!("anilist:{ENTRY}")): {"1-3":"1-3"}}
+    }))
+    .await;
+    for aired in [false, true] {
+        let db = in_memory_pool().await;
+        let temp = tempfile::tempdir().unwrap();
+        config::save_config(
+            &db,
+            &config::Config {
+                rss_enabled: false,
+                media_root: temp.path().to_string_lossy().into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let sid = seed_series(&db, ENTRY, "Evening Survey").await;
+        sqlx::query(
+            "UPDATE series SET format='ONA',status='RELEASING',episodes=NULL,mal_id=?,monitor_mode='all' WHERE id=?",
+        )
+        .bind(MAL)
+        .bind(sid)
+        .execute(&db)
+        .await
+        .unwrap();
+        crate::models::monitoring::set_episode_monitored(&db, sid, 4, true)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO series_episode_metadata(series_id,episode_number) VALUES (?,4)")
+            .bind(sid)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO episode_airings(series_id,episode,airing_at) VALUES (?,4,unixepoch('now')+?)")
+            .bind(sid)
+            .bind(if aired { -3600 } else { 3600 })
+            .execute(&db)
+            .await
+            .unwrap();
+        direct_rss_feeds::insert(
+            &db,
+            DirectRssFeedForm {
+                name: "Private airing test",
+                url: &format!("{}/feed", server.uri()),
+                enabled: true,
+                download_client_id: None,
+                request_timeout_secs: None,
+            },
+        )
+        .await
+        .unwrap();
+        let client = Arc::new(NoPayloadClient(AtomicUsize::new(0)));
+        let state = build_test_app_state(db.clone(), Some(client.clone()));
+        let summary = sync_once(&state, "manual").await.unwrap();
+        let decisions = crate::models::rss::recent_decisions(&db, 10).await.unwrap();
+        assert_eq!(summary.grabbed, i32::from(aired), "{decisions:?}");
+        assert_eq!(client.0.load(Ordering::SeqCst), usize::from(aired));
+    }
+}

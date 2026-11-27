@@ -71,6 +71,8 @@ When a search cannot establish release identity, Wanted can show sample titles f
 
 Fansub groups often number a sequel as if the show never ended, so "Jujutsu Kaisen - 56" is season 3, episode 9. Ryokan works out how many episodes came before from AniList's sequel chain and searches under the earlier seasons' names as well. Where that chain is missing a link, as with Dragon Ball Kai and its 2014 continuation, it uses [anime-relations](https://github.com/erengy/anime-relations), the community-maintained list behind Taiga. A copy ships inside Ryokan and is updated with each release.
 
+Ryokan can accept one exactly matched episode when the provider map is one episode behind a confirmed airing. This applies when the map starts at episode 1 and every mapped episode uses the same number in Ryokan. The source must identify a single episode, and the file must pass the saved episode and season checks before import.
+
 ## Search tips
 
 - The **Search** page searches Nyaa directly. The uploader field limits results to one Nyaa account, which is the easiest way to find a specific release group. The category menu narrows to English-translated releases or opens up to all anime, and the filter menu can limit results to trusted uploaders.

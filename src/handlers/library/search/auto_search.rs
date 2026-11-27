@@ -957,11 +957,11 @@ async fn run_auto_search_targets_with_upgrades(
                         continue;
                     }
                 }
-                let provider_numbered = result
+                let exact_episode_source = result
                     .release_mapping
                     .as_ref()
-                    .is_some_and(|mapping| mapping.provider_heading().is_some());
-                let wants_selective = !provider_numbered
+                    .is_some_and(|mapping| mapping.requires_single_video());
+                let wants_selective = !exact_episode_source
                     && upgrades.recent_demand.is_none()
                     && !result.info_hash.is_empty()
                     && auto_search::has_selective_discriminator(&detail);
@@ -996,10 +996,10 @@ async fn run_auto_search_targets_with_upgrades(
                     .lock()
                     .await;
                 let _config = crate::handlers::settings::CONFIG_WRITE_LOCK.lock().await;
-                if provider_numbered || used_batch_fallback {
-                    if provider_numbered && series_id.is_none() {
+                if exact_episode_source || used_batch_fallback {
+                    if exact_episode_source && series_id.is_none() {
                         skipped.push(format!(
-                            "{label}: add this release before using provider numbering"
+                            "{label}: add this release before automatic episode mapping"
                         ));
                         continue;
                     }
@@ -1310,7 +1310,7 @@ async fn run_auto_search_targets_with_upgrades(
                     qbit.add_torrent_returning_id(&url, &result.info_hash)
                         .await
                         .map(|(outcome, hash)| {
-                            existing_recent = (provider_numbered
+                            existing_recent = (exact_episode_source
                                 || upgrades.recent_demand.is_some())
                                 && outcome
                                     == crate::services::download_client::AddOutcome::AlreadyPresent;

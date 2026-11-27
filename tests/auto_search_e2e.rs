@@ -1497,14 +1497,11 @@ async fn auto_search_episode_handler_skips_a_release_that_names_more_than_the_se
     );
     assert!(client.add_calls().is_empty());
     assert!(
-        report
-            .skipped
-            .iter()
-            .any(|s| {
-                s.contains("Could not verify the release identity")
-                    && s.contains("New World")
-                    && !s.contains("Add an alternate title")
-            }),
+        report.skipped.iter().any(|s| {
+            s.contains("Could not verify the release identity")
+                && s.contains("New World")
+                && !s.contains("Add an alternate title")
+        }),
         "report={report:?}"
     );
 

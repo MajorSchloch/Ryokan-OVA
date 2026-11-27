@@ -3,7 +3,7 @@
 //! proof of a video's contents. Provider disagreement requires source evidence.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::LazyLock;
 
 use regex_lite::Regex;
@@ -336,6 +336,8 @@ enum NumberingBasis {
     SeasonRelative,
     /// One explicitly numbered episode in a confirmed provider season.
     ProviderSeason,
+    /// One independently verified aired slot extends a primary MAL identity map.
+    AiredEntryTail,
     /// A reviewed exact source selects a finite provider-root domain.
     SourceBound,
 }
@@ -369,6 +371,13 @@ impl ReleaseMapping {
         self.provider_heading.as_deref()
     }
 
+    pub(crate) fn requires_single_video(&self) -> bool {
+        matches!(
+            self.basis,
+            NumberingBasis::ProviderSeason | NumberingBasis::AiredEntryTail
+        )
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.basis == NumberingBasis::ProviderSeason {
             if self.anilist_id <= 0
@@ -381,6 +390,14 @@ impl ReleaseMapping {
             }
         } else if self.provider_heading.is_some() {
             return Err("Episode mapping: unexpected provider title".into());
+        }
+        if self.basis == NumberingBasis::AiredEntryTail
+            && (self.anilist_id <= 0
+                || self.source_first < 2
+                || self.source_first != self.source_last
+                || self.source_first != self.target_first)
+        {
+            return Err("Episode mapping: invalid aired entry episode decision".into());
         }
         if self.basis == NumberingBasis::SourceBound {
             let proof = self
@@ -457,7 +474,7 @@ impl ReleaseMapping {
                 "Episode mapping: source-bound files require their exact relative filenames".into(),
             );
         }
-        if (self.tv_series && span.special)
+        if ((self.tv_series || self.basis == NumberingBasis::AiredEntryTail) && span.special)
             || span.season == Some(0)
             || (self.provider_heading.is_some() && self.source_season != span.season)
             || (self.source_season.is_some()
@@ -486,6 +503,9 @@ impl ReleaseMapping {
             || heading
                 .season
                 .is_some_and(|season| self.source_season != Some(season))
+            || (self.basis == NumberingBasis::AiredEntryTail
+                && self.source_season.is_some_and(|season| season > 1)
+                && heading.season != self.source_season)
             || span
                 .season
                 .is_some_and(|season| heading.season != Some(season))
@@ -582,6 +602,13 @@ pub struct NumberingContext {
     pub provider_plan: Option<MalEpisodePlan>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct VerifiedAiredEpisode {
+    anilist_id: i64,
+    mal_id: i64,
+    episode: i32,
+}
+
 impl NumberingContext {
     pub async fn load(
         anilist_id: i64,
@@ -612,6 +639,45 @@ impl NumberingContext {
     /// No requested episode enters this function. Counts bound a decision;
     /// they never choose between relative and continuous numbering.
     pub fn choose(&self, title: &str, is_batch: bool) -> Result<ReleaseMapping, String> {
+        self.choose_with_verified_airing(title, is_batch, None)
+    }
+
+    /// Before consulting the schedule, limit the exception to the next
+    /// unrepresented slot on the primary source's contiguous identity map.
+    pub(crate) async fn verified_airing(
+        &self,
+        db: &sqlx::SqlitePool,
+        required_episode: Option<i32>,
+        primary_mal: Option<i64>,
+    ) -> Option<VerifiedAiredEpisode> {
+        let episode = required_episode.filter(|ep| (2..=MAX_PLAUSIBLE_EPISODES).contains(ep))?;
+        let mal_id = primary_mal.filter(|id| *id > 0)?;
+        let plan = self.provider_plan.as_ref()?;
+        if self.anilist_id <= 0
+            || plan.anilist_id != self.anilist_id
+            || !plan.permits_unmapped_fallback(Some(mal_id))
+            || !is_identity_prefix(&plan.source_slots().ok()?, episode)
+        {
+            return None;
+        }
+        crate::services::recent_episodes::verified_aired_episode(db, self.anilist_id, episode)
+            .await
+            .ok()?
+            .then_some(VerifiedAiredEpisode {
+                anilist_id: self.anilist_id,
+                mal_id,
+                episode,
+            })
+    }
+
+    /// A schedule receipt may confirm the number parsed from a single
+    /// release. It never supplies the candidate's episode number.
+    pub(crate) fn choose_with_verified_airing(
+        &self,
+        title: &str,
+        is_batch: bool,
+        aired: Option<VerifiedAiredEpisode>,
+    ) -> Result<ReleaseMapping, String> {
         let heading = source_heading(title, is_batch)?;
         if self.anilist_id == 0 || (self.tv_series && media::is_special_release(title)) {
             return Err("Episode mapping: source episode needs an explicit mapping".into());
@@ -689,7 +755,15 @@ impl NumberingContext {
         if !is_batch && last - first >= media::MAX_FILE_SPAN {
             return Err("Episode mapping: single file has an unsupported episode span".into());
         }
-        self.validate_provider_numbers(&numbers)?;
+        let positive_airing = aired.filter(|proof| {
+            !is_batch
+                && first == last
+                && heading.payload_span.is_some()
+                && !media::is_special_release(title)
+                && proof.anilist_id == self.anilist_id
+                && proof.episode == first
+        });
+        let aired_entry_tail = self.validate_provider_numbers(&numbers, positive_airing)?;
         if self
             .episode_count
             .is_some_and(|count| count > 0 && last > count)
@@ -706,7 +780,9 @@ impl NumberingContext {
             source_last: last,
             target_first: first,
             source_season: Some(explicit_season.unwrap_or(self.expected_season)),
-            basis: if explicit_season.is_some() {
+            basis: if aired_entry_tail {
+                NumberingBasis::AiredEntryTail
+            } else if explicit_season.is_some() {
                 NumberingBasis::SeasonRelative
             } else {
                 NumberingBasis::EntryRelative
@@ -753,7 +829,7 @@ impl NumberingContext {
                     .into(),
             );
         }
-        self.validate_provider_numbers(&numbers)?;
+        self.validate_provider_numbers(&numbers, None)?;
         let mapping = ReleaseMapping {
             version: 1,
             anilist_id: self.anilist_id,
@@ -774,13 +850,27 @@ impl NumberingContext {
         Ok(mapping)
     }
 
-    fn validate_provider_numbers(&self, numbers: &[i32]) -> Result<(), String> {
+    fn validate_provider_numbers(
+        &self,
+        numbers: &[i32],
+        aired: Option<VerifiedAiredEpisode>,
+    ) -> Result<bool, String> {
         if let Some(plan) = &self.provider_plan {
-            plan.source_slots()?;
+            let source_slots = plan.source_slots()?;
             for source in &plan.sources {
                 for &number in numbers {
-                    let mapped = episode_mapping::resolve_episode(&source.rules, number)
-                        .map_err(|e| e.to_string())?;
+                    let mapped = match episode_mapping::resolve_episode(&source.rules, number) {
+                        Err(episode_mapping::MappingError::Unmapped(_))
+                            if aired.is_some_and(|proof| {
+                                plan.anilist_id == proof.anilist_id
+                                    && plan.permits_unmapped_fallback(Some(proof.mal_id))
+                                    && is_identity_prefix(&source_slots, number)
+                            }) =>
+                        {
+                            return Ok(true);
+                        }
+                        result => result.map_err(|e| e.to_string())?,
+                    };
                     if mapped.entry != self.anilist_id || mapped.number != number {
                         return Err(format!(
                             "Episode mapping: source episode {number} has conflicting library identities; identify the source scheme"
@@ -789,8 +879,12 @@ impl NumberingContext {
                 }
             }
         }
-        Ok(())
+        Ok(false)
     }
+}
+
+fn is_identity_prefix(slots: &BTreeMap<i32, (i64, i32)>, next: i32) -> bool {
+    next > 1 && slots.keys().copied().eq(1..next)
 }
 
 /// Apply a saved source decision before title, season, or episode heuristics.
@@ -977,6 +1071,11 @@ pub(crate) async fn filter_automatic_candidates_with_pack_mappings(
         auto_search::infer_season_from_detail(detail).max(1),
     )
     .await;
+    let verified_airing = if let Ok(context) = &context {
+        context.verified_airing(db, wanted, detail.id_mal).await
+    } else {
+        None
+    };
     let mut accepted = Vec::new();
     let automatic_sources = crate::services::source_numbering::loader::Resolver::default();
     let provider = ProviderNumbering::load(db, detail, target).await;
@@ -1097,7 +1196,7 @@ pub(crate) async fn filter_automatic_candidates_with_pack_mappings(
                     match mapping.basis {
                         NumberingBasis::EntryRelative => None,
                         NumberingBasis::SeasonRelative => mapping.source_season,
-                        NumberingBasis::SourceBound | NumberingBasis::ProviderSeason => return Err("Episode mapping: published-pack evidence cannot replace an exact source decision".into()),
+                        NumberingBasis::SourceBound | NumberingBasis::ProviderSeason | NumberingBasis::AiredEntryTail => return Err("Episode mapping: published-pack evidence cannot replace an exact source decision".into()),
                     },
                 )?;
                 if !candidate.is_batch || expected != *mapping {
@@ -1107,7 +1206,12 @@ pub(crate) async fn filter_automatic_candidates_with_pack_mappings(
                 }
                 Ok(expected)
             } else {
-                ctx.choose(&candidate.title, candidate.is_batch)
+                let airing = verified_airing.filter(|_| {
+                    candidate.match_provenance.as_ref().is_some_and(|proof| {
+                        proof.kind == auto_search::MatchKind::Verbatim && !proof.phase.is_fallback()
+                    })
+                });
+                ctx.choose_with_verified_airing(&candidate.title, candidate.is_batch, airing)
             }
         });
         match decision {
@@ -1229,6 +1333,157 @@ mod tests {
             )
             .is_err(),
             "the saved provider map proves only episodes 1 through 4"
+        );
+    }
+
+    #[test]
+    fn verified_aired_entry_tail_maps_only_the_next_named_episode() {
+        let ctx = returner_context();
+        let verified = VerifiedAiredEpisode {
+            anilist_id: ctx.anilist_id,
+            mal_id: 57612,
+            episode: 5,
+        };
+        let title = "[Fixture] Night Voyage 2nd Season - 05 [1080p]";
+        assert!(ctx.choose(title, false).is_err());
+        let accepted = ctx
+            .choose_with_verified_airing(title, false, Some(verified))
+            .unwrap();
+        assert_eq!(accepted.episodes(), [5]);
+        assert_eq!(accepted.offset(), 0);
+        assert_eq!(accepted.basis, NumberingBasis::AiredEntryTail);
+        let persisted: ReleaseMapping =
+            serde_json::from_str(&serde_json::to_string(&accepted).unwrap()).unwrap();
+        assert!(persisted.requires_single_video());
+        assert_eq!(
+            persisted
+                .resolve_named_file(&format!("{title}.mkv"))
+                .unwrap()
+                .first,
+            5
+        );
+        for wrong_file in [
+            "Night Voyage.mkv",
+            "Night Voyage - 05.mkv",
+            "Night Voyage S02E06.mkv",
+            "Night Voyage S03E05.mkv",
+            "Night Voyage S02E05E06.mkv",
+        ] {
+            assert!(
+                persisted.resolve_named_file(wrong_file).is_err(),
+                "{wrong_file}"
+            );
+        }
+        for (held, is_batch) in [
+            (title, true),
+            ("Night Voyage 2nd Season - 06 [1080p]", false),
+            ("Night Voyage S02E04E05 [1080p]", false),
+            ("Night Voyage S03E05 [1080p]", false),
+            ("Night Voyage - 05 [1080p]", false),
+            ("Night Voyage [1080p]", false),
+        ] {
+            assert!(
+                ctx.choose_with_verified_airing(held, is_batch, Some(verified))
+                    .is_err(),
+                "{held}"
+            );
+        }
+        for wrong in [
+            VerifiedAiredEpisode {
+                anilist_id: 123,
+                ..verified
+            },
+            VerifiedAiredEpisode {
+                mal_id: 123,
+                ..verified
+            },
+            VerifiedAiredEpisode {
+                episode: 6,
+                ..verified
+            },
+        ] {
+            assert!(
+                ctx.choose_with_verified_airing(title, false, Some(wrong))
+                    .is_err()
+            );
+        }
+        assert!(
+            ctx.choose_published_entry_pack(&[1, 2, 3, 4, 5], Some(2))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn verified_airing_cannot_replace_conflicting_or_incomplete_provider_evidence() {
+        let make_rule = |source_first, source_last, target_entry, target_first| MappingRule {
+            source_first,
+            source_last,
+            target_entry,
+            target_first,
+        };
+        let owner = returner_context().anilist_id;
+        let verified = VerifiedAiredEpisode {
+            anilist_id: owner,
+            mal_id: 57612,
+            episode: 5,
+        };
+        let title = "Night Voyage S02E05 [1080p]";
+        for rules in [
+            vec![],
+            vec![make_rule(2, 4, owner, 2)],
+            vec![make_rule(1, 3, owner, 1), make_rule(4, 4, owner, 5)],
+            vec![make_rule(1, 2, owner, 1), make_rule(4, 4, owner, 4)],
+            vec![make_rule(1, 4, owner, 1), make_rule(5, 6, 123, 1)],
+            vec![make_rule(1, 3, owner, 1)],
+            vec![make_rule(1, 4, owner, 1), make_rule(6, 7, owner, 6)],
+        ] {
+            let mut ctx = returner_context();
+            ctx.provider_plan.as_mut().unwrap().sources[0].rules = rules.clone();
+            assert!(
+                ctx.choose_with_verified_airing(title, false, Some(verified))
+                    .is_err(),
+                "{rules:?}"
+            );
+        }
+        let mut ctx = returner_context();
+        let additional_source = MalSource {
+            mal_id: 123,
+            rules: vec![make_rule(7, 7, owner, 7)],
+        };
+        ctx.provider_plan
+            .as_mut()
+            .unwrap()
+            .sources
+            .push(additional_source);
+        assert!(
+            ctx.choose_with_verified_airing(title, false, Some(verified))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_multi_episode_online_series_can_extend_its_identity_map() {
+        let mut ctx = returner_context();
+        ctx.tv_series = false;
+        ctx.cumulative_offset = 0;
+        ctx.expected_season = 1;
+        let airing = Some(VerifiedAiredEpisode {
+            anilist_id: ctx.anilist_id,
+            mal_id: 57612,
+            episode: 5,
+        });
+        let mapping = ctx
+            .choose_with_verified_airing("Example Online Series - 05 [1080p]", false, airing)
+            .unwrap();
+        assert_eq!(mapping.episodes(), [5]);
+        assert!(!mapping.tv_series);
+        assert!(mapping.requires_single_video());
+        let mut special = media::EpisodeSpan::single(None, 5);
+        special.special = true;
+        assert!(mapping.resolve_file(special).is_err());
+        assert!(
+            ctx.choose_with_verified_airing("Example Online Series S00E05 [1080p]", false, airing)
+                .is_err()
         );
     }
 

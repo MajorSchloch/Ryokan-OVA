@@ -79,6 +79,24 @@ pub(crate) async fn monitored_aired_episodes(
     .await
 }
 
+pub(super) async fn verified_aired_episode(
+    db: &SqlitePool,
+    provider_id: i64,
+    episode: i32,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "{AIRED_TARGETS} SELECT EXISTS(
+            SELECT 1 FROM aired
+            JOIN episode_airings a ON a.series_id=aired.series_id AND a.episode=aired.episode
+            WHERE aired.provider_id=? AND aired.episode=? AND a.airing_at>0
+        )"
+    )))
+    .bind(provider_id)
+    .bind(episode)
+    .fetch_one(db)
+    .await
+}
+
 /// Latest recorded check for each episode of the current release identity.
 pub(crate) async fn last_checks(
     db: &SqlitePool,

@@ -6,6 +6,7 @@
 //! arcs from false-positive matching via `SiblingRejectPrecompute` +
 //! `sibling_match_rejects`.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
@@ -1092,8 +1093,22 @@ pub(super) fn best_alias_match(
 /// episode title unless one of its leftover words reads like a season
 /// or part marker ("Yuukaku-hen", "Part 2", "II", "The Final Season"),
 /// which is what a sequel's subtitle looks like in the same position.
+static DOTTED_SEASON_EPISODE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(s[0-9]{1,2}e[0-9]{1,4}(?:v[0-9]+)?)\.").unwrap());
+
 pub fn names_more_than_the_series(title: &str, aliases: &[String]) -> bool {
-    let Some(claimed) = crate::services::library_link::extract_anime_title(title) else {
+    let title = title.trim_start();
+    // Some listings omit the brackets around this release group. Its
+    // exact leading label is packaging, while the rest of the title is
+    // still checked for extra series words.
+    let title = title
+        .split_once(char::is_whitespace)
+        .filter(|(prefix, _)| prefix.eq_ignore_ascii_case("Erai-raws"))
+        .map_or(title, |(_, rest)| rest.trim_start());
+    // Anchor Anitomy's title at a dotted SxxExx token. Text after that
+    // coordinate is often the episode title.
+    let title = DOTTED_SEASON_EPISODE.replace(title, "${1} ");
+    let Some(claimed) = crate::services::library_link::extract_anime_title(&title) else {
         return false;
     };
     let mut known: HashSet<String> = HashSet::new();
@@ -1168,6 +1183,9 @@ fn is_season_marker_token(token: &str) -> bool {
         && matches!(&token[digits.len()..], "st" | "nd" | "rd" | "th")
 }
 
+static COMPACT_SEASON_EPISODE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(s[0-9]{1,2})(e[0-9]{1,4}(?:v[0-9]+)?)\b").unwrap());
+
 pub fn classify_match(
     title: &str,
     aliases: &[String],
@@ -1184,6 +1202,14 @@ pub fn classify_match(
         .map(|numbers| numbers.filter_aliases(aliases));
     let aliases = eligible_aliases.as_deref().unwrap_or(aliases);
     let normalized_title = normalize_title(title);
+    // The query aliases include "Title S02". Let it match a compact
+    // coordinate too, while the raw title still has to pass the season
+    // and episode checks below.
+    let normalized_title = if matches!(target, SearchTarget::Episode(_)) {
+        COMPACT_SEASON_EPISODE.replace_all(&normalized_title, "${1} ${2}")
+    } else {
+        Cow::Borrowed(normalized_title.as_str())
+    };
     let title_tokens = token_set(&normalized_title);
 
     let alias_match = best_alias_match(
@@ -1504,6 +1530,21 @@ mod tests {
         .expect("an omitted apostrophe must retain the strict alias match");
         assert_eq!(matched.kind, MatchKind::Verbatim);
         assert!(!names_more_than_the_series(title, &aliases));
+    }
+
+    #[test]
+    fn known_unbracketed_group_does_not_change_the_claimed_series_title() {
+        let aliases = vec!["Yasei no Last Boss ga Arawareta! 2nd Season".to_string()];
+        let title = "Erai-raws Yasei no Last Boss ga Arawareta 2nd Season - 09 1080p CR WEBRip HEVC AAC MultiSub 375BE331";
+        assert!(!names_more_than_the_series(title, &aliases));
+        assert!(names_more_than_the_series(
+            &title.replace("Erai-raws", "Unverified-raws"),
+            &aliases,
+        ));
+        assert!(names_more_than_the_series(
+            &title.replace("Arawareta", "Arawareta Encore"),
+            &aliases,
+        ));
     }
 
     #[test]
