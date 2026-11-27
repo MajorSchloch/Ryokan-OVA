@@ -15,6 +15,8 @@ const DELAY_CAP: i64 = 8 * 60 * 60;
 const FRESH_FOR: i64 = 24 * 60 * 60;
 const MAX_STREAK: u8 = 6;
 const IDENTITY_UNAVAILABLE: &str = "Source identity unavailable; no download started";
+const TITLE_HOLD: &str = "Could not verify the release identity from ";
+const LEGACY_TITLE_HOLD: &str = "looked close but none named the series exactly";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RetryTiming {
@@ -118,7 +120,8 @@ impl CheckHistory {
         } else {
             format!(
                 "Last automatic check at {} UTC. {}",
-                self.occurred_at, self.reason
+                self.occurred_at,
+                display_reason(&self.reason)
             )
         }
     }
@@ -131,14 +134,12 @@ impl CheckHistory {
         {
             return String::new();
         }
-        self.finished_reason.clone().unwrap_or_default()
+        display_reason(self.finished_reason.as_deref().unwrap_or_default())
     }
 }
 
-// Near matches can change count and sample titles without changing the reason
-// for the hold. Keep the detail for the user and compare its stable category.
-fn hold_key<'a>(outcome: &str, reason: &'a str) -> Option<&'a str> {
-    let reason = reason
+fn without_target_label(reason: &str) -> &str {
+    reason
         .split_once(": ")
         .filter(|(label, _)| {
             *label == "Single"
@@ -146,7 +147,34 @@ fn hold_key<'a>(outcome: &str, reason: &'a str) -> Option<&'a str> {
                     .strip_prefix("Episode ")
                     .is_some_and(|n| n.parse::<i32>().is_ok())
         })
-        .map_or(reason, |(_, reason)| reason);
+        .map_or(reason, |(_, reason)| reason)
+}
+
+// Keep historical samples and any other notes, but remove obsolete advice.
+fn display_reason(reason: &str) -> String {
+    const LEGACY_ADVICE: &str =
+        ". Add an alternate title on the series page if one of them is right.";
+    let text = without_target_label(reason);
+    let Some((count, rest)) =
+        text.split_once(" release(s) looked close but none named the series exactly, for example ")
+    else {
+        return reason.to_owned();
+    };
+    let (Ok(count), Some((sample, notes))) =
+        (count.parse::<usize>(), rest.rsplit_once(LEGACY_ADVICE))
+    else {
+        return reason.to_owned();
+    };
+    let label = &reason[..reason.len() - text.len()];
+    let noun = if count == 1 { "title" } else { "titles" };
+    format!(
+        "{label}{TITLE_HOLD}{count} candidate {noun}. Review {sample} in Interactive Search.{notes}"
+    )
+}
+
+// Verify the stable category even when the wording, count, or sample changes.
+fn hold_key<'a>(outcome: &str, reason: &'a str) -> Option<&'a str> {
+    let reason = without_target_label(reason);
     if outcome == "error" {
         return (reason == IDENTITY_UNAVAILABLE).then_some(reason);
     }
@@ -160,7 +188,7 @@ fn hold_key<'a>(outcome: &str, reason: &'a str) -> Option<&'a str> {
     {
         return None;
     }
-    if reason.contains("looked close but none named the series exactly") {
+    if reason.starts_with(TITLE_HOLD) || reason.contains(LEGACY_TITLE_HOLD) {
         return Some("No exact title match");
     }
     Some(reason)

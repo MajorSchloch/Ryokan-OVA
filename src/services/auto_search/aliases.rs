@@ -17,6 +17,19 @@ use super::pack_detection::is_pack_candidate_relation;
 use super::provenance::{AliasMatch, MatchKind};
 use super::{SearchTarget, episode_match, parse_release_numbers, season_mismatch};
 
+fn is_title_apostrophe(ch: char) -> bool {
+    matches!(ch, '\'' | '\u{2018}' | '\u{2019}' | '\u{02bc}' | '\u{ff07}')
+}
+
+pub(super) fn title_without_apostrophes(title: &str) -> Option<String> {
+    title.contains(is_title_apostrophe).then(|| {
+        title
+            .chars()
+            .filter(|&ch| !is_title_apostrophe(ch))
+            .collect()
+    })
+}
+
 pub fn normalize_title(input: &str) -> String {
     let lower = input.to_lowercase();
     let mut cleaned = String::with_capacity(lower.len());
@@ -30,7 +43,7 @@ pub fn normalize_title(input: &str) -> String {
             // Uploaders often omit apostrophes. Preserve the surrounding
             // word so punctuation alone cannot turn a strict alias into
             // a fuzzy match ("Girlfriend's" and "Girlfriends").
-            '\'' | '\u{2018}' | '\u{2019}' | '\u{02bc}' | '\u{ff07}' => continue,
+            _ if is_title_apostrophe(ch) => continue,
             _ if ch.is_alphanumeric() || ch.is_whitespace() => cleaned.push(ch),
             _ => cleaned.push(' '),
         }

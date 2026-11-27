@@ -47,6 +47,20 @@ pub(crate) async fn series_still_in_library(db: &SqlitePool, series_id: Option<i
     series::get_by_id(db, sid).await.ok().flatten().is_some()
 }
 
+pub(super) fn unverified_release_titles(titles: &[String]) -> String {
+    let count = titles.len();
+    let noun = if count == 1 { "title" } else { "titles" };
+    let sample = titles
+        .iter()
+        .take(2)
+        .map(|title| format!("\"{title}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Could not verify the release identity from {count} candidate {noun}. Review {sample} in Interactive Search."
+    )
+}
+
 pub(super) fn batch_episode_numbers(title: &str, detail: &anilist::AnimeDetail) -> Vec<i32> {
     let mut ep_nums: Vec<i32> = auto_search::parse_release_numbers(title)
         .into_iter()
@@ -1628,23 +1642,15 @@ async fn run_auto_search_targets_with_upgrades(
                 if fuzzy_only.is_empty() {
                     skipped.push(format!("{}: no matching release found", label));
                 } else {
-                    let sample = fuzzy_only
-                        .iter()
-                        .take(2)
-                        .map(|t| format!("\"{t}\""))
-                        .collect::<Vec<_>>()
-                        .join(", ");
                     skipped.push(format!(
-                        "{}: {} release(s) looked close but none named the series exactly, for example {}. Add an alternate title on the series page if one of them is right.",
-                        label,
-                        fuzzy_only.len(),
-                        sample
+                        "{label}: {}",
+                        unverified_release_titles(&fuzzy_only)
                     ));
                     logger::info(
                         &state.db,
                         LogCategory::AutoSearch,
                         &format!(
-                            "Skipped {} release(s) that did not name the series exactly for {}",
+                            "Skipped {} candidate(s) with unverified release identity for {}",
                             fuzzy_only.len(),
                             label
                         ),

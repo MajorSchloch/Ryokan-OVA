@@ -115,6 +115,91 @@ fn unprobe(query: &str) -> &str {
 }
 
 #[tokio::test]
+async fn alternate_names_searches_omitted_apostrophe_without_accepting_another_season() {
+    use ryokan::services::auto_search::find_best_for_target;
+
+    let _gate = ENV_LOCK.lock().await;
+    let state = build_state().await;
+    let server = MockServer::start().await;
+    let mut detail = detail_for(99803, "Demonzu Kuresuto");
+    detail.title_english = "Devils’ Crest".into();
+    detail.title_native = "デモンズ・クレスト".into();
+    seed(&state, &detail, "").await;
+    let right = "1111111111111111111111111111111111111111";
+    let wrong = "2222222222222222222222222222222222222222";
+    for (query, rows) in [
+        (
+            "Devils Crest 03",
+            format!(
+                "{}{}",
+                nyaa_row(
+                    right,
+                    99701,
+                    "[Fixture] Devils Crest - 03 [1080p WEB]",
+                    "600 MiB",
+                    40
+                ),
+                nyaa_row(
+                    wrong,
+                    99702,
+                    "[Fixture] Devils Crest S02E03 [2160p WEB]",
+                    "1 GiB",
+                    100
+                )
+            ),
+        ),
+        (
+            "Devils Crest 04",
+            nyaa_row(
+                wrong,
+                99702,
+                "[Fixture] Devils Crest S02E04 [2160p WEB]",
+                "1 GiB",
+                100,
+            ),
+        ),
+    ] {
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .and(query_param("q", query))
+            .respond_with(ResponseTemplate::new(200).set_body_string(nyaa_results_page(&rows)))
+            .mount(&server)
+            .await;
+    }
+    set_nyaa_base(&server.uri());
+    let mut cfg = default_config();
+    cfg.seadex_enabled = false;
+    let best = find_best_for_target(
+        &state.db,
+        &detail,
+        &cfg,
+        &SearchTarget::Episode(3),
+        false,
+        false,
+        &[],
+        &state.indexers,
+    )
+    .await;
+    let wrong_season = find_best_for_target(
+        &state.db,
+        &detail,
+        &cfg,
+        &SearchTarget::Episode(4),
+        false,
+        false,
+        &[],
+        &state.indexers,
+    )
+    .await;
+    unset_nyaa_base();
+    assert_eq!(best.unwrap().info_hash, right);
+    assert!(wrong_season.is_none());
+    let requested = queries(&server).await;
+    assert!(requested.iter().any(|query| query == "Devils’ Crest 03"));
+    assert!(requested.iter().any(|query| query == "Devils Crest 03"));
+}
+
+#[tokio::test]
 async fn alternate_names_full_provider_synonym_is_not_suppressed_by_a_canonical_batch() {
     let _gate = ENV_LOCK.lock().await;
     let state = build_state().await;

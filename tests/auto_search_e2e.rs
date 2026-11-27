@@ -1439,7 +1439,7 @@ async fn auto_search_episode_handler_skips_fuzzy_only_candidate_and_says_why() {
     let axum::response::Json(report) = result.expect("auto-search must succeed");
     // The same words in a different order is a fuzzy match, and the
     // automatic path no longer takes those: nothing is grabbed, and the
-    // report says what it saw and what to do about it.
+    // report names the sample so the user can review its identity.
     assert!(
         report.grabbed.is_empty(),
         "a fuzzy-only pool must not grab automatically; report={report:?}"
@@ -1448,10 +1448,11 @@ async fn auto_search_episode_handler_skips_fuzzy_only_candidate_and_says_why() {
     let note = report
         .skipped
         .iter()
-        .find(|s| s.contains("named the series exactly"))
+        .find(|s| s.contains("Could not verify the release identity"))
         .unwrap_or_else(|| panic!("report should explain the skip; report={report:?}"));
     assert!(note.contains("Deluxe Auto Search Show"), "{note}");
-    assert!(note.contains("alternate title"), "{note}");
+    assert!(note.contains("Interactive Search"), "{note}");
+    assert!(!note.contains("Add an alternate title"), "{note}");
 
     unset_nyaa_base();
 }
@@ -1499,7 +1500,11 @@ async fn auto_search_episode_handler_skips_a_release_that_names_more_than_the_se
         report
             .skipped
             .iter()
-            .any(|s| s.contains("named the series exactly") && s.contains("New World")),
+            .any(|s| {
+                s.contains("Could not verify the release identity")
+                    && s.contains("New World")
+                    && !s.contains("Add an alternate title")
+            }),
         "report={report:?}"
     );
 
