@@ -1202,22 +1202,35 @@ pub fn classify_match(
         .map(|numbers| numbers.filter_aliases(aliases));
     let aliases = eligible_aliases.as_deref().unwrap_or(aliases);
     let normalized_title = normalize_title(title);
-    // The query aliases include "Title S02". Let it match a compact
-    // coordinate too, while the raw title still has to pass the season
-    // and episode checks below.
-    let normalized_title = if matches!(target, SearchTarget::Episode(_)) {
-        COMPACT_SEASON_EPISODE.replace_all(&normalized_title, "${1} ${2}")
-    } else {
-        Cow::Borrowed(normalized_title.as_str())
-    };
     let title_tokens = token_set(&normalized_title);
-
-    let alias_match = best_alias_match(
+    let mut alias_match = best_alias_match(
         &normalized_title,
         &title_tokens,
         aliases,
         STRICT_ALIAS_POLICY,
-    )?;
+    );
+
+    // Repair a missing verbatim match for aliases such as "Title S02"
+    // when the release uses S02E08. Keep an existing exact match and its
+    // surplus budget intact.
+    if matches!(target, SearchTarget::Episode(_))
+        && alias_match
+            .as_ref()
+            .is_none_or(|matched| matched.kind != MatchKind::Verbatim)
+        && let Cow::Owned(separated) =
+            COMPACT_SEASON_EPISODE.replace_all(&normalized_title, "${1} ${2}")
+    {
+        let tokens = token_set(&separated);
+        if let Some(exact) = best_alias_match(&separated, &tokens, aliases, STRICT_ALIAS_POLICY)
+            .filter(|matched| matched.kind == MatchKind::Verbatim)
+        {
+            if sibling_match_rejects(&separated, &tokens, sibling_precompute) {
+                return None;
+            }
+            alias_match = Some(exact);
+        }
+    }
+    let alias_match = alias_match?;
 
     // Sibling rejection: if the release looks more like a sequel /
     // prequel / side story than it looks like us, reject. See the
