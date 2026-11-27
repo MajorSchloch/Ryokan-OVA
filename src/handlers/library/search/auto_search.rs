@@ -47,6 +47,20 @@ pub(crate) async fn series_still_in_library(db: &SqlitePool, series_id: Option<i
     series::get_by_id(db, sid).await.ok().flatten().is_some()
 }
 
+pub(super) fn unverified_release_titles(titles: &[String]) -> String {
+    let count = titles.len();
+    let noun = if count == 1 { "title" } else { "titles" };
+    let sample = titles
+        .iter()
+        .take(2)
+        .map(|title| format!("\"{title}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Could not verify the release identity from {count} candidate {noun}. Review {sample} in Interactive Search."
+    )
+}
+
 pub(super) fn batch_episode_numbers(title: &str, detail: &anilist::AnimeDetail) -> Vec<i32> {
     let mut ep_nums: Vec<i32> = auto_search::parse_release_numbers(title)
         .into_iter()
@@ -943,11 +957,11 @@ async fn run_auto_search_targets_with_upgrades(
                         continue;
                     }
                 }
-                let provider_numbered = result
+                let exact_episode_source = result
                     .release_mapping
                     .as_ref()
-                    .is_some_and(|mapping| mapping.provider_heading().is_some());
-                let wants_selective = !provider_numbered
+                    .is_some_and(|mapping| mapping.requires_single_video());
+                let wants_selective = !exact_episode_source
                     && upgrades.recent_demand.is_none()
                     && !result.info_hash.is_empty()
                     && auto_search::has_selective_discriminator(&detail);
@@ -982,10 +996,10 @@ async fn run_auto_search_targets_with_upgrades(
                     .lock()
                     .await;
                 let _config = crate::handlers::settings::CONFIG_WRITE_LOCK.lock().await;
-                if provider_numbered || used_batch_fallback {
-                    if provider_numbered && series_id.is_none() {
+                if exact_episode_source || used_batch_fallback {
+                    if exact_episode_source && series_id.is_none() {
                         skipped.push(format!(
-                            "{label}: add this release before using provider numbering"
+                            "{label}: add this release before automatic episode mapping"
                         ));
                         continue;
                     }
@@ -1296,7 +1310,7 @@ async fn run_auto_search_targets_with_upgrades(
                     qbit.add_torrent_returning_id(&url, &result.info_hash)
                         .await
                         .map(|(outcome, hash)| {
-                            existing_recent = (provider_numbered
+                            existing_recent = (exact_episode_source
                                 || upgrades.recent_demand.is_some())
                                 && outcome
                                     == crate::services::download_client::AddOutcome::AlreadyPresent;
@@ -1628,23 +1642,15 @@ async fn run_auto_search_targets_with_upgrades(
                 if fuzzy_only.is_empty() {
                     skipped.push(format!("{}: no matching release found", label));
                 } else {
-                    let sample = fuzzy_only
-                        .iter()
-                        .take(2)
-                        .map(|t| format!("\"{t}\""))
-                        .collect::<Vec<_>>()
-                        .join(", ");
                     skipped.push(format!(
-                        "{}: {} release(s) looked close but none named the series exactly, for example {}. Add an alternate title on the series page if one of them is right.",
-                        label,
-                        fuzzy_only.len(),
-                        sample
+                        "{label}: {}",
+                        unverified_release_titles(&fuzzy_only)
                     ));
                     logger::info(
                         &state.db,
                         LogCategory::AutoSearch,
                         &format!(
-                            "Skipped {} release(s) that did not name the series exactly for {}",
+                            "Skipped {} candidate(s) with unverified release identity for {}",
                             fuzzy_only.len(),
                             label
                         ),

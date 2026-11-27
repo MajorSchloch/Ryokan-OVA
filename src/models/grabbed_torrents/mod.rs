@@ -415,7 +415,7 @@ async fn record_grab_in_connection(
     if let Some(old) = &previous_mapping {
         let old: crate::services::release_numbering::ReleaseMapping =
             serde_json::from_str(old).map_err(|error| sqlx::Error::Decode(error.into()))?;
-        if old.bound_source().is_some() || old.provider_heading().is_some() {
+        if old.bound_source().is_some() || old.requires_single_video() {
             if previous_series != Some(series_id) {
                 return Err(sqlx::Error::Decode(
                     "Episode mapping: this source belongs to another reviewed release".into(),
@@ -425,7 +425,7 @@ async fn record_grab_in_connection(
         }
     }
     if previous_series.is_some()
-        && mapping.is_some_and(|mapping| mapping.provider_heading().is_some())
+        && mapping.is_some_and(|mapping| mapping.requires_single_video())
         && (previous_series != Some(series_id) || previous_mapping != mapping_json)
     {
         return Err(sqlx::Error::Decode(

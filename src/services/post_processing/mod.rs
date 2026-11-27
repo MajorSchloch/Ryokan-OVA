@@ -1705,9 +1705,9 @@ async fn import_torrent(
             .collect();
     }
     if let Some(mapping) = &release_mapping {
-        if mapping.provider_heading().is_some() && video_files.len() != 1 {
+        if mapping.requires_single_video() && video_files.len() != 1 {
             return Err(
-                "Episode mapping: a provider episode requires exactly one selected video".into(),
+                "Episode mapping: the saved decision requires exactly one selected video".into(),
             );
         }
         if numbering_snapshot.is_some() || !routes.is_empty() {

@@ -644,6 +644,30 @@ impl SeriesMeta {
         }
         self
     }
+
+    fn has_exact_episode_title(&self, title: &str, episode: i32) -> bool {
+        let mut aliases = [self.original_aliases.clone(), self.provider_aliases.clone()].concat();
+        aliases.extend(auto_search::sequel_variant_aliases(&aliases));
+        let without_related;
+        let related = match &self.related_identity {
+            Some(related) => related,
+            None => {
+                without_related = auto_search::SiblingRejectPrecompute::build(&aliases, &[]);
+                &without_related
+            }
+        };
+        auto_search::classify_match(
+            title,
+            &aliases,
+            related,
+            &auto_search::SearchTarget::Episode(episode),
+            self.season_num.unwrap_or(1),
+            false,
+            0,
+        )
+        .is_some_and(|matched| matched.kind == auto_search::MatchKind::Verbatim)
+            && !auto_search::names_more_than_the_series(title, &aliases)
+    }
 }
 
 /// Read existing metadata once per series at pass construction. Feed-item
@@ -1188,10 +1212,10 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             .await;
             continue;
         };
-        if let Some(bound) = all_meta
+        let selected_meta = all_meta
             .iter()
-            .find(|meta| meta.series.id == found.series.id)
-            .and_then(|meta| meta.premiere_bound)
+            .find(|meta| meta.series.id == found.series.id);
+        if let Some(bound) = selected_meta.and_then(|meta| meta.premiere_bound)
             && let Err(reason) = bound.check(item.published_at)
         {
             skipped += 1;
@@ -1338,24 +1362,41 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             } else {
                 found.series.cumulative_prior_episodes
             };
-            let decision = crate::services::release_numbering::NumberingContext::load(
-                found.series.anilist_id,
-                found.series.mal_id,
-                &found.series.format,
-                found.series.episodes,
-                offset,
-                SeriesMeta::from_series(&found.series)
-                    .season_num
-                    .unwrap_or(1),
-            )
-            .await
-            .and_then(|ctx| {
-                if found.resolution_mode.ends_with("_miss") {
-                    Err("Episode mapping: source season/episode does not match the entry".into())
-                } else {
-                    ctx.choose(&item.title, item.is_batch)
+            let decision = if found.resolution_mode.ends_with("_miss") {
+                Err("Episode mapping: source season/episode does not match the entry".into())
+            } else {
+                match crate::services::release_numbering::NumberingContext::load(
+                    found.series.anilist_id,
+                    found.series.mal_id,
+                    &found.series.format,
+                    found.series.episodes,
+                    offset,
+                    SeriesMeta::from_series(&found.series)
+                        .season_num
+                        .unwrap_or(1),
+                )
+                .await
+                {
+                    Ok(ctx) => {
+                        let episode = found
+                            .resolved_eps
+                            .iter()
+                            .next()
+                            .copied()
+                            .filter(|_| !item.is_batch && found.resolved_eps.len() == 1);
+                        let verified = ctx
+                            .verified_airing(&state.db, episode, found.series.mal_id)
+                            .await
+                            .filter(|_| {
+                                selected_meta.zip(episode).is_some_and(|(meta, episode)| {
+                                    meta.has_exact_episode_title(&item.title, episode)
+                                })
+                            });
+                        ctx.choose_with_verified_airing(&item.title, item.is_batch, verified)
+                    }
+                    Err(reason) => Err(reason),
                 }
-            });
+            };
             match decision {
                 Ok(mapping) => {
                     found.resolved_eps = mapping.episodes().into_iter().collect();

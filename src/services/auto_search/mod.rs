@@ -453,9 +453,8 @@ pub async fn find_best_for_target(
     .0
 }
 
-/// `find_best_for_target` plus the titles that matched the series only
-/// fuzzily and were therefore not considered, so the caller can tell
-/// the user what it saw and that an alternate title would admit it.
+/// `find_best_for_target` plus candidate titles held for an unverified
+/// release identity. A sample can help explain the result to the user.
 #[allow(clippy::too_many_arguments)]
 pub async fn find_best_for_target_with_diag(
     db: &SqlitePool,
@@ -2923,6 +2922,21 @@ fn build_queries_mixed(
     if !variants.is_empty() {
         queries.extend(build_queries_from_aliases(variants, target, true));
     }
+    // Some indexers distinguish spellings the local matcher treats as
+    // equivalent. Send one compact probe per spelling without changing
+    // the aliases that can establish a release's identity.
+    const MAX_APOSTROPHE_FREE_FORMS: usize = 3;
+    let apostrophe_free: Vec<_> = dedupe_strings(
+        canonical
+            .iter()
+            .chain(variants)
+            .filter_map(|title| aliases::title_without_apostrophes(title))
+            .collect(),
+    )
+    .into_iter()
+    .take(MAX_APOSTROPHE_FREE_FORMS)
+    .collect();
+    queries.extend(build_queries_from_aliases(&apostrophe_free, target, true));
     dedupe_strings(queries)
 }
 

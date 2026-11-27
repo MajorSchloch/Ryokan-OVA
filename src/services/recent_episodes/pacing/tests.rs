@@ -47,16 +47,33 @@ fn repeats_delay_after_the_first_hold_with_separate_recent_and_older_caps() {
 }
 
 #[test]
-fn near_match_samples_do_not_reset_a_hold_but_new_outcomes_and_airing_times_do() {
+fn updated_title_hold_feedback_preserves_samples_and_retry_timing() {
     let mut target = target(120);
-    let earlier =
-        "Episode 6: 2 release(s) looked close but none named the series exactly, for example One";
-    let newer =
-        "Episode 6: 1 release(s) looked close but none named the series exactly, for example Two";
-    let old = finished(&check_detail(&target, "held", earlier, None, NOW), earlier);
+    let earlier = concat!(
+        "Episode 6: 2 release(s) looked close but none named the series exactly, for example ",
+        "\"Example: The Sequel\", \"Example OVA\". Add an alternate title on the series page ",
+        "if one of them is right.; Extra search note"
+    );
+    let newer = concat!(
+        "Episode 6: Could not verify the release identity from 1 candidate title. ",
+        "Review \"Example Special\" in Interactive Search."
+    );
+    let first = finished(&check_detail(&target, "held", earlier, None, NOW), earlier);
+    let old = finished(
+        &check_detail(&target, "held", earlier, Some(&first), NOW),
+        earlier,
+    );
+    let revised = concat!(
+        "Episode 6: Could not verify the release identity from 2 candidate titles. ",
+        "Review \"Example: The Sequel\", \"Example OVA\" in Interactive Search.; Extra search note"
+    );
+    assert_eq!(old.visible_reason(target.airing_at), revised);
+    assert!(old.description().ends_with(revised));
+    assert_eq!(old.retry_at(target.airing_at), Some(NOW + SHORT_DELAY));
     let repeat = check_detail(&target, "held", newer, Some(&old), NOW);
-    assert_eq!(repeat.retry_at, Some(NOW + SHORT_DELAY));
+    assert_eq!(repeat.retry_at, Some(NOW + FRESH_DELAY_CAP));
     let previous = finished(&repeat, newer);
+    assert_eq!(previous.visible_reason(target.airing_at), newer);
     assert_eq!(
         check_detail(&target, "held", "Needs review", Some(&previous), NOW).hold_streak,
         1
@@ -67,6 +84,7 @@ fn near_match_samples_do_not_reset_a_hold_but_new_outcomes_and_airing_times_do()
     );
     target.airing_at += 30;
     assert_eq!(previous.retry_at(target.airing_at), None);
+    assert!(old.visible_reason(target.airing_at).is_empty());
     assert_eq!(
         check_detail(&target, "held", newer, Some(&previous), NOW).hold_streak,
         1

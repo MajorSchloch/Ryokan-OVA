@@ -115,6 +115,172 @@ fn unprobe(query: &str) -> &str {
 }
 
 #[tokio::test]
+async fn alternate_names_searches_omitted_apostrophe_without_accepting_another_season() {
+    use ryokan::services::auto_search::find_best_for_target;
+
+    let _gate = ENV_LOCK.lock().await;
+    let state = build_state().await;
+    let server = MockServer::start().await;
+    let mut detail = detail_for(99803, "Demonzu Kuresuto");
+    detail.title_english = "Devils’ Crest".into();
+    detail.title_native = "デモンズ・クレスト".into();
+    seed(&state, &detail, "").await;
+    let right = "1111111111111111111111111111111111111111";
+    let wrong = "2222222222222222222222222222222222222222";
+    for (query, rows) in [
+        (
+            "Devils Crest 03",
+            format!(
+                "{}{}",
+                nyaa_row(
+                    right,
+                    99701,
+                    "[Fixture] Devils Crest - 03 [1080p WEB]",
+                    "600 MiB",
+                    40
+                ),
+                nyaa_row(
+                    wrong,
+                    99702,
+                    "[Fixture] Devils Crest S02E03 [2160p WEB]",
+                    "1 GiB",
+                    100
+                )
+            ),
+        ),
+        (
+            "Devils Crest 04",
+            nyaa_row(
+                wrong,
+                99702,
+                "[Fixture] Devils Crest S02E04 [2160p WEB]",
+                "1 GiB",
+                100,
+            ),
+        ),
+    ] {
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .and(query_param("q", query))
+            .respond_with(ResponseTemplate::new(200).set_body_string(nyaa_results_page(&rows)))
+            .mount(&server)
+            .await;
+    }
+    set_nyaa_base(&server.uri());
+    let mut cfg = default_config();
+    cfg.seadex_enabled = false;
+    let best = find_best_for_target(
+        &state.db,
+        &detail,
+        &cfg,
+        &SearchTarget::Episode(3),
+        false,
+        false,
+        &[],
+        &state.indexers,
+    )
+    .await;
+    let wrong_season = find_best_for_target(
+        &state.db,
+        &detail,
+        &cfg,
+        &SearchTarget::Episode(4),
+        false,
+        false,
+        &[],
+        &state.indexers,
+    )
+    .await;
+    unset_nyaa_base();
+    assert_eq!(best.unwrap().info_hash, right);
+    assert!(wrong_season.is_none());
+    let requested = queries(&server).await;
+    assert!(requested.iter().any(|query| query == "Devils’ Crest 03"));
+    assert!(requested.iter().any(|query| query == "Devils Crest 03"));
+}
+
+#[tokio::test]
+async fn alternate_names_matches_an_aired_compact_sequel_episode_past_the_provider_map() {
+    use ryokan::services::auto_search::find_best_for_target_with_diag;
+
+    let _gate = ENV_LOCK.lock().await;
+    let state = build_state().await;
+    let server = MockServer::start().await;
+    let mut detail = detail_for(99804, "Black Clover 2nd Season");
+    detail.title_english = "Black Clover Season 2".into();
+    detail.id_mal = Some(99805);
+    detail.episodes = None;
+    detail.status = "RELEASING".into();
+    seed(&state, &detail, "").await;
+    let sid: i64 = sqlx::query_scalar(
+        "UPDATE series SET cumulative_prior_episodes=170,status='RELEASING',monitor_mode='all'
+         WHERE anilist_id=? RETURNING id",
+    )
+    .bind(detail.id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    ryokan::models::monitoring::set_episode_monitored(&state.db, sid, 8, true)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO episode_airings (series_id,episode,airing_at) VALUES (?,8,unixepoch('now')+86400)")
+        .bind(sid)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    ryokan::services::anibridge::seed_mapping_data_for_tests(&serde_json::json!({
+        "mal:99805": {"anilist:99804": {"1-7":"1-7"}}
+    }))
+    .await;
+    let correct = "3333333333333333333333333333333333333333";
+    serve(
+        &server,
+        &state,
+        vec![(
+            "Black Clover 2nd Season 08",
+            vec![
+                row(
+                    correct,
+                    "Black.Clover.S02E08.A.New.Journey.1080p.CR.WEB-DL.JPN.AAC2.0.H.264-Fixture",
+                ),
+                row(
+                    "4444444444444444444444444444444444444444",
+                    "Black.Clover.S01E08.2160p.CR.WEB-DL.JPN.AAC2.0.H.264-Fixture",
+                ),
+            ],
+        )],
+    )
+    .await;
+    let cfg = default_config();
+    let search = || {
+        find_best_for_target_with_diag(
+            &state.db,
+            &detail,
+            &cfg,
+            &SearchTarget::Episode(8),
+            false,
+            false,
+            &[],
+            &state.indexers,
+        )
+    };
+    let (future, _) = search().await;
+    assert!(future.is_none());
+    sqlx::query("UPDATE episode_airings SET airing_at=unixepoch('now')-3600 WHERE series_id=? AND episode=8")
+        .bind(sid)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let (best, held) = search().await;
+    unset_nyaa_base();
+    assert_eq!(
+        best.map(|candidate| candidate.info_hash).as_deref(),
+        Some(correct),
+        "{held:?}"
+    );
+}
+
+#[tokio::test]
 async fn alternate_names_full_provider_synonym_is_not_suppressed_by_a_canonical_batch() {
     let _gate = ENV_LOCK.lock().await;
     let state = build_state().await;

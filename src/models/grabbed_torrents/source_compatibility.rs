@@ -11,7 +11,7 @@ pub(crate) async fn ensure_automatic_compatibility(
     mapping: Option<&ReleaseMapping>,
 ) -> Result<(), String> {
     let Some(mapping) = mapping
-        .filter(|mapping| mapping.bound_source().is_some() || mapping.provider_heading().is_some())
+        .filter(|mapping| mapping.bound_source().is_some() || mapping.requires_single_video())
     else {
         return Ok(());
     };

@@ -65,9 +65,13 @@ A v2 also scores a little higher than the plain release when both are on offer, 
 
 ## What automatic search will and will not grab
 
-Automatic search and RSS only take a release whose name contains one of the series' titles as written, or an alternate title you added, and names nothing beyond it. The other names AniList lists for a show are tried only when the titles themselves find nothing. A release that merely looks similar is left alone, and so is one that names more, such as "Dr. Stone New World" for Dr. STONE, and the search says so: the toast and the log list the releases it saw and skipped. When one of them is right, open the series page, expand **Advanced search overrides**, and add the name that group uses under **Alternate titles**, one per line. From then on that name is searched for and counts as an exact match, the same as the series' own titles, for automatic search, RSS, the upgrade search, and the misgrab check. Interactive search keeps showing near matches, since you are the one choosing there.
+Automatic search uses English, Romaji, and native titles, plus eligible alternate names from the metadata provider. It also tries a limited number of query forms without apostrophes. A candidate still has to identify the correct release and episode. For example, a title that names *Dr. STONE New World* cannot establish a match for *Dr. STONE*.
+
+When a search cannot establish release identity, Wanted can show sample titles for review in **Interactive Search**. Use **Alternate titles** in **Advanced search overrides** for a verified name of that specific release that the provider does not list. Ryokan uses that name for search, RSS, upgrade searches, and file identity checks.
 
 Fansub groups often number a sequel as if the show never ended, so "Jujutsu Kaisen - 56" is season 3, episode 9. Ryokan works out how many episodes came before from AniList's sequel chain and searches under the earlier seasons' names as well. Where that chain is missing a link, as with Dragon Ball Kai and its 2014 continuation, it uses [anime-relations](https://github.com/erengy/anime-relations), the community-maintained list behind Taiga. A copy ships inside Ryokan and is updated with each release.
+
+Ryokan can accept one exactly matched episode when the provider map is one episode behind a confirmed airing. This applies when the map starts at episode 1 and every mapped episode uses the same number in Ryokan. The source must identify a single episode, and the file must pass the saved episode and season checks before import.
 
 ## Search tips
 

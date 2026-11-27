@@ -24,7 +24,9 @@ use crate::models::{config, episode_tags};
 use crate::services::{auto_search, logger, progress};
 
 use super::super::reconcile::resolve_series_context;
-use super::auto_search::{AutoSearchQuery, batch_episode_numbers, display_title_for_progress};
+use super::auto_search::{
+    AutoSearchQuery, batch_episode_numbers, display_title_for_progress, unverified_release_titles,
+};
 
 /// Pre-computed display fields for one row in the interactive-search
 /// table. Mirrors the AL-search migration's `SearchResultRow` shape:
@@ -549,23 +551,10 @@ pub async fn search_batch_releases(
 
     match best {
         None => {
-            // Same hint as the episode path: a batch the exact title
-            // gate turned away is worth telling the user about, since
-            // an alternate title on the series page admits it.
             let message = if looked_close.is_empty() {
                 "No batch release found".to_string()
             } else {
-                let sample = looked_close
-                    .iter()
-                    .take(2)
-                    .map(|t| format!("\"{t}\""))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(
-                    "{} batch release(s) looked close but none named the series exactly, for example {}. Add an alternate title on the series page if one of them is right.",
-                    looked_close.len(),
-                    sample
-                )
+                unverified_release_titles(&looked_close)
             };
             if let Some(h) = &progress_handle {
                 h.emit("done", "warn", &message, None, true).await;
