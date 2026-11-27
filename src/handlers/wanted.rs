@@ -31,9 +31,12 @@ use serde::Deserialize;
 
 use crate::AppState;
 use crate::models::log::LogCategory;
-use crate::models::{config, episode_airings, episode_tags, local_metadata, monitoring, series};
+use crate::models::{
+    config, edition_review, episode_airings, episode_tags, local_metadata, monitoring, series,
+};
 use crate::services::recent_episodes::{self, RetryStatus, RetryTiming};
 use crate::services::source::{self, Resolution};
+use crate::services::upgrade::outcomes;
 use crate::services::{auto_search, logger, media, naming, progress};
 
 /// Most series ids one search request may carry; a library is the
@@ -126,6 +129,49 @@ fn attach_recovery(rows: &mut [WantedRow], statuses: &HashMap<(i64, i32), RetryS
         row.recovery = groups
             .into_iter()
             .map(|((reason, label, after), episodes)| WantedRecovery {
+                episodes: recovery_episode_label(&episodes),
+                reason: reason.to_string(),
+                label,
+                after,
+            })
+            .collect();
+    }
+}
+
+fn attach_upgrade_outcomes(
+    rows: &mut [WantedRow],
+    statuses: &HashMap<(i64, i32), outcomes::Status>,
+    reviews: &[edition_review::OpenEpisode],
+) {
+    let reviews: HashSet<_> = reviews
+        .iter()
+        .map(|review| (review.series_id, review.episode))
+        .collect();
+    for row in rows {
+        let mut groups = HashMap::<_, Vec<i32>>::new();
+        for slot in &row.slots {
+            let key = (row.series_id, slot.episode);
+            let status = statuses
+                .get(&key)
+                .filter(|status| status.provider_id == row.anilist_id);
+            let group = if reviews.contains(&key) {
+                ("Edition review required", "", None)
+            } else if let Some(status) = status {
+                (
+                    "Last automatic upgrade check",
+                    status.reason,
+                    Some(status.checked_at),
+                )
+            } else {
+                continue;
+            };
+            groups.entry(group).or_default().push(slot.episode);
+        }
+        let mut groups: Vec<_> = groups.into_iter().collect();
+        groups.sort_by_key(|(_, episodes)| episodes[0]);
+        row.recovery = groups
+            .into_iter()
+            .map(|((label, reason, after), episodes)| WantedRecovery {
                 episodes: recovery_episode_label(&episodes),
                 reason: reason.to_string(),
                 label,
@@ -650,11 +696,24 @@ pub async fn page(
     let library_is_empty = library.is_empty();
     let mut rows = rows_for(&state, &cfg, &library, &tab).await;
     let mut recovery_unavailable = false;
-    if tab == "missing" && !rows.is_empty() {
+    if !rows.is_empty() {
         let series_ids: Vec<_> = rows.iter().map(|row| row.series_id).collect();
-        match recent_episodes::retry_statuses(&state.db, &cfg, &series_ids).await {
-            Ok(statuses) => attach_recovery(&mut rows, &statuses),
-            Err(_) => recovery_unavailable = true,
+        if tab == "missing" {
+            match recent_episodes::retry_statuses(&state.db, &cfg, &series_ids).await {
+                Ok(statuses) => attach_recovery(&mut rows, &statuses),
+                Err(_) => recovery_unavailable = true,
+            }
+        } else {
+            let (statuses, reviews) = tokio::join!(
+                outcomes::latest(&state.db, &series_ids),
+                edition_review::open_episodes(&state.db),
+            );
+            recovery_unavailable = statuses.is_err() || reviews.is_err();
+            attach_upgrade_outcomes(
+                &mut rows,
+                &statuses.unwrap_or_default(),
+                &reviews.unwrap_or_default(),
+            );
         }
     }
     if is_htmx && !is_boosted {
@@ -1018,6 +1077,77 @@ mod tests {
         );
         assert!(rows[0].slots[0].quality.contains("unverified or missing"));
         assert!(rows[0].slots[1].quality.contains("720"));
+    }
+
+    #[tokio::test]
+    async fn wanted_displays_upgrade_holds_for_the_current_release_only() {
+        use crate::services::upgrade::outcomes::Outcome;
+        let db = crate::test_support::in_memory_pool().await;
+        let id = crate::test_support::seed_series(&db, 2904, "Code Geass R2").await;
+        let release = series::get_by_id(&db, id).await.unwrap().unwrap();
+        outcomes::record(
+            &db,
+            &release,
+            &[(1, Outcome::NumberingHold), (2, Outcome::NumberingHold)],
+        )
+        .await
+        .unwrap();
+        let render = |provider_id, statuses: &HashMap<_, _>| {
+            let mut rows = vec![WantedRow {
+                series_id: id,
+                anilist_id: provider_id,
+                title: release.title.clone(),
+                cover_url: String::new(),
+                slots: (1..=2)
+                    .map(|episode| WantedSlot {
+                        episode,
+                        label: format!("E{episode:02}"),
+                        quality: "1080p".into(),
+                    })
+                    .collect(),
+                recovery: Vec::new(),
+            }];
+            attach_upgrade_outcomes(&mut rows, statuses, &[]);
+            WantedListPartial {
+                tab: "cutoff".into(),
+                rows,
+                library_is_empty: false,
+                requirements_enabled: true,
+                recovery_unavailable: false,
+            }
+            .render()
+            .unwrap()
+        };
+        let current = render(
+            release.anilist_id,
+            &outcomes::latest(&db, &[id]).await.unwrap(),
+        );
+        assert!(current.contains("Last automatic upgrade check"));
+        assert!(current.contains("E01-E02"));
+        assert_eq!(
+            current
+                .matches("Could not verify episode numbering")
+                .count(),
+            1
+        );
+
+        sqlx::query("UPDATE series SET anilist_id=1519 WHERE id=?")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let new_release = series::get_by_id(&db, id).await.unwrap().unwrap();
+        outcomes::record(&db, &new_release, &[(1, Outcome::NoEligibleCandidate)])
+            .await
+            .unwrap();
+        outcomes::record(&db, &release, &[(1, Outcome::NumberingHold)])
+            .await
+            .unwrap();
+        let statuses = outcomes::latest(&db, &[id]).await.unwrap();
+        let after = render(new_release.anilist_id, &statuses);
+        assert!(after.contains("No eligible replacement was found"));
+        assert!(!after.contains("Could not verify episode numbering"));
+        assert!(!render(release.anilist_id, &statuses).contains("Last automatic upgrade check"));
     }
 
     #[test]

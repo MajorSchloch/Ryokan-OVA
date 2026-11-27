@@ -53,7 +53,7 @@
                 </ul>
                 {% if row.recovery.len() > 2 %}
                 <details class="wanted-recovery-more">
-                    <summary>More automatic check details</summary>
+                    <summary>{% if tab == "cutoff" %}More upgrade check details{% else %}More automatic check details{% endif %}</summary>
                     <ul class="wanted-recovery-list">
                         {% for check in row.recovery.iter().skip(2) %}
                         {% include "partials/wanted/recovery.html" %}

@@ -15,6 +15,7 @@ struct CachedIndexerQuery {
 pub(crate) struct BatchLookups {
     nyaa: Mutex<HashMap<SearchOptions, Vec<SearchResult>>>,
     indexers: Mutex<HashMap<(i64, SearchQuery), CachedIndexerQuery>>,
+    pub(super) upgrade_proofs: crate::services::source_numbering::loader::Resolver,
 }
 
 impl BatchLookups {

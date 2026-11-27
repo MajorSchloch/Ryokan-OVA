@@ -39,7 +39,9 @@ pub use aliases::{
     token_overlap_ratio, token_set, with_alternate_titles,
 };
 pub(crate) use batch_lookups::BatchLookups;
-pub(crate) use episode_pack_fallback::find_single_episode_batch_fallback;
+pub(crate) use episode_pack_fallback::{
+    AdditionalPackEpisodes, find_episode_batch_fallback, find_single_episode_batch_fallback,
+};
 pub(crate) use numeric_title::TitleNumberEvidence;
 pub use pack_detection::{
     TRANSITIVE_WALK_MAX_FETCHES, detect_sibling_entries_in_pack,
@@ -793,6 +795,7 @@ enum BatchSearchMode {
     Automatic,
     Interactive,
     EpisodeFallback,
+    UpgradeFallback,
 }
 
 fn is_single_episode_pack(candidate: &SearchResult) -> bool {
@@ -1185,6 +1188,7 @@ async fn collect_scored_batches_for_target_filtered(
             );
         }
     }
+    let mut diagnostics = fuzzy_rejected.into_inner().unwrap_or_default();
     if require_verbatim {
         scored =
             crate::services::release_numbering::filter_automatic_candidates_with_pack_mappings(
@@ -1194,13 +1198,16 @@ async fn collect_scored_batches_for_target_filtered(
                 target,
                 scored,
                 &pack_mappings,
+                lookups
+                    .filter(|_| mode == BatchSearchMode::UpgradeFallback)
+                    .map(|lookups| (&lookups.upgrade_proofs, &mut diagnostics)),
             )
             .await;
     }
     if !allow_single_episode_pack {
         scored.retain(|candidate| !is_single_episode_pack(candidate));
     }
-    (scored, fuzzy_rejected.into_inner().unwrap_or_default())
+    (scored, diagnostics)
 }
 
 /// Internal: run the full auto-search query sweep (Phase 1 primary →
@@ -2432,7 +2439,7 @@ async fn fan_out_indexers_for_interactive(
 /// so both the Nyaa loop and the indexer-fan-out loop apply the
 /// same relaxed-alias / sibling-rejection / season / episode gate
 /// without code duplication.
-fn canonical_owner_supports_release(
+pub(crate) fn canonical_owner_supports_release(
     title: &str,
     aliases: &[String],
     target: &SearchTarget,
