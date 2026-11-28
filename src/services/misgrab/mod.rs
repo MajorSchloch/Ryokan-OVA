@@ -243,10 +243,9 @@ pub async fn assess_grab(db: &SqlitePool, grab: &GrabbedTorrent, filenames: &[St
 
 // ── Sweep and remediation ────────────────────────────────────────────
 
-/// `try_lock` shape: the supervised tick and any manual trigger share
-/// this so a second sweep returns "already running" instead of racing
-/// the client deletes.
-static MISGRAB_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+/// Serialize decisions with sweep remediation. Manual decisions re-read
+/// their receipt under this lock before changing grab state or the client.
+pub(crate) static MISGRAB_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 /// How long the sweep tolerates client errors on `get_files` before

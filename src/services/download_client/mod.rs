@@ -45,6 +45,15 @@ pub mod nzbget;
 pub mod sabnzbd;
 pub(crate) mod source_guard;
 
+pub(crate) const RETRYABLE_METADATA_PREFIX: &str = "Source metadata can be retried: ";
+
+/// Client proof retained until Ryokan records exact source and file ownership.
+pub struct MetadataRecovery {
+    pub(crate) marker: String,
+    pub(crate) added_on: i64,
+    pub(crate) _permit: tokio::sync::OwnedMutexGuard<()>,
+}
+
 /// Refuse a release URL that isn't `magnet:`, `http://` or `https://`
 /// before it reaches a client. Every client implementation calls this
 /// first in each of its add methods, before any request. The URLs come
@@ -170,6 +179,25 @@ pub trait DownloadClient: Send + Sync {
     /// Unlike the legacy picker contract, there is no whole-download fallback.
     async fn add_torrent_metadata_only(&self, _info_hash: &str) -> Result<AddOutcome, String> {
         Err("This download client cannot safely prepare reviewed torrent metadata without downloading files.".into())
+    }
+
+    /// Continue an empty native attempt only when the client can prove it
+    /// carries Ryokan's own attempt marker. The receipt authorizes exact file
+    /// selection. It cannot authorize resume before durable recording.
+    async fn recover_torrent_metadata_only(
+        &self,
+        _info_hash: &str,
+        _publication_url: &str,
+    ) -> Result<Option<MetadataRecovery>, String> {
+        Ok(None)
+    }
+
+    async fn finish_torrent_metadata_recovery(
+        &self,
+        _info_hash: &str,
+        _recovery: &MetadataRecovery,
+    ) -> Result<(), String> {
+        Err("This client cannot finish a recovered metadata attempt.".into())
     }
 
     /// Add a torrent and narrow it to a subset of its files. The `pick`

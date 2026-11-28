@@ -49,7 +49,7 @@ fn poster_statuses(progress: &CardProgress) -> Vec<PosterStatus> {
             format!("{} downloading", progress.downloading),
         ),
         ("upcoming", "Upcoming".into()),
-        ("attention", "Needs attention".into()),
+        ("attention", "Quality or metadata checks".into()),
     ]
     .into_iter()
     .filter(|(filter, _)| {

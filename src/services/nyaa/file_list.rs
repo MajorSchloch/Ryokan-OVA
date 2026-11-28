@@ -4,6 +4,9 @@ use std::sync::LazyLock;
 use ::scraper::{ElementRef, Html, Selector};
 
 use super::{HTTP_CLIENT, NYAA_CONCURRENCY, VIEW_BODY_CAP, view_page_url};
+use crate::services::download_client::RETRYABLE_METADATA_PREFIX;
+use crate::services::torrent_file;
+use std::time::Duration;
 
 const FILE_CAP: usize = 4096;
 static PANELS: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".panel").unwrap());
@@ -19,6 +22,46 @@ pub(crate) struct PublishedFiles {
     pub title: String,
     pub files: Vec<String>,
     pub description: String,
+}
+
+static METADATA_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .user_agent("Ryokan/0.1")
+        .timeout(Duration::from_secs(12))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("building the publisher metadata client should not fail")
+});
+
+pub(crate) async fn fetch_recovery_metainfo(
+    listing: &str,
+    expected_hash: &str,
+) -> Result<Vec<u8>, String> {
+    let page = view_page_url(listing).ok_or("Recovery needs a verified Nyaa listing.")?;
+    let (base, id) = page
+        .rsplit_once("/view/")
+        .ok_or("Recovery needs a verified Nyaa listing.")?;
+    let unavailable =
+        || format!("{RETRYABLE_METADATA_PREFIX}the publisher's torrent file is unavailable.");
+    let _permit = NYAA_CONCURRENCY
+        .acquire()
+        .await
+        .map_err(|_| unavailable())?;
+    let response = METADATA_CLIENT
+        .get(format!("{base}/download/{id}.torrent"))
+        .send()
+        .await
+        .map_err(|_| unavailable())?;
+    if !response.status().is_success() {
+        return Err(unavailable());
+    }
+    let body = crate::services::http_body::read_capped(response, torrent_file::TORRENT_BODY_CAP)
+        .await
+        .map_err(|_| unavailable())?;
+    let hash = expected_hash.to_string();
+    tokio::task::spawn_blocking(move || torrent_file::recovery_metainfo(&body, &hash))
+        .await
+        .map_err(|_| "Could not validate the publisher's torrent metadata.".to_string())?
 }
 
 /// This adds no client job and trusts no off-origin listing URL. The page's

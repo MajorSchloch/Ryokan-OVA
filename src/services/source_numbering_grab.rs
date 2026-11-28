@@ -3,11 +3,18 @@
 #[path = "source_numbering_grab_tests.rs"]
 mod tests;
 
-use crate::services::download_client::{AddOutcome, DownloadClient, wait_for_files};
+use crate::services::download_client::{
+    AddOutcome, DownloadClient, MetadataRecovery, RETRYABLE_METADATA_PREFIX, wait_for_files,
+};
 use crate::services::release_numbering::ReleaseMapping;
 use crate::services::source_numbering::{BoundSourceProof, ProofOrigin};
 
 pub(crate) const HOLD_PREFIX: &str = "Reviewed source held: ";
+
+pub(crate) fn is_metadata_retryable(reason: &str) -> bool {
+    reason.starts_with(RETRYABLE_METADATA_PREFIX)
+        || reason.starts_with("Metadata-only preparation timed out.")
+}
 
 pub(crate) async fn mapping_for_selection(
     db: &sqlx::SqlitePool,
@@ -79,6 +86,7 @@ pub(crate) struct PreparedBoundGrab {
     pub info_hash: String,
     pub newly_added: bool,
     mapping: ReleaseMapping,
+    recovery: Option<MetadataRecovery>,
 }
 
 impl PreparedBoundGrab {
@@ -87,6 +95,12 @@ impl PreparedBoundGrab {
     pub async fn resume_after_record(&self, client: &dyn DownloadClient) -> Result<(), String> {
         if self.newly_added {
             verify_client_selection(client, &self.info_hash, &self.mapping).await?;
+            if let Some(recovery) = &self.recovery {
+                client
+                    .finish_torrent_metadata_recovery(&self.info_hash, recovery)
+                    .await?;
+                verify_client_selection(client, &self.info_hash, &self.mapping).await?;
+            }
             client.resume(&self.info_hash).await?;
         }
         Ok(())
@@ -123,22 +137,51 @@ pub(crate) async fn add_bound(
         .await?
         .iter()
         .any(|item| item.hash.eq_ignore_ascii_case(info_hash));
-    if already_present {
+    let (outcome, recovery) = if already_present {
         let files = client.get_files(info_hash).await?;
-        let actual: Vec<_> = files
-            .iter()
-            .map(|file| (file.name.as_str(), file.wanted))
-            .collect();
-        proof.validate_files(info_hash, &actual)?;
-        let names: Vec<_> = files.iter().map(|file| file.name.clone()).collect();
-        return Ok(PreparedBoundGrab {
-            kept: Some(selected_indices(proof, &names)?),
-            info_hash: info_hash.to_ascii_lowercase(),
-            newly_added: false,
-            mapping: mapping.clone(),
-        });
-    }
-    match client.add_torrent_metadata_only(info_hash).await? {
+        let recovery = if files.iter().all(|file| file.wanted && file.progress == 0.0)
+            && let Some(publication_url) = proof.publication_url()
+        {
+            client
+                .recover_torrent_metadata_only(info_hash, publication_url)
+                .await?
+        } else {
+            None
+        };
+        if recovery.is_none() {
+            let actual: Vec<_> = files
+                .iter()
+                .map(|file| (file.name.as_str(), file.wanted))
+                .collect();
+            proof.validate_files(info_hash, &actual)?;
+            let names: Vec<_> = files.iter().map(|file| file.name.clone()).collect();
+            return Ok(PreparedBoundGrab {
+                kept: Some(selected_indices(proof, &names)?),
+                info_hash: info_hash.to_ascii_lowercase(),
+                newly_added: false,
+                mapping: mapping.clone(),
+                recovery: None,
+            });
+        }
+        (AddOutcome::Added, recovery)
+    } else {
+        match client.add_torrent_metadata_only(info_hash).await {
+            Err(reason) if is_metadata_retryable(&reason) => {
+                let Some(publication_url) = proof.publication_url() else {
+                    return Err(reason);
+                };
+                match client
+                    .recover_torrent_metadata_only(info_hash, publication_url)
+                    .await?
+                {
+                    Some(recovery) => (AddOutcome::Added, Some(recovery)),
+                    None => return Err(reason),
+                }
+            }
+            result => (result?, None),
+        }
+    };
+    match outcome {
         AddOutcome::AlreadyPresent => {
             // The scoped list may miss another category or a concurrent add.
             // Never pause, reselect, or resume a job we did not create.
@@ -150,6 +193,7 @@ pub(crate) async fn add_bound(
                 info_hash: info_hash.to_ascii_lowercase(),
                 newly_added: false,
                 mapping: mapping.clone(),
+                recovery: None,
             });
         }
         AddOutcome::Added => {}
@@ -176,6 +220,7 @@ pub(crate) async fn add_bound(
             info_hash: info_hash.to_ascii_lowercase(),
             newly_added: true,
             mapping: mapping.clone(),
+            recovery,
         })
     }
     .await;

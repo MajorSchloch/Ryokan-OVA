@@ -166,11 +166,37 @@ pub struct Navigation {
     return_to: Option<String>,
 }
 
-fn franchise_return(value: Option<String>) -> Option<String> {
-    value
-        .as_deref()
-        .filter(|path| path.starts_with("/franchises/"))
-        .and_then(crate::handlers::library::groups::preview::safe_return_to)
+fn review_return(value: Option<String>) -> Option<String> {
+    let value = value?;
+    if value == "/review" {
+        return Some(value);
+    }
+    if !value.starts_with("/franchises/") {
+        return None;
+    }
+    crate::handlers::library::groups::preview::safe_return_to(&value)
+}
+
+#[cfg(test)]
+#[test]
+fn review_queue_return_is_exact_and_internal() {
+    let allowed = "/review";
+    assert_eq!(
+        review_return(Some(allowed.into())).as_deref(),
+        Some(allowed)
+    );
+    let franchise = "/franchises/0123456789abcdef0123456789abcdef?tab=activity";
+    assert_eq!(
+        review_return(Some(franchise.into())).as_deref(),
+        Some(franchise)
+    );
+    for denied in [
+        "/review?next=https://example.com",
+        "//example.com/review",
+        "/system",
+    ] {
+        assert!(review_return(Some(denied.into())).is_none());
+    }
 }
 
 pub async fn page(
@@ -182,7 +208,7 @@ pub async fn page(
         &state,
         id,
         String::new(),
-        franchise_return(navigation.return_to),
+        review_return(navigation.return_to),
     )
     .await
 }
@@ -294,7 +320,7 @@ pub async fn decide(
         _ => return unavailable(StatusCode::BAD_REQUEST, "Select a file decision."),
     };
     let owned_state = state.clone();
-    let return_to = franchise_return(form.return_to);
+    let return_to = review_return(form.return_to);
     match tokio::spawn(async move {
         crate::services::post_processing::resolve_edition(
             &owned_state,

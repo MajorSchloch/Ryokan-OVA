@@ -15,6 +15,52 @@
     flex-wrap: wrap;
 }
 
+.review-queue-empty {
+    padding: 18px;
+}
+
+.review-queue-case {
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.review-queue-info {
+    flex: 1;
+    min-inline-size: min(150px, 100%);
+    overflow-wrap: anywhere;
+}
+
+.review-queue-info h3,
+.review-queue-info p {
+    margin: 0;
+}
+
+.review-queue-info p {
+    margin-block-start: 4px;
+    color: var(--text-dim);
+}
+
+.review-queue-action {
+    flex-shrink: 0;
+    margin-inline-start: auto;
+}
+
+.review-case-detail {
+    padding: 18px;
+    overflow-wrap: anywhere;
+}
+
+.review-case-actions {
+    margin-block-start: 18px;
+}
+
+@media (max-width: 480px) {
+    .review-queue-action {
+        flex-basis: 100%;
+        text-align: center;
+    }
+}
+
 .wanted-toolbar {
     display: flex;
     justify-content: space-between;

@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+
+{% block title %} - Review queue{% endblock %}
+
+{% block content %}
+<div class="page-header wanted-page-header">
+    <h2>Review queue</h2>
+    <a href="/wanted" class="btn btn-secondary">Back to Wanted</a>
+</div>
+{% include "partials/review/feedback.html" %}
+{% if partial_error %}<p class="alert alert-error" role="alert">Some cases could not be loaded. <a href="/review">Try again</a>.</p>{% endif %}
+{% if editions.is_empty() && misgrabs.is_empty() && !partial_error %}
+<div class="rss-panel review-queue-empty">
+    <p>No cases are waiting for your decision.</p>
+    <p class="form-hint">See Wanted for missing episodes and upgrades Ryokan is checking.</p>
+</div>
+{% endif %}
+{% if !editions.is_empty() || !misgrabs.is_empty() %}
+<ul class="wanted-rows review-queue" aria-label="Cases awaiting your decision">
+    {% for case in editions %}
+    <li class="wanted-row review-queue-case" data-edition-case="{{ case.id }}">
+        {% if !case.cover_url.is_empty() %}<img class="wanted-row-cover" src="{{ case.cover_url }}" alt="" loading="lazy" decoding="async">{% endif %}
+        <div class="review-queue-info">
+            <h3>{{ case.title }} · Episode {{ case.episode }}</h3>
+            <p>Ryokan held a shorter edition. Compare it with the current file before deciding which to keep.</p>
+        </div>
+        <a href="/system/edition-review/{{ case.id }}?return_to=%2Freview" class="btn btn-primary review-queue-action" aria-label="Compare files for {{ case.title }}, episode {{ case.episode }}">Compare files</a>
+    </li>
+    {% endfor %}
+    {% for case in misgrabs %}
+    <li class="wanted-row review-queue-case" data-misgrab-case="{{ case.id }}">
+        {% if !case.cover_url.is_empty() %}<img class="wanted-row-cover" src="{{ case.cover_url }}" alt="" loading="lazy" decoding="async">{% endif %}
+        <div class="review-queue-info">
+            <h3>{{ case.series_title }}{% if !case.episode_numbers.is_empty() %} · Episode{% if case.episode_numbers.len() > 1 %}s{% endif %} {{ case.episode_numbers|join(", ") }}{% endif %}</h3>
+            <p>The download’s files appear to belong to a different release. Ryokan is holding the import.</p>
+        </div>
+        <a href="/review/misgrabs/{{ case.id }}" class="btn btn-primary review-queue-action" aria-label="Review held download for {{ case.series_title }}">Review download</a>
+    </li>
+    {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}

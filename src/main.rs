@@ -1415,6 +1415,8 @@ async fn main() {
         )
         .route("/calendar", get(handlers::calendar::page))
         .route("/wanted", get(handlers::wanted::page))
+        .route("/review", get(handlers::review::page))
+        .route("/review/misgrabs/{id}", get(handlers::review::misgrab))
         .route("/wanted/search-menu", get(handlers::wanted::search_menu))
         .route("/api/wanted/search", post(handlers::wanted::search))
         .route("/api/logs/poll", get(handlers::system::api_logs_poll))

@@ -10,6 +10,7 @@ struct StrictClient {
     fail_priority: bool,
     ignore_priority: bool,
     preexisting_on_add: bool,
+    change_selection_on_finish: bool,
 }
 
 impl StrictClient {
@@ -31,6 +32,7 @@ impl StrictClient {
             fail_priority: false,
             ignore_priority: false,
             preexisting_on_add: false,
+            change_selection_on_finish: false,
         }
     }
     fn events(&self) -> Vec<&'static str> {
@@ -68,6 +70,17 @@ impl DownloadClient for StrictClient {
         } else {
             AddOutcome::Added
         })
+    }
+    async fn finish_torrent_metadata_recovery(
+        &self,
+        _: &str,
+        _: &MetadataRecovery,
+    ) -> Result<(), String> {
+        self.events.lock().unwrap().push("finish recovery");
+        if self.change_selection_on_finish {
+            self.files.lock().unwrap()[0].wanted ^= true;
+        }
+        Ok(())
     }
     async fn list_scoped(&self) -> Result<Vec<DownloadItem>, String> {
         Ok(vec![])
@@ -284,4 +297,42 @@ async fn strict_source_grab_preexisting_verified_selection_has_no_resume_after_r
             && !events.contains(&"select"),
         "{events:?}"
     );
+}
+
+#[tokio::test]
+async fn strict_source_grab_recovery_rechecks_selection_before_resume_and_releases_permit() {
+    let permit = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    for changed in [true, false] {
+        let mut client = StrictClient::fixture();
+        client.change_selection_on_finish = changed;
+        let proof = lagoon_proof();
+        for file in client.files.lock().unwrap().iter_mut() {
+            file.wanted = proof
+                .selected_files
+                .iter()
+                .any(|selected| selected.name == file.name);
+        }
+        let prepared = PreparedBoundGrab {
+            kept: None,
+            info_hash: proof.info_hash,
+            newly_added: true,
+            mapping: mapping(),
+            recovery: Some(MetadataRecovery {
+                marker: "fixture".into(),
+                added_on: 1,
+                _permit: permit.clone().lock_owned().await,
+            }),
+        };
+
+        let result = prepared.resume_after_record(&client).await;
+        assert_eq!(result.is_err(), changed);
+        let mut expected = vec!["read files", "finish recovery", "read files"];
+        if !changed {
+            expected.push("resume");
+        }
+        assert_eq!(client.events(), expected);
+        assert!(permit.try_lock().is_err());
+        drop(prepared);
+        assert!(permit.try_lock().is_ok());
+    }
 }

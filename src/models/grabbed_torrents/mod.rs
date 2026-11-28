@@ -2159,6 +2159,19 @@ pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<GrabbedTorrent
     Ok(row.as_ref().map(row_to_grab))
 }
 
+pub(crate) async fn get_unreviewed_grab(
+    db: &SqlitePool,
+    id: i64,
+) -> Result<Option<GrabbedTorrent>, sqlx::Error> {
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT {GRAB_COLS} FROM grabbed_torrents WHERE id = ? AND reviewed_at IS NULL"
+    )))
+    .bind(id)
+    .fetch_optional(db)
+    .await?;
+    Ok(row.as_ref().map(row_to_grab))
+}
+
 /// Record the file-list verdict once. Returns false when the row was
 /// already stamped (a grab-time spawn and the sweep can race; the first
 /// writer wins and the verdict never flips on its own).
@@ -2506,6 +2519,25 @@ pub async fn list_misgrabs(
     db: &SqlitePool,
     title_language: &str,
 ) -> Result<Vec<MisgrabEntry>, sqlx::Error> {
+    list_misgrabs_matching(db, title_language, false, None).await
+}
+
+/// Keep cases that still require a user decision. Remediated misgrabs remain
+/// in the diagnostic history even when the sweep marked them as unreviewed.
+pub(crate) async fn list_held_misgrabs(
+    db: &SqlitePool,
+    title_language: &str,
+    id: Option<i64>,
+) -> Result<Vec<MisgrabEntry>, sqlx::Error> {
+    list_misgrabs_matching(db, title_language, true, id).await
+}
+
+async fn list_misgrabs_matching(
+    db: &SqlitePool,
+    title_language: &str,
+    held_only: bool,
+    id: Option<i64>,
+) -> Result<Vec<MisgrabEntry>, sqlx::Error> {
     let sql = format!(
         r#"SELECT g.id, g.hash, g.torrent_name, g.series_id, g.episode_numbers, g.state,
                   COALESCE(g.misgrab_action, '') AS misgrab_action,
@@ -2517,10 +2549,17 @@ pub async fn list_misgrabs(
            FROM grabbed_torrents g
            LEFT JOIN series s ON s.id = g.series_id
            WHERE g.verification = 'misgrab' AND g.reviewed_at IS NULL
-           ORDER BY g.verified_at DESC"#,
+             AND (NOT ?1 OR (g.state = 'pending' AND g.misgrab_action = 'flagged'
+                            AND g.hash != '' AND s.id IS NOT NULL))
+             AND (?2 IS NULL OR g.id = ?2)
+           ORDER BY g.verified_at DESC, g.id DESC"#,
         title_expr = title_select_expr(title_language),
     );
-    let rows = sqlx::query(sqlx::AssertSqlSafe(sql)).fetch_all(db).await?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(held_only)
+        .bind(id)
+        .fetch_all(db)
+        .await?;
     Ok(rows
         .iter()
         .map(|row| {

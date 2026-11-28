@@ -37,7 +37,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 
 use super::{
-    AddOutcome, DownloadClient, DownloadFile, DownloadItem, DownloadItemState, SelectiveOutcome,
+    AddOutcome, DownloadClient, DownloadFile, DownloadItem, DownloadItemState, MetadataRecovery,
+    SelectiveOutcome,
 };
 
 /// How long a successful `get_torrents` result is served from the
@@ -532,6 +533,24 @@ impl DownloadClient for QbitClient {
 
     async fn add_torrent_metadata_only(&self, info_hash: &str) -> Result<AddOutcome, String> {
         self.prepare_reviewed_metadata(info_hash).await
+    }
+
+    async fn recover_torrent_metadata_only(
+        &self,
+        info_hash: &str,
+        publication_url: &str,
+    ) -> Result<Option<MetadataRecovery>, String> {
+        self.recover_reviewed_metadata(info_hash, publication_url)
+            .await
+    }
+
+    async fn finish_torrent_metadata_recovery(
+        &self,
+        info_hash: &str,
+        recovery: &MetadataRecovery,
+    ) -> Result<(), String> {
+        self.finish_reviewed_metadata_recovery(info_hash, recovery)
+            .await
     }
 
     /// Add a torrent, wait for metadata, invoke `pick`, and mark the

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 /// A real `.torrent` is well under this; a season pack with small
 /// pieces reaches a few MB.
-const TORRENT_BODY_CAP: usize = 10 << 20;
+pub(crate) const TORRENT_BODY_CAP: usize = 10 << 20;
 
 static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
@@ -233,6 +233,32 @@ fn public_magnet_from_bytes(bytes: &[u8]) -> Result<(String, String), String> {
     Ok((hash, magnet.into()))
 }
 
+/// Send only the hash-bound dictionary during a native duplicate add. If
+/// another client add won a race, qBittorrent cannot merge connection details
+/// from the upload.
+pub(crate) fn recovery_metainfo(bytes: &[u8], expected: &str) -> Result<Vec<u8>, String> {
+    if bencode_end(bytes, 0, 0) != Some(bytes.len()) {
+        return Err("Published torrent metadata is malformed.".into());
+    }
+    let (hash, _) = public_magnet_from_bytes(bytes)?;
+    if !hash.eq_ignore_ascii_case(expected) {
+        return Err("Published torrent metadata differs from the saved source identity.".into());
+    }
+    let fields = fields(bytes, 0).ok_or("Published torrent metadata is malformed.")?;
+    let mut info = fields.into_iter().filter(|(key, _, _)| *key == b"info");
+    let (_, start, end) = info
+        .next()
+        .ok_or("Published torrent metadata has no info dictionary.")?;
+    if info.next().is_some() {
+        return Err("Published torrent metadata has conflicting info dictionaries.".into());
+    }
+    let mut payload = Vec::with_capacity(end - start + 8);
+    payload.extend_from_slice(b"d4:info");
+    payload.extend_from_slice(&bytes[start..end]);
+    payload.push(b'e');
+    Ok(payload)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +282,23 @@ mod tests {
                 .any(|(k, v)| k == "xt" && v == &format!("urn:btih:{hash}"))
         );
         assert!(pairs.iter().any(|(k, v)| k == "tr" && v == tracker));
+    }
+
+    #[test]
+    fn recovery_metadata_keeps_only_the_verified_raw_info_dictionary() {
+        let info = "d6:lengthi5e4:name5:a.mkv12:piece lengthi16384e6:pieces0:e";
+        let tracker = "http://localhost:9999/announce";
+        let file = format!("d8:announce{}:{tracker}4:info{info}e", tracker.len());
+        let hash = torrent_info_hash(file.as_bytes()).unwrap();
+        let sanitized = recovery_metainfo(file.as_bytes(), &hash).unwrap();
+        assert_eq!(sanitized, format!("d4:info{info}e").into_bytes());
+        assert_eq!(
+            torrent_info_hash(&sanitized).as_deref(),
+            Some(hash.as_str())
+        );
+        assert!(recovery_metainfo(file.as_bytes(), &"0".repeat(40)).is_err());
+        let duplicate = format!("d4:info{info}4:info{info}e");
+        assert!(recovery_metainfo(duplicate.as_bytes(), &hash).is_err());
     }
 
     #[test]
