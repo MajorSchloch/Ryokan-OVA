@@ -92,12 +92,18 @@ async fn resolve(
     url: &str,
     hash: &str,
 ) -> Result<AutomaticInterpretation, String> {
-    let published = nyaa::fetch_published_files(url, hash).await.map_err(|e| {
-        fail(&format!(
-            "continuous numbering source publication unavailable: {e}"
-        ))
-    })?;
+    let published = fetch_source_publication(url, hash).await?;
     resolve_published(db, catalogue, published, hash).await
+}
+
+async fn fetch_source_publication(url: &str, hash: &str) -> Result<nyaa::PublishedFiles, String> {
+    nyaa::fetch_published_files(url, hash)
+        .await
+        .map_err(|error| {
+            fail(&format!(
+                "continuous numbering source publication unavailable: {error}"
+            ))
+        })
 }
 
 async fn resolve_published(
@@ -311,9 +317,7 @@ impl Resolver {
                 "automatic source evidence budget reached; source remains on hold",
             ));
         }
-        let result = nyaa::fetch_published_files(url, hash)
-            .await
-            .map_err(|error| fail(&format!("source publication unavailable: {error}")));
+        let result = fetch_source_publication(url, hash).await;
         publications.insert(key, result.clone());
         result
     }
