@@ -22,6 +22,9 @@ pub(crate) mod tests;
 pub mod automatic;
 #[path = "source_numbering_loader.rs"]
 pub(crate) mod loader;
+#[path = "source_numbering_named_pack.rs"]
+mod named_pack;
+pub(crate) use named_pack::names_owner as publication_names_owner;
 
 fn fail(message: &str) -> String {
     format!("Episode mapping: {message}")
@@ -115,6 +118,7 @@ pub enum ProofOrigin {
     HumanReviewed,
     AutomaticUnique,
     AutomaticEntryPack,
+    AutomaticNamedPack,
 }
 
 impl ProofOrigin {
@@ -141,6 +145,18 @@ pub enum ProofProvenance {
         verifier_version: u32,
         publication_url: String,
     },
+    AutomaticNamedPack {
+        evidence: NamedPackEvidence,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NamedPackEvidence {
+    verifier_version: u32,
+    publication_url: String,
+    publication_title: String,
+    episode_titles: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -276,6 +292,16 @@ pub fn prepare_review(
     published_files: &[String],
     target_anilist_id: i64,
 ) -> Result<ReviewPreview, String> {
+    prepare_review_inner(domain, info_hash, published_files, target_anilist_id, None)
+}
+
+fn prepare_review_inner(
+    domain: SourceDomain,
+    info_hash: &str,
+    published_files: &[String],
+    target_anilist_id: i64,
+    named: Option<&NamedPackEvidence>,
+) -> Result<ReviewPreview, String> {
     domain.validate()?;
     let info_hash = normalized_hash(info_hash)?;
     let target = domain
@@ -295,10 +321,21 @@ pub fn prepare_review(
             return Err(fail("source filenames are too long or duplicated"));
         }
     }
-    let digest = fingerprint(&(1, &info_hash, &domain, &published_files, target_anilist_id))?;
+    let digest = if let Some(evidence) = named {
+        fingerprint(&(
+            2,
+            &info_hash,
+            &domain,
+            &published_files,
+            target_anilist_id,
+            evidence,
+        ))?
+    } else {
+        fingerprint(&(1, &info_hash, &domain, &published_files, target_anilist_id))?
+    };
     let files = published_files
         .iter()
-        .map(|name| review_file(&domain, name, target_anilist_id))
+        .map(|name| review_file(&domain, name, target_anilist_id, named))
         .collect();
     Ok(ReviewPreview {
         info_hash,
@@ -454,7 +491,12 @@ pub(crate) fn validate_source_file_identity(
     Ok(())
 }
 
-fn review_file(domain: &SourceDomain, name: &str, target: i64) -> ReviewFile {
+fn review_file(
+    domain: &SourceDomain,
+    name: &str,
+    target: i64,
+    named: Option<&NamedPackEvidence>,
+) -> ReviewFile {
     let mut row = ReviewFile {
         name: name.into(),
         source_first: None,
@@ -477,7 +519,11 @@ fn review_file(domain: &SourceDomain, name: &str, target: i64) -> ReviewFile {
             crate::services::release_numbering::validated_source_file_span(basename)?;
         row.source_first = Some(span.first);
         row.source_last = Some(span.last);
-        validate_source_file_identity(domain, name, span, season)?;
+        if let Some(evidence) = named {
+            named_pack::verify_filename(domain, name, span, season, evidence)?;
+        } else {
+            validate_source_file_identity(domain, name, span, season)?;
+        }
         let mapped = episode_mapping::resolve_file(&domain.rules, span.first, span.last)
             .map_err(|error| error.to_string())?;
         let owner = domain
@@ -635,6 +681,14 @@ impl BoundSourceProof {
             {
                 Ok(ProofOrigin::AutomaticEntryPack)
             }
+            (2, Some(ProofProvenance::AutomaticNamedPack { evidence }))
+                if evidence.verifier_version == 1
+                    && crate::services::nyaa::view_page_url(&evidence.publication_url)
+                        .as_deref()
+                        == Some(evidence.publication_url.as_str()) =>
+            {
+                Ok(ProofOrigin::AutomaticNamedPack)
+            }
             _ => Err(fail("unsupported source-proof version or origin")),
         }
     }
@@ -684,12 +738,20 @@ impl BoundSourceProof {
 
     pub fn validate(&self) -> Result<(), String> {
         let origin = self.origin()?;
-        let preview = prepare_review(
+        let named = match &self.provenance {
+            Some(ProofProvenance::AutomaticNamedPack { evidence }) => Some(evidence),
+            _ => None,
+        };
+        let preview = prepare_review_inner(
             self.domain.clone(),
             &self.info_hash,
             &self.published_files,
             self.target_anilist_id,
+            named,
         )?;
+        if let Some(evidence) = named {
+            named_pack::complete_selection(&preview, evidence)?;
+        }
         let names: Vec<_> = self
             .selected_files
             .iter()
@@ -788,7 +850,11 @@ impl BoundSourceProof {
             .collect();
         let mut seen = HashSet::new();
         let mut actual = HashSet::new();
-        let strict_selection = exact_selection || self.origin()? == ProofOrigin::AutomaticEntryPack;
+        let strict_selection = exact_selection
+            || matches!(
+                self.origin()?,
+                ProofOrigin::AutomaticEntryPack | ProofOrigin::AutomaticNamedPack
+            );
         for &(name, wanted) in files {
             if !seen.insert(name) {
                 return Err(fail("duplicate downloaded source filename"));

@@ -14,6 +14,7 @@ static TREES: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse(".torrent-file-list.panel-body").unwrap());
 static LEAVES: LazyLock<Selector> = LazyLock::new(|| Selector::parse("li").unwrap());
 
+#[derive(Clone)]
 pub(crate) struct PublishedFiles {
     pub title: String,
     pub files: Vec<String>,

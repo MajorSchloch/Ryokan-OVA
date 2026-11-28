@@ -182,6 +182,54 @@ fn legion_unrequested_tail_stays_excluded_in_every_owner_projection() {
 }
 
 #[test]
+fn explicit_sample_stays_in_the_manifest_but_never_becomes_wanted() {
+    let mut names: Vec<_> = files("Black Lagoon", 1..=29)
+        .into_iter()
+        .map(|name| format!("Fixture pack/{name}"))
+        .collect();
+    let sample = "Fixture pack/Sample/Sample.mkv";
+    names.push(sample.into());
+
+    let result = resolve(lagoon(), &names).unwrap();
+    assert!(
+        result
+            .excluded_files()
+            .iter()
+            .any(|file| { file.name == sample && file.kind == ExclusionKind::NonEpisodicExtra })
+    );
+    let proof = result.build_proof_for_owner(1519, URL).unwrap().unwrap();
+    assert_eq!(proof.published_files.len(), names.len());
+    assert!(proof.published_files.iter().any(|name| name == sample));
+    let wanted = proof.selected_indices(&names).unwrap();
+    assert_eq!(wanted, (12..24).collect::<Vec<_>>());
+
+    let mut client_files: Vec<_> = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.as_str(), wanted.contains(&index)))
+        .collect();
+    proof.validate_files(HASH, &client_files).unwrap();
+    client_files.last_mut().unwrap().1 = true;
+    assert!(proof.validate_files(HASH, &client_files).is_err());
+
+    names.pop();
+    assert!(proof.selected_indices(&names).is_err());
+    for lookalike in [
+        "Fixture pack/Sample/Unknown.mkv",
+        "Fixture pack/Sample extras/Sample.mkv",
+    ] {
+        names.push(lookalike.into());
+        assert!(
+            resolve(lagoon(), &names)
+                .unwrap_err()
+                .contains("no complete consistent interpretation"),
+            "{lookalike} must still require a verified mapping"
+        );
+        names.pop();
+    }
+}
+
+#[test]
 fn an_excluded_high_number_is_not_a_reset_witness() {
     let mut names = files("Black Lagoon", 1..=12);
     names.push(file("Black Lagoon", "29"));

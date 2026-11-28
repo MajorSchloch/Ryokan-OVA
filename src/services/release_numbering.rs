@@ -1072,10 +1072,7 @@ pub(crate) async fn filter_automatic_candidates_with_pack_mappings(
     target: &auto_search::SearchTarget,
     candidates: Vec<crate::services::nyaa::SearchResult>,
     pack_mappings: &HashMap<String, ReleaseMapping>,
-    mut upgrade_proofs: Option<(
-        &crate::services::source_numbering::loader::Resolver,
-        &mut Vec<String>,
-    )>,
+    mut upgrade_proofs: Option<(&auto_search::BatchLookups, &mut Vec<String>)>,
 ) -> Vec<crate::services::nyaa::SearchResult> {
     let standalone = detail.format == "MOVIE"
         || (matches!(detail.format.as_str(), "SPECIAL" | "OVA" | "ONA")
@@ -1108,6 +1105,16 @@ pub(crate) async fn filter_automatic_candidates_with_pack_mappings(
     let automatic_sources = crate::services::source_numbering::loader::Resolver::default();
     let provider = ProviderNumbering::load(db, detail, target).await;
     for mut candidate in candidates {
+        let deferred = upgrade_proofs.is_some()
+            && candidate
+                .match_provenance
+                .as_ref()
+                .is_some_and(|p| p.kind == auto_search::MatchKind::Fuzzy);
+        let root_pack = deferred
+            && candidate
+                .match_provenance
+                .as_ref()
+                .is_some_and(|p| p.phase == auto_search::MatchPhase::Franchise);
         if let Some(bound) = PremiereBound::from_detail(detail)
             && let Err(reason) = bound.check(candidate.published_at)
         {
@@ -1120,14 +1127,36 @@ pub(crate) async fn filter_automatic_candidates_with_pack_mappings(
             .await;
             continue;
         }
+        if deferred {
+            let claimed: Result<bool, _> = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM grabbed_torrents WHERE hash=? COLLATE NOCASE AND state IN ('pending','imported'))",
+            )
+            .bind(&candidate.info_hash)
+            .fetch_one(db)
+            .await;
+            if !matches!(claimed, Ok(false)) {
+                if let Some((_, diagnostics)) = upgrade_proofs.as_mut() {
+                    diagnostics
+                        .push("Episode mapping: existing source assignment is protected".into());
+                }
+                continue;
+            }
+        }
         match apply_reviewed_source(db, detail.id, target, &mut candidate).await {
             Ok(true) => {
-                if candidate
+                let origin = candidate
                     .release_mapping
                     .as_ref()
                     .and_then(|m| m.bound_source())
-                    .is_some_and(|p| p.origin().is_ok_and(|origin| origin.is_automatic()))
+                    .and_then(|proof| proof.origin().ok());
+                if origin
+                    == Some(crate::services::source_numbering::ProofOrigin::AutomaticNamedPack)
+                    && wanted.is_none()
+                    && upgrade_proofs.is_none()
                 {
+                    continue;
+                }
+                if origin.is_some_and(|origin| origin.is_automatic()) {
                     let phase = candidate
                         .match_provenance
                         .as_ref()
@@ -1188,7 +1217,35 @@ pub(crate) async fn filter_automatic_candidates_with_pack_mappings(
             }
             Ok(None) => {}
         }
-        match automatic_sources
+        let proof_resolver = upgrade_proofs
+            .as_ref()
+            .filter(|_| deferred)
+            .map(|(lookups, _)| lookups.upgrade_proofs(root_pack))
+            .unwrap_or(&automatic_sources);
+        if deferred && !root_pack {
+            match proof_resolver
+                .prove_named_pack(db, detail, &candidate)
+                .await
+            {
+                Ok(mapping) => {
+                    let phase = candidate
+                        .match_provenance
+                        .as_ref()
+                        .map_or(auto_search::MatchPhase::Primary, |p| p.phase);
+                    candidate.match_provenance =
+                        Some(auto_search::MatchProvenance::automatic_source(phase));
+                    candidate.release_mapping = Some(mapping);
+                    accepted.push(candidate);
+                    continue;
+                }
+                Err(reason) => {
+                    if let Some((_, diagnostics)) = upgrade_proofs.as_mut() {
+                        diagnostics.push(reason);
+                    }
+                }
+            }
+        }
+        match proof_resolver
             .apply(db, detail.id, target, &mut candidate)
             .await
         {
@@ -1214,21 +1271,24 @@ pub(crate) async fn filter_automatic_candidates_with_pack_mappings(
             }
             Ok(false) => {}
         }
-        if let Some((proofs, diagnostics)) = upgrade_proofs.as_mut()
+        if let Some((lookups, diagnostics)) = upgrade_proofs.as_mut()
             && wanted.is_none()
+            && !root_pack
             && candidate.indexer_id.is_none()
             && candidate.is_batch
-            && candidate
-                .match_provenance
-                .as_ref()
-                .is_some_and(|p| p.kind == auto_search::MatchKind::Verbatim)
+            && (deferred
+                || candidate
+                    .match_provenance
+                    .as_ref()
+                    .is_some_and(|p| p.kind == auto_search::MatchKind::Verbatim))
             && auto_search::canonical_owner_supports_release(
                 &candidate.title,
                 &auto_search::collect_aliases(detail),
                 &auto_search::SearchTarget::Episode(1),
             )
         {
-            match proofs
+            match lookups
+                .upgrade_proofs(false)
                 .prove_complete_entry(db, detail, &candidate)
                 .await
                 .and_then(|proof| ReleaseMapping::from_bound_source(&proof))
@@ -1240,6 +1300,9 @@ pub(crate) async fn filter_automatic_candidates_with_pack_mappings(
                 }
                 Err(reason) => diagnostics.push(reason),
             }
+        }
+        if deferred {
+            continue;
         }
         let decision = context.as_ref().map_err(Clone::clone).and_then(|ctx| {
             if let Some(mapping) = pack_mappings.get(&candidate.info_hash.to_ascii_lowercase()) {

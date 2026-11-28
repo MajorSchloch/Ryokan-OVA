@@ -923,8 +923,11 @@ async fn collect_scored_batches_for_target_filtered(
     let indexer_categories =
         crate::services::indexers::search_categories(&detail.format, detail.is_adult);
     let automatic_sources = crate::services::source_numbering::loader::Resolver::default();
+    let direct_pack_aliases = collect_aliases(detail);
     let ctx = AutoQueryCtx {
         batch_lookups: lookups,
+        direct_pack_aliases: (mode == BatchSearchMode::UpgradeFallback)
+            .then_some(direct_pack_aliases.as_slice()),
         provider_numbering: None,
         allow_single_episode_pack,
         automatic_sources: &automatic_sources,
@@ -941,7 +944,11 @@ async fn collect_scored_batches_for_target_filtered(
             .media_requirements_enabled
             .then(|| Resolution::from_str(&config.minimum_resolution)),
         fuzzy_rejected: &fuzzy_rejected,
-        eligible,
+        eligible: if mode == BatchSearchMode::UpgradeFallback {
+            None
+        } else {
+            eligible
+        },
         aliases: &aliases,
         canonical_owner_aliases: &canonical_aliases,
         indexer_categories: &indexer_categories,
@@ -1033,16 +1040,14 @@ async fn collect_scored_batches_for_target_filtered(
             quality::batch_probe_queries(&series_ctx.franchise_aliases),
             &series_ctx.custom_tokens,
         );
-        run_queries(
-            &root_queries,
-            AutoQueryCtx {
-                phase: MatchPhase::Franchise,
-                ..ctx
-            },
-            &mut seen,
-            &mut candidates,
-        )
-        .await;
+        let mut root_ctx = AutoQueryCtx {
+            phase: MatchPhase::Franchise,
+            ..ctx
+        };
+        if mode == BatchSearchMode::UpgradeFallback {
+            root_ctx.direct_pack_aliases = Some(&series_ctx.franchise_aliases);
+        }
+        run_queries(&root_queries, root_ctx, &mut seen, &mut candidates).await;
     }
 
     // Curated seeds did not pass run_queries' reviewed-source lookup. A
@@ -1057,7 +1062,13 @@ async fn collect_scored_batches_for_target_filtered(
         {
             continue;
         }
-        if published_packs::identity_allows(detail, &candidate, &aliases, &sibling_precompute) {
+        if (mode == BatchSearchMode::UpgradeFallback
+            && candidate
+                .match_provenance
+                .as_ref()
+                .is_some_and(|p| p.kind == MatchKind::Fuzzy))
+            || published_packs::identity_allows(detail, &candidate, &aliases, &sibling_precompute)
+        {
             identity_checked.push(candidate);
         }
     }
@@ -1069,7 +1080,7 @@ async fn collect_scored_batches_for_target_filtered(
         &sibling_precompute,
         series_ctx.absolute_offset,
         &mut candidates,
-        eligible,
+        ctx.eligible,
         require_verbatim,
     )
     .await;
@@ -1200,7 +1211,7 @@ async fn collect_scored_batches_for_target_filtered(
                 &pack_mappings,
                 lookups
                     .filter(|_| mode == BatchSearchMode::UpgradeFallback)
-                    .map(|lookups| (&lookups.upgrade_proofs, &mut diagnostics)),
+                    .map(|lookups| (lookups, &mut diagnostics)),
             )
             .await;
     }
@@ -1427,6 +1438,7 @@ async fn collect_scored_for_target_filtered(
     let provider_numbering =
         crate::services::release_numbering::ProviderNumbering::load(db, detail, target).await;
     let ctx = AutoQueryCtx {
+        direct_pack_aliases: None,
         batch_lookups: None,
         provider_numbering: provider_numbering.as_ref(),
         allow_single_episode_pack: false,
@@ -1770,6 +1782,27 @@ async fn collect_scored_for_target_filtered(
 /// Phase 1.5 alias override can reuse most fields via
 /// `AutoQueryCtx { aliases: &all_aliases, ..ctx }`.
 impl AutoQueryCtx<'_> {
+    /// Keep promising complete owner packs for ranked file-list checks.
+    /// Fuzzy here marks an unproven candidate. It cannot leave the batch
+    /// search without exact file proof.
+    fn deferred_pack(&self, result: &SearchResult) -> Option<MatchProvenance> {
+        let aliases = self.direct_pack_aliases?;
+        if !result.is_batch
+            || result.info_hash.is_empty()
+            || (nyaa::view_page_url(&result.link).is_none()
+                && nyaa::view_page_url(&result.source_guid).is_none())
+            || !crate::services::source_numbering::publication_names_owner(&result.title, aliases)
+        {
+            return None;
+        }
+        Some(MatchProvenance {
+            phase: self.phase,
+            kind: MatchKind::Fuzzy,
+            alias: String::new(),
+            ratio: 1.0,
+        })
+    }
+
     async fn apply_source(&self, result: &mut SearchResult) -> Result<bool, String> {
         let applied = self.resolve_source(result).await?;
         if self.require_verbatim && applied {
@@ -1857,6 +1890,7 @@ impl AutoQueryCtx<'_> {
 #[derive(Clone, Copy)]
 struct AutoQueryCtx<'a> {
     batch_lookups: Option<&'a BatchLookups>,
+    direct_pack_aliases: Option<&'a [String]>,
     provider_numbering: Option<&'a crate::services::release_numbering::ProviderNumbering>,
     allow_single_episode_pack: bool,
     automatic_sources: &'a crate::services::source_numbering::loader::Resolver,
@@ -2140,6 +2174,12 @@ async fn run_queries(
             if !ctx.require_verbatim && !ctx.allow_batch && result.is_batch {
                 continue;
             }
+            if let Some(provenance) = ctx.deferred_pack(&result) {
+                seen.insert(dedupe_key);
+                result.match_provenance = Some(provenance);
+                candidates.push(result);
+                continue;
+            }
             let reviewed = match ctx.apply_source(&mut result).await {
                 Ok(value) => value,
                 Err(reason) => {
@@ -2242,6 +2282,12 @@ async fn run_queries(
             continue;
         }
         if !ctx.require_verbatim && !ctx.allow_batch && result.is_batch {
+            continue;
+        }
+        if let Some(provenance) = ctx.deferred_pack(&result) {
+            seen.insert(dedupe_key);
+            result.match_provenance = Some(provenance);
+            candidates.push(result);
             continue;
         }
         let reviewed = match ctx.apply_source(&mut result).await {

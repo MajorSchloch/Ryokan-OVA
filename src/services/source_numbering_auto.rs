@@ -433,7 +433,8 @@ fn known_exclusion(name: &str, tv: bool) -> Option<ExclusionKind> {
     }
     let basename = Path::new(name).file_name()?.to_str()?;
     let lower = basename.to_ascii_lowercase();
-    if media::is_non_episodic_file(&lower)
+    if is_explicit_sample(Path::new(name))
+        || media::is_non_episodic_file(&lower)
         || (tv
             && (media::path_names_specials(Path::new(name))
                 || media::parse_episode_span(&lower).is_some_and(|span| span.special)))
@@ -441,6 +442,21 @@ fn known_exclusion(name: &str, tv: bool) -> Option<ExclusionKind> {
         return Some(ExclusionKind::NonEpisodicExtra);
     }
     None
+}
+
+/// An ordinary video in an arbitrary folder still needs an assignment.
+/// Only an exact sample name inside an exact sample directory is an extra.
+pub(super) fn is_explicit_sample(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("sample"))
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.eq_ignore_ascii_case("sample") || name.eq_ignore_ascii_case("samples")
+            })
 }
 
 fn reset_alternatives(
