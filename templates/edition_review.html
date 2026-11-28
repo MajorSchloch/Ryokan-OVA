@@ -3,7 +3,7 @@
 {% block title %} - Compare episode files{% endblock %}
 
 {% block content %}
-<nav class="detail-breadcrumb" aria-label="Breadcrumb">{% if !return_to.is_empty() %}<a href="{{ return_to }}">Back to franchise</a> · {% endif %}<a href="/system?tab=review">Needs Review</a> · <a href="/series/{{ series_id }}">Back to release</a></nav>
+<nav class="detail-breadcrumb" aria-label="Breadcrumb">{% if !return_to.is_empty() && return_to != "/review" %}<a href="{{ return_to }}">Back to franchise</a> · {% endif %}<a href="/review">Back to review queue</a> · <a href="/series/{{ series_id }}">Back to release</a></nav>
 <div class="page-header"><h2>{{ title }} · Episode {{ episode }}</h2></div>
 <p>Compare the current file with the shorter editions Ryokan held. Each 12-second sample uses the first audio track.</p>
 {% if !message.is_empty() %}<p class="alert alert-warn" role="alert">{{ message }}</p>{% endif %}

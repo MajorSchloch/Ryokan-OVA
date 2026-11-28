@@ -202,7 +202,7 @@ async fn edition_review_status_counts_current_episodes_across_releases() {
     let first_progress = &progress[&first.id];
     assert_eq!(first_progress.reviews, 2);
     assert_eq!(first_progress.latest_review.unwrap().id, first_latest);
-    assert!(first_progress.matches_overview_status("attention"));
+    assert!(!first_progress.matches_overview_status("attention"));
     assert!(first_progress.matches_overview_status("review"));
     assert!(!first_progress.matches_overview_status("missing"));
     let excluded_progress = &progress[&excluded.id];

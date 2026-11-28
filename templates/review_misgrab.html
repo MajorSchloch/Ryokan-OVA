@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+
+{% block title %} - Review held download{% endblock %}
+
+{% block content %}
+<nav class="detail-breadcrumb" aria-label="Breadcrumb"><a href="/review">Back to review queue</a></nav>
+<div class="page-header"><h2>Review held download</h2></div>
+{% include "partials/review/feedback.html" %}
+{% if error %}
+<p class="alert alert-error" role="alert">Could not load the saved download case. Reload to try again.</p>
+{% else if let Some(entry) = case %}
+<article class="rss-panel review-case-detail">
+    <h3>{{ entry.series_title }}{% if !entry.episode_numbers.is_empty() %} · Episode{% if entry.episode_numbers.len() > 1 %}s{% endif %} {{ entry.episode_numbers|join(", ") }}{% endif %}</h3>
+    <p>Ryokan held this download because its files appear to belong to a different release.</p>
+    <h4>Release</h4>
+    <p>{{ entry.torrent_name }}</p>
+    <h4>Recorded files</h4>
+    {% if entry.files_sample.is_empty() %}
+    <p>No file list was recorded.</p>
+    {% else %}
+    {% if entry.files_truncated() %}<p>Showing {{ entry.files_sample.len() }} of {{ entry.total_files() }} files.</p>{% endif %}
+    <ul>{% for file in entry.files_sample %}<li>{{ file }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% for note in entry.notes %}<p class="form-hint">{{ note }}</p>{% endfor %}
+    <div class="wanted-actions review-case-actions">
+        <form method="post" action="/api/library/misgrabs/{{ entry.id }}/restore?return_to=%2Freview" hx-boost="false"
+              data-ryokan-confirm-title="Accept this release?"
+              data-ryokan-confirm-body="Ryokan will clear the source identity hold. The files still need to pass your media requirements."
+              data-ryokan-confirm-yes="Accept release">
+            <button type="submit" class="btn btn-secondary">Accept release</button>
+        </form>
+        <form method="post" action="/api/library/misgrabs/{{ entry.id }}/dismiss?return_to=%2Freview" hx-boost="false"
+              data-ryokan-confirm-title="Reject this download?"
+              data-ryokan-confirm-body="Ryokan will block this source. Removal may permanently delete its download files, depending on your cleanup policy."
+              data-ryokan-confirm-yes="Reject download">
+            <button type="submit" class="btn btn-danger">Reject download</button>
+        </form>
+    </div>
+</article>
+{% else %}
+<p class="alert alert-info" role="status">This case is closed or unavailable.</p>
+{% endif %}
+{% endblock %}

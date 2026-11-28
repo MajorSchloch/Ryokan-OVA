@@ -70,8 +70,7 @@ impl CardProgress {
             "upcoming" => self.upcoming,
             "review" => self.reviews > 0,
             "attention" => {
-                self.reviews > 0
-                    || !self.files.complete_scan
+                !self.files.complete_scan
                     || self.unknown > 0
                     || self.files.unmet > 0
                     || self.files.unverified > 0

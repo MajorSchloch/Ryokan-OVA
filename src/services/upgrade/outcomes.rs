@@ -14,6 +14,7 @@ pub(crate) enum Outcome {
     NoEligibleCandidate,
     NumberingHold,
     SourceHold,
+    SourceMetadataRetry,
     Unavailable,
     PolicyHold,
     Duplicate,
@@ -29,6 +30,7 @@ impl Outcome {
             Self::NoEligibleCandidate => ("no_candidate", None),
             Self::NumberingHold => ("numbering_hold", None),
             Self::SourceHold => ("source_hold", None),
+            Self::SourceMetadataRetry => ("source_metadata_retry", None),
             Self::Unavailable => ("unavailable", None),
             Self::PolicyHold => ("policy_hold", None),
             Self::Duplicate => ("duplicate", None),
@@ -121,6 +123,9 @@ impl Recorded {
         match self.outcome.as_str() {
             "numbering_hold" => "Could not verify episode numbering for the candidate releases.",
             "source_hold" => "Could not verify the source or its saved file selection.",
+            "source_metadata_retry" => {
+                "Numbering verified. Ryokan can retry loading the torrent's file list on a later upgrade check."
+            }
             "unavailable" => "The source failed the availability check.",
             "policy_hold" => "The upgrade requirements held the replacement.",
             "duplicate" => "The client previously rejected the matching source as a duplicate.",

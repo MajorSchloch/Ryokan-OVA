@@ -117,7 +117,7 @@ pub const NYAA_BUFFER: usize = NYAA_MAX_CONCURRENCY * 4;
 
 mod file_list;
 mod scraper;
-pub(crate) use file_list::{PublishedFiles, fetch_published_files};
+pub(crate) use file_list::{PublishedFiles, fetch_published_files, fetch_recovery_metainfo};
 
 use scraper::{parse_results, parse_view_page, sanitize_query_for_nyaa};
 
@@ -398,7 +398,7 @@ pub async fn enrich_results_with_group_map(db: &sqlx::SqlitePool, results: &mut 
 /// scrape a magnet link out of the view page. DHT bootstrap alone works
 /// but is slow (tens of seconds to first peer); these five trackers are
 /// stable and shave the cold-start delay.
-pub(super) const NYAA_TRACKER_SET: &[&str] = &[
+pub(crate) const NYAA_TRACKER_SET: &[&str] = &[
     "http://nyaa.tracker.wf:7777/announce",
     "udp://open.stealth.si:80/announce",
     "udp://tracker.opentrackr.org:1337/announce",

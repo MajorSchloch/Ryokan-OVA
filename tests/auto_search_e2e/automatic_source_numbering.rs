@@ -139,6 +139,7 @@ struct StrictAutomaticClient {
     files: Mutex<Vec<DownloadFile>>,
     added: AtomicBool,
     paused: AtomicBool,
+    metadata_unavailable: AtomicBool,
     adds: AtomicUsize,
     resumes: AtomicUsize,
 }
@@ -164,11 +165,14 @@ impl DownloadClient for StrictAutomaticClient {
     }
     async fn add_torrent_metadata_only(&self, hash: &str) -> Result<AddOutcome, String> {
         assert_eq!(hash, self.hash);
+        self.adds.fetch_add(1, Ordering::SeqCst);
+        if self.metadata_unavailable.load(Ordering::SeqCst) {
+            return Err("Metadata-only preparation timed out.".into());
+        }
         assert!(
             !self.added.swap(true, Ordering::SeqCst),
             "one source must create only one client job"
         );
-        self.adds.fetch_add(1, Ordering::SeqCst);
         self.paused.store(true, Ordering::SeqCst);
         Ok(AddOutcome::Added)
     }
@@ -333,6 +337,7 @@ async fn fixture(
         ),
         added: AtomicBool::new(false),
         paused: AtomicBool::new(true),
+        metadata_unavailable: AtomicBool::new(false),
         adds: AtomicUsize::new(0),
         resumes: AtomicUsize::new(0),
     });
@@ -1024,21 +1029,24 @@ async fn automatic_source_numbering_daily_upgrade_narrows_the_pack_and_stops_at_
 
 #[tokio::test]
 async fn daily_upgrade_verifies_a_complete_relative_pack_and_limits_selection() {
-    assert_scoped_daily_upgrade(None).await;
+    assert_scoped_daily_upgrade(None, false).await;
+}
+
+#[tokio::test]
+async fn daily_upgrade_retries_waiting_pack_metadata_on_a_later_scan() {
+    assert_scoped_daily_upgrade(None, true).await;
 }
 
 #[tokio::test]
 async fn daily_upgrade_verifies_continuous_pack_from_provider_episode_titles() {
-    assert_scoped_daily_upgrade(Some([
-        "Last Light",
-        "Pilot’s Promise",
-        "A Long Way",
-        "Arrival",
-    ]))
+    assert_scoped_daily_upgrade(
+        Some(["Last Light", "Pilot’s Promise", "A Long Way", "Arrival"]),
+        false,
+    )
     .await;
 }
 
-async fn assert_scoped_daily_upgrade(names: Option<[&str; 4]>) {
+async fn assert_scoped_daily_upgrade(names: Option<[&str; 4]>, metadata_timeout: bool) {
     let _gate = ENV_LOCK.lock().await;
     let owner = 99_834;
     let title = if names.is_some() {
@@ -1180,6 +1188,28 @@ async fn assert_scoped_daily_upgrade(names: Option<[&str; 4]>) {
             .await
             .unwrap();
     }
+    if metadata_timeout {
+        client.metadata_unavailable.store(true, Ordering::SeqCst);
+        let held = ryokan::services::upgrade::run_once(&state).await.unwrap();
+        assert_eq!(held.upgrades_grabbed, 0);
+        assert_eq!(client.adds.load(Ordering::SeqCst), 1);
+        assert_eq!(client.resumes.load(Ordering::SeqCst), 0);
+        let outcomes: Vec<(i32, String)> = sqlx::query_as(
+            "SELECT episode,outcome FROM episode_upgrade_outcomes WHERE series_id=? ORDER BY episode",
+        )
+        .bind(sid)
+        .fetch_all(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            outcomes,
+            [
+                (1, "source_metadata_retry".into()),
+                (3, "source_metadata_retry".into())
+            ]
+        );
+        client.metadata_unavailable.store(false, Ordering::SeqCst);
+    }
     let summary = ryokan::services::upgrade::run_once(&state).await.unwrap();
     assert_eq!(summary.episodes_checked, 2);
     assert_eq!(
@@ -1188,7 +1218,10 @@ async fn assert_scoped_daily_upgrade(names: Option<[&str; 4]>) {
         "{}",
         dump_logs(&state.db).await
     );
-    assert_eq!(client.adds.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        client.adds.load(Ordering::SeqCst),
+        1 + usize::from(metadata_timeout)
+    );
     assert_eq!(client.resumes.load(Ordering::SeqCst), 1);
     let mapping = if names.is_some() {
         let mapping = pending_mapping(&state, &[1, 3]).await;

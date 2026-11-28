@@ -463,6 +463,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
 
         let batch_lookups = auto_search::BatchLookups::default();
         let mut results = HashMap::new();
+        let mut metadata_retries = HashSet::new();
         for target in targets {
             let label = auto_search::target_label(&target);
             let slot = match target {
@@ -472,7 +473,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             if matches!(results.get(&slot), Some(Outcome::Queued(_))) {
                 continue;
             }
-            results.insert(slot, Outcome::NoEligibleCandidate);
+            let previous = *results.entry(slot).or_insert(Outcome::NoEligibleCandidate);
             let skipped_duplicate = AtomicBool::new(false);
             // Keep the library slot for every upgrade/protection decision and
             // for persistence. A standalone release still needs
@@ -483,9 +484,13 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 }
                 auto_search::SearchTarget::Single => target.clone(),
             };
+            let waiting_on_metadata = |result: &crate::services::nyaa::SearchResult| {
+                !metadata_retries.is_empty()
+                    && metadata_retries.contains(&result.info_hash.to_ascii_lowercase())
+            };
             let eligible = |result: &crate::services::nyaa::SearchResult,
                             incoming: &ClassificationResult| {
-                if release_covers_multiple(result) {
+                if release_covers_multiple(result) || waiting_on_metadata(result) {
                     return false;
                 }
                 if duplicates.contains(row.id, slot, result) {
@@ -563,7 +568,8 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                         let Some(existing) = upgrade_classifications.get(&ep) else {
                             return false;
                         };
-                        !matches!(results.get(&ep), Some(Outcome::Queued(_)))
+                        !waiting_on_metadata(result)
+                            && !matches!(results.get(&ep), Some(Outcome::Queued(_)))
                             && judge_replacement_file(
                                 &requirements,
                                 observed.get(&ep),
@@ -604,6 +610,9 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
             }
 
             let Some(result) = best else {
+                if previous == Outcome::SourceMetadataRetry {
+                    continue;
+                }
                 if diagnostics
                     .iter()
                     .any(|reason| reason.starts_with("Episode mapping:"))
@@ -1079,6 +1088,33 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                         )
                         .await;
                     }
+                }
+                Err(err)
+                    if result
+                        .release_mapping
+                        .as_ref()
+                        .is_some_and(|m| m.bound_source().is_some())
+                        && crate::services::source_numbering_grab::is_metadata_retryable(&err) =>
+                {
+                    metadata_retries.insert(result.info_hash.to_ascii_lowercase());
+                    let episodes = result
+                        .release_mapping
+                        .as_ref()
+                        .map_or_else(|| vec![slot], |mapping| mapping.episodes());
+                    let pending: Vec<_> = episodes
+                        .into_iter()
+                        .filter(|ep| !matches!(results.get(ep), Some(Outcome::Queued(_))))
+                        .map(|ep| (ep, Outcome::SourceMetadataRetry))
+                        .collect();
+                    results.extend(pending.iter().copied());
+                    record_outcomes(&state.db, row, &pending).await;
+                    logger::info(
+                        &state.db,
+                        LogCategory::DownloadClient,
+                        &format!("Upgrade pack waiting for torrent metadata: {title}"),
+                        &err,
+                    )
+                    .await;
                 }
                 Err(err) => {
                     results.insert(

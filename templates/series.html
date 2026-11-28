@@ -389,7 +389,7 @@
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
                         </span>
                         {% else if ep.quality_state == "failed" %}
-                        <span class="ep-status-icon ep-missing" title="Needs attention"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 7v6M12 16h.01"/></svg></span>
+                        <span class="ep-status-icon ep-missing" title="Download failed"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 7v6M12 16h.01"/></svg></span>
                         {% else if !ep.monitored %}
                         <span class="ep-status-icon" title="Unmonitored"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/></svg></span>
                         {% else if ep.unaired %}

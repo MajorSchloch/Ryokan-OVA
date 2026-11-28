@@ -201,6 +201,256 @@ async fn reviewed_metadata_existing_empty_stopped_job_is_never_taken_over() {
 }
 
 #[tokio::test]
+async fn reviewed_metadata_recovery_fills_only_owned_stopped_entry_and_keeps_marker_until_finish() {
+    const MARKER: &str = "ryokan-metadata-00112233445566778899aabbccddeeff";
+    const RECOVERY: &str = "ryokan-recovery-00112233445566778899aabbccddeeff";
+    const INFO: &str = "d6:lengthi5e4:name10:source.mkv12:piece lengthi16384e6:pieces0:e";
+    const TRACKER: &str = "http://localhost:9999/announce";
+    let (server, client, _) = fixture().await;
+    versions(&server, "v5.3.0", "2.11.9").await;
+    let metadata = format!("d8:announce{}:{TRACKER}4:info{INFO}e", TRACKER.len());
+    let hash = crate::services::torrent_file::torrent_info_hash(metadata.as_bytes()).unwrap();
+    let source = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/download/42.torrent"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(metadata))
+        .expect(1)
+        .mount(&source)
+        .await;
+    // Unit fixtures run in independent nextest processes. Restore the test
+    // origin before assertions so an ordinary filtered cargo test also works.
+    let previous_base = std::env::var_os("RYOKAN_NYAA_API_BASE");
+    unsafe { std::env::set_var("RYOKAN_NYAA_API_BASE", source.uri()) };
+
+    let stage = Arc::new(AtomicUsize::new(0));
+    let job_stage = stage.clone();
+    let job_hash = hash.clone();
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/info"))
+        .and(query_param("hashes", &hash))
+        .respond_with(move |_: &wiremock::Request| {
+            let state = job_stage.load(Ordering::SeqCst);
+            let native_state = if state == 2 {
+                job_stage.store(3, Ordering::SeqCst);
+                "checkingResumeData"
+            } else {
+                "stoppedDL"
+            };
+            let tags = match state {
+                0 => MARKER.into(),
+                4 => String::new(),
+                _ => format!("{RECOVERY},{MARKER}"),
+            };
+            ResponseTemplate::new(200).set_body_json(json!([{
+                "hash": job_hash, "state": native_state, "progress":0.0,
+                "downloaded":0,"downloaded_session":0,"uploaded":0,"uploaded_session":0,
+                "category":"ryokan-test","added_on":1,"tags":tags
+            }]))
+        })
+        .mount(&server)
+        .await;
+    let file_stage = stage.clone();
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/files"))
+        .respond_with(move |_: &wiremock::Request| {
+            if file_stage.load(Ordering::SeqCst) < 2 {
+                return ResponseTemplate::new(404);
+            }
+            ResponseTemplate::new(200).set_body_json(json!([
+                {"name":"source.mkv","size":5,"progress":0.0,"priority":1}
+            ]))
+        })
+        .mount(&server)
+        .await;
+    let tag_stage = stage.clone();
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/addTags"))
+        .and(body_string_contains(format!(
+            "hashes={hash}&tags={RECOVERY}"
+        )))
+        .respond_with(move |_: &wiremock::Request| {
+            assert_eq!(tag_stage.swap(1, Ordering::SeqCst), 0);
+            ResponseTemplate::new(200)
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    let upload_stage = stage.clone();
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/add"))
+        .respond_with(move |request: &wiremock::Request| {
+            assert_eq!(upload_stage.swap(2, Ordering::SeqCst), 1);
+            let form = String::from_utf8_lossy(&request.body);
+            assert!(form.contains(&format!("d4:info{INFO}e")));
+            assert!(form.contains(&format!("{MARKER},{RECOVERY}")));
+            assert!(form.contains("name=\"stopped\"\r\n\r\ntrue"));
+            assert!(form.contains("MetadataReceived"));
+            assert!(!form.contains(TRACKER));
+            ResponseTemplate::new(409)
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/addTrackers"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let removal_stage = stage.clone();
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/removeTags"))
+        .respond_with(move |_: &wiremock::Request| {
+            assert_eq!(removal_stage.swap(4, Ordering::SeqCst), 3);
+            ResponseTemplate::new(200)
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    let second_client = QbitClient::new(&server.uri(), "private", "fixture", "ryokan-test");
+    let invalid_publication = second_client
+        .recover_torrent_metadata_only(&hash, "https://example.test/view/42")
+        .await;
+    let result = client
+        .recover_torrent_metadata_only(&hash, &format!("{}/view/42", source.uri()))
+        .await;
+    unsafe {
+        match previous_base {
+            Some(value) => std::env::set_var("RYOKAN_NYAA_API_BASE", value),
+            None => std::env::remove_var("RYOKAN_NYAA_API_BASE"),
+        }
+    }
+    assert_eq!(
+        invalid_publication.err().as_deref(),
+        Some("Recovery needs a verified Nyaa listing.")
+    );
+    let recovery = result.unwrap().unwrap();
+    assert_eq!(recovery.marker, MARKER);
+    assert_no_control(&server).await;
+    assert!(
+        second_client
+            .recover_torrent_metadata_only(&hash, &format!("{}/view/42", source.uri()))
+            .await
+            .err()
+            .unwrap()
+            .starts_with(RETRYABLE_METADATA_PREFIX)
+    );
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.url.path() != "/api/v2/torrents/addTrackers")
+    );
+    client
+        .finish_torrent_metadata_recovery(&hash, &recovery)
+        .await
+        .unwrap();
+    drop(recovery);
+    assert!(
+        second_client
+            .recover_torrent_metadata_only(&hash, &format!("{}/view/42", source.uri()))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests.iter().all(|request| {
+        ![
+            "/api/v2/torrents/delete",
+            "/api/v2/torrents/start",
+            "/api/v2/torrents/filePrio",
+        ]
+        .contains(&request.url.path())
+    }));
+    let restored = requests
+        .iter()
+        .find(|request| request.url.path() == "/api/v2/torrents/addTrackers")
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&restored.body).contains("localhost"));
+}
+
+#[tokio::test]
+async fn reviewed_metadata_recovery_does_not_adopt_empty_foreign_job() {
+    let (server, client, _) = fixture().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/info"))
+        .and(query_param("hashes", HASH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([job("stoppedDL", 0)])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(
+        client
+            .recover_torrent_metadata_only(HASH, "https://nyaa.si/view/42")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_no_control(&server).await;
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.url.path() != "/api/v2/torrents/add")
+    );
+}
+
+#[tokio::test]
+async fn reviewed_metadata_recovery_preserves_claimed_native_jobs() {
+    let (server, client, _) = fixture().await;
+    let db = crate::test_support::in_memory_pool().await;
+    let series = crate::test_support::seed_series(&db, 42, "Test source").await;
+    let client = crate::services::download_client::source_guard::SourceGuard {
+        db: db.clone(),
+        inner: Arc::new(client),
+    };
+    for (state, bridge) in [("pending", None), ("failed", Some("{}"))] {
+        sqlx::query(
+            "INSERT INTO grabbed_torrents(hash,series_id,state,library_migration_bridge)
+             VALUES(?,?,?,?)",
+        )
+        .bind(HASH.to_ascii_uppercase())
+        .bind(series)
+        .bind(state)
+        .bind(bridge)
+        .execute(&db)
+        .await
+        .unwrap();
+        assert!(
+            client
+                .recover_torrent_metadata_only(HASH, "https://nyaa.si/view/42")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        sqlx::query("DELETE FROM grabbed_torrents")
+            .execute(&db)
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO pending_grabs(preview_id,info_hash,created_at,heartbeat_at)
+         VALUES('fixture',?,1,1)",
+    )
+    .bind(HASH)
+    .execute(&db)
+    .await
+    .unwrap();
+    assert!(
+        client
+            .recover_torrent_metadata_only(HASH, "https://nyaa.si/view/42")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn reviewed_metadata_absence_lookup_errors_cannot_authorize_an_add() {
     for response in [
         ResponseTemplate::new(500),

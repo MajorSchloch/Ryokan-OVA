@@ -1,0 +1,2 @@
+{% if let Some(message) = feedback.message %}<p class="alert alert-success" role="status">{{ message }}</p>{% endif %}
+{% if let Some(error) = feedback.error %}<p class="alert alert-error" role="alert">{{ error }}</p>{% endif %}

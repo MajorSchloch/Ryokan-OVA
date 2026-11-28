@@ -109,6 +109,39 @@ impl DownloadClient for SourceGuard {
         let _guard = self.permit(hash).await?;
         self.inner.add_torrent_metadata_only(hash).await
     }
+    async fn recover_torrent_metadata_only(
+        &self,
+        hash: &str,
+        publication_url: &str,
+    ) -> Result<Option<MetadataRecovery>, String> {
+        let _guard = self.permit(hash).await?;
+        let claimed: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM grabbed_torrents WHERE hash=? COLLATE NOCASE
+               AND (state IN ('pending','imported') OR library_migration_bridge IS NOT NULL)
+               UNION ALL SELECT 1 FROM pending_grabs WHERE info_hash=? COLLATE NOCASE)",
+        )
+        .bind(hash)
+        .bind(hash)
+        .fetch_one(&self.db)
+        .await
+        .map_err(|_| "Could not check ownership of the existing metadata attempt.")?;
+        if claimed {
+            return Ok(None);
+        }
+        self.inner
+            .recover_torrent_metadata_only(hash, publication_url)
+            .await
+    }
+    async fn finish_torrent_metadata_recovery(
+        &self,
+        hash: &str,
+        recovery: &MetadataRecovery,
+    ) -> Result<(), String> {
+        let _guard = self.permit(hash).await?;
+        self.inner
+            .finish_torrent_metadata_recovery(hash, recovery)
+            .await
+    }
     async fn add_torrent_with_file_filter(
         &self,
         url: &str,

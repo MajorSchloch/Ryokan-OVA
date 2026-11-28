@@ -9,6 +9,7 @@ pub mod notifications;
 pub mod oauth;
 pub mod progress;
 pub mod responses;
+pub mod review;
 pub mod search;
 pub(crate) mod secret_field;
 pub mod security_headers;

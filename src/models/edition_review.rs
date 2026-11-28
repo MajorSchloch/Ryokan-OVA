@@ -24,7 +24,9 @@ pub struct Review {
 #[derive(sqlx::FromRow)]
 pub struct Summary {
     pub id: i64,
+    pub series_id: i64,
     pub title: String,
+    pub cover_url: String,
     pub episode: i32,
     pub candidates: i64,
 }
@@ -164,7 +166,8 @@ pub async fn for_episode(
 
 pub async fn summaries(db: &SqlitePool) -> Result<Vec<Summary>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT MAX(r.id) AS id, s.title, r.episode, COUNT(*) AS candidates
+        "SELECT MAX(r.id) AS id, s.id AS series_id, s.title, COALESCE(s.cover_url, '') AS cover_url,
+                r.episode, COUNT(*) AS candidates
          FROM episode_edition_reviews r
          JOIN series s ON s.id = r.series_id AND s.anilist_id = r.provider_id
          JOIN grabbed_torrents g ON g.id = r.grab_id AND g.grabbed_at = r.grabbed_at

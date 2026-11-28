@@ -622,6 +622,16 @@ impl ReviewPreview {
 }
 
 impl BoundSourceProof {
+    pub(crate) fn publication_url(&self) -> Option<&str> {
+        match self.provenance.as_ref()? {
+            ProofProvenance::AutomaticUnique { evidence } => Some(&evidence.publication_url),
+            ProofProvenance::AutomaticEntryPack {
+                publication_url, ..
+            } => Some(publication_url),
+            ProofProvenance::AutomaticNamedPack { evidence } => Some(&evidence.publication_url),
+        }
+    }
+
     pub(crate) fn for_entry_pack(
         domain: SourceDomain,
         info_hash: &str,

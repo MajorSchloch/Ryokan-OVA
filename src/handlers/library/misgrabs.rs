@@ -14,7 +14,7 @@
 //! through `htmx_aware_redirect`.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderValue, StatusCode},
     response::Response,
 };
@@ -55,8 +55,28 @@ pub(crate) fn misgrab_trigger(ok: bool, id: i64, action: &str, message: &str) ->
     resp
 }
 
-fn respond(is_htmx: bool, ok: bool, id: i64, action: &str, message: &str) -> Response {
-    if is_htmx {
+#[derive(Default, serde::Deserialize)]
+pub struct Navigation {
+    return_to: Option<String>,
+}
+
+fn respond(
+    is_htmx: bool,
+    review_queue: bool,
+    ok: bool,
+    id: i64,
+    action: &str,
+    message: &str,
+) -> Response {
+    if review_queue {
+        let message = urlencoding::encode(message);
+        let destination = if ok {
+            format!("/review?message={message}")
+        } else {
+            format!("/review/misgrabs/{id}?error={message}")
+        };
+        htmx_aware_redirect(is_htmx, &destination)
+    } else if is_htmx {
         misgrab_trigger(ok, id, action, message)
     } else {
         htmx_aware_redirect(
@@ -64,6 +84,13 @@ fn respond(is_htmx: bool, ok: bool, id: i64, action: &str, message: &str) -> Res
             &format!("/system?tab=misgrabs&msg={}", urlencoding::encode(message)),
         )
     }
+}
+
+fn is_held(row: &grabbed_torrents::GrabbedTorrent) -> bool {
+    row.state == "pending"
+        && row.misgrab_action.as_deref() == Some("flagged")
+        && row.series_id > 0
+        && !row.hash.is_empty()
 }
 
 fn is_hex40(hash: &str) -> bool {
@@ -98,19 +125,21 @@ pub async fn restore_misgrab(
     State(state): State<AppState>,
     HxRequest(is_htmx): HxRequest,
     Path(id): Path<i64>,
+    Query(navigation): Query<Navigation>,
 ) -> Response {
+    let review_queue = navigation.return_to.as_deref() == Some("/review");
+    let reply =
+        |ok, id, action, message: &str| respond(is_htmx, review_queue, ok, id, action, message);
+    let _decision = misgrab::MISGRAB_LOCK.lock().await;
     let db = &state.db;
-    let Ok(Some(row)) = grabbed_torrents::get_by_id(db, id).await else {
-        return respond(is_htmx, false, id, "restore", "Grab not found");
+    let Ok(Some(row)) = grabbed_torrents::get_unreviewed_grab(db, id).await else {
+        return reply(false, id, "restore", "Grab not found or already reviewed.");
     };
+    if review_queue && !is_held(&row) {
+        return reply(false, id, "restore", "This case is closed or unavailable.");
+    }
     if row.verification.as_deref() != Some("misgrab") {
-        return respond(
-            is_htmx,
-            false,
-            id,
-            "restore",
-            "This grab is not a detected misgrab",
-        );
+        return reply(false, id, "restore", "This grab is not a detected misgrab");
     }
     let removed = matches!(
         row.misgrab_action.as_deref(),
@@ -122,13 +151,7 @@ pub async fn restore_misgrab(
         if let Err(e) =
             grabbed_torrents::whitelist_by_hash(db, &row.hash, Some(row.series_id)).await
         {
-            return respond(
-                is_htmx,
-                false,
-                id,
-                "restore",
-                &format!("Could not whitelist: {e}"),
-            );
+            return reply(false, id, "restore", &format!("Could not whitelist: {e}"));
         }
         logger::info(
             db,
@@ -137,12 +160,11 @@ pub async fn restore_misgrab(
             &format!("series_id={}, hash={}", row.series_id, row.hash),
         )
         .await;
-        return respond(
-            is_htmx,
+        return reply(
             true,
             id,
             "restore",
-            "Restored. The download will import normally.",
+            "Source identity hold cleared. The files still need to pass the normal import checks.",
         );
     }
 
@@ -152,8 +174,7 @@ pub async fn restore_misgrab(
     // failed re-add with no way to retry it; every early return here
     // leaves the row exactly as it was.
     let Some(url) = restore_url(&row) else {
-        return respond(
-            is_htmx,
+        return reply(
             false,
             id,
             "restore",
@@ -164,8 +185,7 @@ pub async fn restore_misgrab(
         .resolve_grab_client(row.download_client_id, &row.hash)
         .await
     else {
-        return respond(
-            is_htmx,
+        return reply(
             false,
             id,
             "restore",
@@ -175,8 +195,7 @@ pub async fn restore_misgrab(
     match crate::models::source_numbering::has_bound_history(db, &row.hash).await {
         Ok(false) => {}
         Ok(true) => {
-            return respond(
-                is_htmx,
+            return reply(
                 false,
                 id,
                 "restore",
@@ -184,8 +203,7 @@ pub async fn restore_misgrab(
             );
         }
         Err(_) => {
-            return respond(
-                is_htmx,
+            return reply(
                 false,
                 id,
                 "restore",
@@ -206,8 +224,7 @@ pub async fn restore_misgrab(
                 &e,
             )
             .await;
-            return respond(
-                is_htmx,
+            return reply(
                 false,
                 id,
                 "restore",
@@ -239,17 +256,10 @@ pub async fn restore_misgrab(
         Ok(Some(saved)) => saved,
         Ok(None) => {
             let _ = grabbed_torrents::whitelist_by_hash(db, &row.hash, Some(row.series_id)).await;
-            return respond(
-                is_htmx,
-                true,
-                id,
-                "restore",
-                "Restored. The grab is already active.",
-            );
+            return reply(true, id, "restore", "Restored. The grab is already active.");
         }
         Err(e) => {
-            return respond(
-                is_htmx,
+            return reply(
                 false,
                 id,
                 "restore",
@@ -321,8 +331,7 @@ pub async fn restore_misgrab(
         ),
     )
     .await;
-    respond(
-        is_htmx,
+    reply(
         true,
         id,
         "restore",
@@ -346,19 +355,21 @@ pub async fn dismiss_misgrab(
     State(state): State<AppState>,
     HxRequest(is_htmx): HxRequest,
     Path(id): Path<i64>,
+    Query(navigation): Query<Navigation>,
 ) -> Response {
+    let review_queue = navigation.return_to.as_deref() == Some("/review");
+    let reply =
+        |ok, id, action, message: &str| respond(is_htmx, review_queue, ok, id, action, message);
+    let _decision = misgrab::MISGRAB_LOCK.lock().await;
     let db = &state.db;
-    let Ok(Some(row)) = grabbed_torrents::get_by_id(db, id).await else {
-        return respond(is_htmx, false, id, "dismiss", "Grab not found");
+    let Ok(Some(row)) = grabbed_torrents::get_unreviewed_grab(db, id).await else {
+        return reply(false, id, "dismiss", "Grab not found or already reviewed.");
     };
+    if review_queue && !is_held(&row) {
+        return reply(false, id, "dismiss", "This case is closed or unavailable.");
+    }
     if row.verification.as_deref() != Some("misgrab") {
-        return respond(
-            is_htmx,
-            false,
-            id,
-            "dismiss",
-            "This grab is not a detected misgrab",
-        );
+        return reply(false, id, "dismiss", "This grab is not a detected misgrab");
     }
     if row.state == "pending" {
         // Flagged and held: the user has decided, so remove it now
@@ -368,24 +379,12 @@ pub async fn dismiss_misgrab(
                 let _ = grabbed_torrents::set_misgrab_action(db, id, action.as_str()).await;
             }
             Err(e) => {
-                return respond(
-                    is_htmx,
-                    false,
-                    id,
-                    "dismiss",
-                    &format!("Could not remove: {e}"),
-                );
+                return reply(false, id, "dismiss", &format!("Could not remove: {e}"));
             }
         }
     }
     if let Err(e) = grabbed_torrents::mark_misgrab_reviewed(db, id).await {
-        return respond(
-            is_htmx,
-            false,
-            id,
-            "dismiss",
-            &format!("Could not dismiss: {e}"),
-        );
+        return reply(false, id, "dismiss", &format!("Could not dismiss: {e}"));
     }
     logger::info(
         db,
@@ -394,8 +393,7 @@ pub async fn dismiss_misgrab(
         &format!("series_id={}, hash={}", row.series_id, row.hash),
     )
     .await;
-    respond(
-        is_htmx,
+    reply(
         true,
         id,
         "dismiss",
@@ -587,7 +585,13 @@ mod tests {
             }
             let client = Arc::new(RecordingClient::default());
             let state = build_test_app_state(db.clone(), Some(client.clone()));
-            let response = restore_misgrab(State(state), HxRequest(true), Path(id)).await;
+            let response = restore_misgrab(
+                State(state),
+                HxRequest(true),
+                Path(id),
+                Query(Navigation::default()),
+            )
+            .await;
             assert!(trigger(&response).contains("\"ok\":false"));
             assert!(trigger(&response).contains("file picker"));
             assert!(client.add_calls.lock().unwrap().is_empty());
@@ -612,7 +616,13 @@ mod tests {
         let client = Arc::new(RecordingClient::default());
         let state = build_test_app_state(db.clone(), Some(client.clone()));
 
-        let resp = restore_misgrab(State(state), HxRequest(true), Path(old)).await;
+        let resp = restore_misgrab(
+            State(state),
+            HxRequest(true),
+            Path(old),
+            Query(Navigation::default()),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(trigger(&resp).contains("\"ok\":true"), "{}", trigger(&resp));
         assert!(resp.headers().get("HX-Reswap").is_none());
@@ -658,7 +668,13 @@ mod tests {
             .unwrap();
         let client = Arc::new(RecordingClient::default());
         let state = build_test_app_state(db.clone(), Some(client.clone()));
-        let resp = restore_misgrab(State(state), HxRequest(true), Path(old)).await;
+        let resp = restore_misgrab(
+            State(state),
+            HxRequest(true),
+            Path(old),
+            Query(Navigation::default()),
+        )
+        .await;
         assert!(trigger(&resp).contains("\"ok\":true"));
         let adds = client.add_calls.lock().unwrap().clone();
         assert_eq!(adds[0].0, "https://indexer.example/dl/1.torrent");
@@ -673,7 +689,13 @@ mod tests {
         // No client at all, then a client that refuses the release:
         // both must leave the row exactly as it was.
         let state = build_test_app_state(db.clone(), None);
-        let resp = restore_misgrab(State(state), HxRequest(true), Path(old)).await;
+        let resp = restore_misgrab(
+            State(state),
+            HxRequest(true),
+            Path(old),
+            Query(Navigation::default()),
+        )
+        .await;
         assert!(
             trigger(&resp).contains("\"ok\":false"),
             "{}",
@@ -684,7 +706,13 @@ mod tests {
             ..Default::default()
         });
         let state = build_test_app_state(db.clone(), Some(refusing.clone()));
-        let resp = restore_misgrab(State(state), HxRequest(true), Path(old)).await;
+        let resp = restore_misgrab(
+            State(state),
+            HxRequest(true),
+            Path(old),
+            Query(Navigation::default()),
+        )
+        .await;
         assert!(
             trigger(&resp).contains("\"ok\":false"),
             "{}",
@@ -720,7 +748,13 @@ mod tests {
         // The client is back: the same button finishes the job.
         let working = Arc::new(RecordingClient::default());
         let state = build_test_app_state(db.clone(), Some(working.clone()));
-        let resp = restore_misgrab(State(state), HxRequest(true), Path(old)).await;
+        let resp = restore_misgrab(
+            State(state),
+            HxRequest(true),
+            Path(old),
+            Query(Navigation::default()),
+        )
+        .await;
         assert!(trigger(&resp).contains("\"ok\":true"), "{}", trigger(&resp));
         assert_eq!(working.add_calls.lock().unwrap().len(), 1);
         assert!(grabbed_torrents::is_whitelisted_hash(&db, HASH).await);
@@ -756,7 +790,13 @@ mod tests {
         );
         let client = Arc::new(RecordingClient::default());
         let state = build_test_app_state(db.clone(), Some(client.clone()));
-        let resp = restore_misgrab(State(state), HxRequest(true), Path(id)).await;
+        let resp = restore_misgrab(
+            State(state),
+            HxRequest(true),
+            Path(id),
+            Query(Navigation::default()),
+        )
+        .await;
         assert!(trigger(&resp).contains("\"ok\":true"));
         assert!(
             client.add_calls.lock().unwrap().is_empty(),
@@ -779,7 +819,13 @@ mod tests {
         let id = removed_misgrab(&db, sid).await;
         let client = Arc::new(RecordingClient::default());
         let state = build_test_app_state(db.clone(), Some(client.clone()));
-        let resp = dismiss_misgrab(State(state), HxRequest(true), Path(id)).await;
+        let resp = dismiss_misgrab(
+            State(state),
+            HxRequest(true),
+            Path(id),
+            Query(Navigation::default()),
+        )
+        .await;
         assert!(trigger(&resp).contains("\"ok\":true"), "{}", trigger(&resp));
         assert!(client.delete_calls.lock().unwrap().is_empty());
         let row = grabbed_torrents::get_by_id(&db, id).await.unwrap().unwrap();
@@ -804,7 +850,13 @@ mod tests {
         let id = flagged_misgrab(&db, sid).await;
         let client = Arc::new(RecordingClient::default());
         let state = build_test_app_state(db.clone(), Some(client.clone()));
-        let resp = dismiss_misgrab(State(state), HxRequest(true), Path(id)).await;
+        let resp = dismiss_misgrab(
+            State(state),
+            HxRequest(true),
+            Path(id),
+            Query(Navigation::default()),
+        )
+        .await;
         assert!(trigger(&resp).contains("\"ok\":true"), "{}", trigger(&resp));
         assert_eq!(
             client.delete_calls.lock().unwrap().clone(),
@@ -817,6 +869,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn opposing_decisions_on_one_case_cannot_remove_and_readd_the_release() {
+        let db = in_memory_pool().await;
+        crate::models::config::save_config(&db, &crate::models::config::Config::default())
+            .await
+            .unwrap();
+        let sid = seed(&db).await;
+        let id = flagged_misgrab(&db, sid).await;
+        let client = Arc::new(RecordingClient::default());
+        let state = build_test_app_state(db.clone(), Some(client.clone()));
+        let from_queue = Query(Navigation {
+            return_to: Some("/review".into()),
+        });
+        let (dismissed, restored) = tokio::join!(
+            biased;
+            dismiss_misgrab(State(state.clone()), HxRequest(false), Path(id), from_queue),
+            restore_misgrab(State(state), HxRequest(true), Path(id), Query(Navigation::default())),
+        );
+        assert!(
+            dismissed.headers()["Location"]
+                .to_str()
+                .unwrap()
+                .starts_with("/review?message=")
+        );
+        assert!(trigger(&restored).contains("already reviewed"));
+        assert_eq!(client.delete_calls.lock().unwrap().len(), 1);
+        assert!(client.add_calls.lock().unwrap().is_empty());
+        let row = grabbed_torrents::get_by_id(&db, id).await.unwrap().unwrap();
+        assert_eq!(row.state, "failed");
+        assert_eq!(row.verification.as_deref(), Some("misgrab"));
+    }
+
+    #[tokio::test]
     async fn rejects_rows_that_are_not_misgrabs() {
         let db = in_memory_pool().await;
         let sid = seed(&db).await;
@@ -825,10 +909,22 @@ mod tests {
             .unwrap()
             .unwrap();
         let state = build_test_app_state(db.clone(), Some(Arc::new(RecordingClient::default())));
-        let resp = dismiss_misgrab(State(state.clone()), HxRequest(true), Path(id)).await;
+        let resp = dismiss_misgrab(
+            State(state.clone()),
+            HxRequest(true),
+            Path(id),
+            Query(Navigation::default()),
+        )
+        .await;
         assert!(trigger(&resp).contains("\"ok\":false"));
         assert_eq!(resp.headers().get("HX-Reswap").unwrap(), "none");
-        let resp = restore_misgrab(State(state), HxRequest(true), Path(999)).await;
+        let resp = restore_misgrab(
+            State(state),
+            HxRequest(true),
+            Path(999),
+            Query(Navigation::default()),
+        )
+        .await;
         assert!(trigger(&resp).contains("Grab not found"));
     }
 
@@ -875,7 +971,13 @@ mod tests {
     async fn plain_post_redirects_htmx_aware() {
         let db = in_memory_pool().await;
         let state = build_test_app_state(db, Some(Arc::new(RecordingClient::default())));
-        let resp = restore_misgrab(State(state), HxRequest(false), Path(12345)).await;
+        let resp = restore_misgrab(
+            State(state),
+            HxRequest(false),
+            Path(12345),
+            Query(Navigation::default()),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::SEE_OTHER);
         let loc = resp.headers().get("Location").unwrap().to_str().unwrap();
         assert!(loc.starts_with("/system?tab=misgrabs&msg="), "{loc}");
