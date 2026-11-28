@@ -131,7 +131,7 @@ impl QbitClient {
             if !supported_native_contract(&app, &api) {
                 return Err("Reviewed sources require a supported stable qBittorrent 5.x metadata-only API. No torrent was added.".into());
             }
-            if recovery && !stable_version(&app).is_some_and(|version| version >= (5, 3, 0)) {
+            if recovery && stable_version(&app).is_none_or(|version| version < (5, 3, 0)) {
                 return Err("Automatic metadata recovery requires qBittorrent 5.3 or later in the 5.x series.".into());
             }
             Ok(())
