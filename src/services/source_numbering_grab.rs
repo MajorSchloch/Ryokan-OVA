@@ -28,11 +28,14 @@ pub(crate) async fn mapping_for_selection(
         return Ok(None);
     };
     crate::services::source_numbering::loader::refresh(db, &saved.proof).await?;
-    let entry_pack = saved.proof.origin()? == ProofOrigin::AutomaticEntryPack;
+    let exact_selection = matches!(
+        saved.proof.origin()?,
+        ProofOrigin::AutomaticEntryPack | ProofOrigin::AutomaticNamedPack
+    );
     let selected: Vec<_> = filenames
         .iter()
         .filter(|name| {
-            if entry_pack {
+            if exact_selection {
                 !name.is_empty()
             } else {
                 crate::services::auto_search::is_media_filename(name)

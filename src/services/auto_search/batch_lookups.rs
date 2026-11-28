@@ -15,10 +15,22 @@ struct CachedIndexerQuery {
 pub(crate) struct BatchLookups {
     nyaa: Mutex<HashMap<SearchOptions, Vec<SearchResult>>>,
     indexers: Mutex<HashMap<(i64, SearchQuery), CachedIndexerQuery>>,
-    pub(super) upgrade_proofs: crate::services::source_numbering::loader::Resolver,
+    upgrade_entry_proofs: crate::services::source_numbering::loader::Resolver,
+    upgrade_franchise_proofs: crate::services::source_numbering::loader::Resolver,
 }
 
 impl BatchLookups {
+    pub(crate) fn upgrade_proofs(
+        &self,
+        franchise: bool,
+    ) -> &crate::services::source_numbering::loader::Resolver {
+        if franchise {
+            &self.upgrade_franchise_proofs
+        } else {
+            &self.upgrade_entry_proofs
+        }
+    }
+
     pub(super) async fn nyaa(&self, options: SearchOptions) -> Result<Vec<SearchResult>, String> {
         if let Some(results) = self.nyaa.lock().unwrap().get(&options) {
             return Ok(results.clone());

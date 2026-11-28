@@ -4,6 +4,7 @@ use super::*;
 use ryokan::models::{episode_tags, grabbed_torrents};
 use ryokan::services::download_client::DownloadItemState;
 use ryokan::services::release_numbering::ReleaseMapping;
+use ryokan::services::source_numbering::ProofOrigin;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -132,7 +133,7 @@ struct StrictAutomaticClient {
     expected_series: i64,
     expected_episodes: Vec<i32>,
     expected_names: Vec<String>,
-    entry_pack: AtomicBool,
+    proof_origin: Mutex<ProofOrigin>,
     view: u64,
     item: Mutex<DownloadItem>,
     files: Mutex<Vec<DownloadFile>>,
@@ -202,12 +203,9 @@ impl DownloadClient for StrictAutomaticClient {
             .unwrap()
             .expect("durable mapping before payload");
         let proof = mapping.bound_source().unwrap();
-        if self.entry_pack.load(Ordering::SeqCst) {
-            assert_eq!(
-                proof.origin().unwrap(),
-                ryokan::services::source_numbering::ProofOrigin::AutomaticEntryPack
-            );
-        } else {
+        let expected_origin = *self.proof_origin.lock().unwrap();
+        assert_eq!(proof.origin().unwrap(), expected_origin);
+        if expected_origin == ProofOrigin::AutomaticUnique {
             assert_automatic_provenance(proof, self.view);
         }
         let files = self.files.lock().unwrap().clone();
@@ -305,7 +303,7 @@ async fn fixture(
             .iter()
             .map(|n| source.files[n - 1].clone())
             .collect(),
-        entry_pack: AtomicBool::new(false),
+        proof_origin: Mutex::new(ProofOrigin::AutomaticUnique),
         view: source.view,
         item: Mutex::new(DownloadItem {
             hash: source.hash.clone(),
@@ -400,19 +398,23 @@ fn assert_automatic_provenance(
 }
 
 async fn saved(state: &AppState, source: &Source, episodes: &[i32]) -> ReleaseMapping {
-    let rows = grabbed_torrents::get_all_pending(&state.db).await.unwrap();
-    assert_eq!(rows.len(), 1, "{}", dump_logs(&state.db).await);
-    assert_eq!(rows[0].episode_numbers, episodes);
-    let mapping = grabbed_torrents::get_release_mapping(&state.db, rows[0].id)
-        .await
-        .unwrap()
-        .unwrap();
+    let mapping = pending_mapping(state, episodes).await;
     let proof = mapping.bound_source().unwrap();
     assert_automatic_provenance(proof, source.view);
     assert_eq!(proof.info_hash, source.hash);
     assert_eq!(proof.domain.root_anilist_id, source.root);
     assert_eq!(proof.published_files.len(), source.files.len());
     mapping
+}
+
+async fn pending_mapping(state: &AppState, episodes: &[i32]) -> ReleaseMapping {
+    let rows = grabbed_torrents::get_all_pending(&state.db).await.unwrap();
+    assert_eq!(rows.len(), 1, "{}", dump_logs(&state.db).await);
+    assert_eq!(rows[0].episode_numbers, episodes);
+    grabbed_torrents::get_release_mapping(&state.db, rows[0].id)
+        .await
+        .unwrap()
+        .unwrap()
 }
 
 async fn finish_after_restart(state: &AppState, client: &StrictAutomaticClient) {
@@ -499,7 +501,7 @@ async fn ordinary_episode_batch_fallback_checks_tracks_and_resolution_before_imp
         ("jpn", "eng", 1920, 1080, false, true),
     ] {
         let (temp, state, sid, client) = fixture(&source, id, &[21], &[21]).await;
-        client.entry_pack.store(true, Ordering::SeqCst);
+        *client.proof_origin.lock().unwrap() = ProofOrigin::AutomaticEntryPack;
         let mut cfg = ryokan::models::config::get_config(&state.db)
             .await
             .unwrap()
@@ -1022,17 +1024,61 @@ async fn automatic_source_numbering_daily_upgrade_narrows_the_pack_and_stops_at_
 
 #[tokio::test]
 async fn daily_upgrade_verifies_a_complete_relative_pack_and_limits_selection() {
+    assert_scoped_daily_upgrade(None).await;
+}
+
+#[tokio::test]
+async fn daily_upgrade_verifies_continuous_pack_from_provider_episode_titles() {
+    assert_scoped_daily_upgrade(Some([
+        "Last Light",
+        "Pilot’s Promise",
+        "A Long Way",
+        "Arrival",
+    ]))
+    .await;
+}
+
+async fn assert_scoped_daily_upgrade(names: Option<[&str; 4]>) {
     let _gate = ENV_LOCK.lock().await;
     let owner = 99_834;
-    let title = "Lunar Couriers R2";
+    let title = if names.is_some() {
+        "Lunar Couriers Part 2"
+    } else {
+        "Lunar Couriers R2"
+    };
+    let file_names = names.map_or_else(
+        || {
+            (1..=4)
+                .map(|ep| format!("[Fixture] {title} - {ep:02} [1080p].mkv"))
+                .chain(std::iter::once("release-notes.txt".into()))
+                .collect()
+        },
+        |names| {
+            names
+                .into_iter()
+                .enumerate()
+                .map(|(ep, name)| {
+                    format!(
+                        "S01P02/S01E{:02} - {} [0A1B2C3D].mkv",
+                        ep + 5,
+                        name.replace('’', "`")
+                    )
+                })
+                .chain(std::iter::once(
+                    "S01P02/S01E09 - A Side Story [OVA].mkv".into(),
+                ))
+                .collect()
+        },
+    );
     let source = Source {
         hash: "1212121212121212121212121212121212121212".into(),
         view: 99_834,
-        title: format!("[Fixture] {title} - 01 ~ 04 [1080p] [Multiple Subtitle]"),
-        files: (1..=4)
-            .map(|ep| format!("[Fixture] {title} - {ep:02} [1080p].mkv"))
-            .chain(std::iter::once("release-notes.txt".into()))
-            .collect(),
+        title: if names.is_some() {
+            format!("[Fixture] Lunar Couriers Season 1 Part 02 ({title}) [1080p] [Batch]")
+        } else {
+            format!("[Fixture] {title} - 01 ~ 04 [1080p] [Multiple Subtitle]")
+        },
+        files: file_names,
         entries: vec![
             (99_833, "Lunar Couriers".into(), 4, 0),
             (owner, title.into(), 4, 4),
@@ -1095,6 +1141,45 @@ async fn daily_upgrade_verifies_a_complete_relative_pack_and_limits_selection() 
     .fetch_one(&state.db)
     .await
     .unwrap();
+    if let Some(names) = names {
+        use ryokan::models::local_metadata::{
+            CachedEpisodeMetadata, replace_episode_metadata_for_provider,
+        };
+        *client.proof_origin.lock().unwrap() = ProofOrigin::AutomaticNamedPack;
+        ryokan::services::anibridge::seed_tmdb_episode_spans_for_tests(&[
+            (99_832, 1, 1, 4, 99_833, 1),
+            (99_832, 1, 5, 8, owner, 1),
+        ])
+        .await;
+        let titles: Vec<_> = names
+            .into_iter()
+            .enumerate()
+            .map(|(index, title)| CachedEpisodeMetadata {
+                episode_number: index as i32 + 1,
+                title: title.into(),
+                title_english: title.into(),
+                title_romaji: String::new(),
+                title_native: String::new(),
+                aired: String::new(),
+                source: "jikan".into(),
+            })
+            .collect();
+        let mut mismatched = titles.clone();
+        mismatched[1].title = "Another episode".into();
+        mismatched[1].title_english.clear();
+        replace_episode_metadata_for_provider(&state.db, owner, &mismatched)
+            .await
+            .unwrap();
+        let held = ryokan::services::upgrade::run_once(&state).await.unwrap();
+        assert_eq!(
+            held.upgrades_grabbed, 0,
+            "an unselected file must still match its provider title"
+        );
+        assert_eq!(client.adds.load(Ordering::SeqCst), 0);
+        replace_episode_metadata_for_provider(&state.db, owner, &titles)
+            .await
+            .unwrap();
+    }
     let summary = ryokan::services::upgrade::run_once(&state).await.unwrap();
     assert_eq!(summary.episodes_checked, 2);
     assert_eq!(
@@ -1105,7 +1190,19 @@ async fn daily_upgrade_verifies_a_complete_relative_pack_and_limits_selection() 
     );
     assert_eq!(client.adds.load(Ordering::SeqCst), 1);
     assert_eq!(client.resumes.load(Ordering::SeqCst), 1);
-    let mapping = saved(&state, &source, &[1, 3]).await;
+    let mapping = if names.is_some() {
+        let mapping = pending_mapping(&state, &[1, 3]).await;
+        let proof = mapping.bound_source().unwrap();
+        assert_eq!(proof.origin().unwrap(), ProofOrigin::AutomaticNamedPack);
+        assert_eq!(proof.published_files.len(), source.files.len());
+        assert_eq!(
+            mapping.resolve_bound_file(&source.files[2]).unwrap().first,
+            3
+        );
+        mapping
+    } else {
+        saved(&state, &source, &[1, 3]).await
+    };
     let wrong_selection: Vec<_> = source
         .files
         .iter()
@@ -1124,6 +1221,15 @@ async fn daily_upgrade_verifies_a_complete_relative_pack_and_limits_selection() 
     assert!(!originals[0].exists(), "{}", dump_logs(&state.db).await);
     assert_eq!(std::fs::read(&originals[1]).unwrap(), b"existing file");
     assert_eq!(std::fs::read(&originals[2]).unwrap(), b"existing file");
+    if names.is_some() {
+        let verification: String =
+            sqlx::query_scalar("SELECT verification FROM grabbed_torrents WHERE hash=?")
+                .bind(&source.hash)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(verification, "verified");
+    }
     let retained_state: String =
         sqlx::query_scalar("SELECT state FROM grabbed_torrents WHERE id=?")
             .bind(old_grab)

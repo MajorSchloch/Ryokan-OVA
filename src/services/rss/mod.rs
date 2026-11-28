@@ -391,6 +391,12 @@ async fn exact_source_match(
             "Episode mapping: this partial pack requires the single-episode batch fallback".into(),
         );
     }
+    if saved_sources.iter().any(|saved| {
+        saved.proof.origin()
+            == Ok(crate::services::source_numbering::ProofOrigin::AutomaticNamedPack)
+    }) {
+        return Err("Episode mapping: this source needs a scoped episode search".into());
+    }
     let known_source = !saved_sources.is_empty();
     let automatic_scope = saved_sources.iter().all(|saved| {
         saved.proof.origin() == Ok(crate::services::source_numbering::ProofOrigin::AutomaticUnique)

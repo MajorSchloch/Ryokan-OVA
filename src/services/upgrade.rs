@@ -521,6 +521,26 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 )
                 .is_ok()
             };
+            // A source proof can narrow a pack during an episode lookup.
+            // Defer it to the batch path so the first slot cannot freeze
+            // a one-file job while the same proof covers other upgrades.
+            let standalone = |result: &crate::services::nyaa::SearchResult,
+                              incoming: &ClassificationResult| {
+                let pack = result
+                    .release_mapping
+                    .as_ref()
+                    .and_then(|mapping| mapping.bound_source())
+                    .is_some_and(|proof| {
+                        proof
+                            .published_files
+                            .iter()
+                            .filter(|name| crate::services::post_processing::is_video_file(name))
+                            .take(2)
+                            .count()
+                            > 1
+                    });
+                !(requirements.enabled && pack) && eligible(result, incoming)
+            };
             let (mut best, _) = auto_search::find_best_for_target_with_filter(
                 &state.db,
                 &detail,
@@ -530,7 +550,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 false,
                 &cfs,
                 &state.indexers,
-                Some(&eligible),
+                Some(&standalone),
             )
             .await;
             let used_batch_fallback = best.is_none();

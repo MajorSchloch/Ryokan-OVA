@@ -13,10 +13,12 @@ use tokio::sync::{Mutex, OnceCell};
 
 const MAX_PUBLICATIONS: usize = 3;
 type InterpretationCache = HashMap<String, Result<AutomaticInterpretation, String>>;
+type PublicationCache = HashMap<(String, String), Result<nyaa::PublishedFiles, String>>;
 #[derive(Default)]
 pub(crate) struct Resolver {
     catalogue: OnceCell<Result<BTreeMap<i64, AnimeDetail>, String>>,
     evidence: Mutex<InterpretationCache>,
+    publications: Mutex<PublicationCache>,
 }
 
 async fn catalogue(db: &SqlitePool) -> Result<BTreeMap<i64, AnimeDetail>, String> {
@@ -95,10 +97,20 @@ async fn resolve(
             "continuous numbering source publication unavailable: {e}"
         ))
     })?;
+    resolve_published(db, catalogue, published, hash).await
+}
+
+async fn resolve_published(
+    db: &SqlitePool,
+    catalogue: &BTreeMap<i64, AnimeDetail>,
+    published: nyaa::PublishedFiles,
+    hash: &str,
+) -> Result<AutomaticInterpretation, String> {
     let titles: BTreeSet<_> = published
         .files
         .iter()
         .filter(|f| post_processing::is_video_file(f))
+        .filter(|f| !automatic::is_explicit_sample(Path::new(f)))
         .filter_map(|f| Path::new(f).file_name()?.to_str())
         .filter(|f| !media::is_non_episodic_file(&f.to_ascii_lowercase()))
         .filter_map(library_link::extract_anime_title)
@@ -162,6 +174,23 @@ pub(crate) async fn project(
 }
 
 impl Resolver {
+    pub(crate) async fn prove_named_pack(
+        &self,
+        db: &SqlitePool,
+        detail: &AnimeDetail,
+        candidate: &nyaa::SearchResult,
+    ) -> Result<ReleaseMapping, String> {
+        let hash = normalized_hash(&candidate.info_hash)?;
+        let url = nyaa::view_page_url(&candidate.link)
+            .or_else(|| nyaa::view_page_url(&candidate.source_guid))
+            .ok_or_else(|| fail("episode-title proof needs a same-hash published file manifest"))?;
+        let detail = cached_detail(db, detail.id).await?;
+        let publication = self.publication(&hash, &url).await?;
+        let proof = named_pack::prove(db, &detail, &hash, &url, &publication).await?;
+        let saved = crate::models::source_numbering::save_automatic(db, &proof).await?;
+        ReleaseMapping::from_bound_source(&saved.proof)
+    }
+
     /// Prove one complete, owner-specific entry before projecting any subset.
     /// This also covers later seasons whose exact filenames use relative numbers.
     pub(crate) async fn prove_complete_entry(
@@ -264,15 +293,29 @@ impl Resolver {
         let catalogue = self.catalogue(db).await?;
         let mut evidence = self.evidence.lock().await;
         if !evidence.contains_key(hash) {
-            if evidence.len() >= MAX_PUBLICATIONS {
-                return Err(fail(
-                    "automatic source evidence budget reached; source remains on hold",
-                ));
-            }
-            let result = resolve(db, catalogue, url, hash).await;
+            let published = self.publication(hash, url).await?;
+            let result = resolve_published(db, catalogue, published, hash).await;
             evidence.insert(hash.to_string(), result);
         }
         evidence.get(hash).expect("inserted evidence").clone()
+    }
+
+    async fn publication(&self, hash: &str, url: &str) -> Result<nyaa::PublishedFiles, String> {
+        let key = (hash.to_owned(), url.to_owned());
+        let mut publications = self.publications.lock().await;
+        if let Some(result) = publications.get(&key) {
+            return result.clone();
+        }
+        if publications.len() >= MAX_PUBLICATIONS {
+            return Err(fail(
+                "automatic source evidence budget reached; source remains on hold",
+            ));
+        }
+        let result = nyaa::fetch_published_files(url, hash)
+            .await
+            .map_err(|error| fail(&format!("source publication unavailable: {error}")));
+        publications.insert(key, result.clone());
+        result
     }
 
     pub(crate) async fn apply(
@@ -409,6 +452,9 @@ pub(crate) async fn refresh(db: &SqlitePool, proof: &BoundSourceProof) -> Result
                     "automatic entry-pack evidence changed; source remains on hold",
                 ));
             }
+        }
+        Some(ProofProvenance::AutomaticNamedPack { evidence }) => {
+            named_pack::refresh(db, proof, evidence).await?;
         }
         None => {}
     }

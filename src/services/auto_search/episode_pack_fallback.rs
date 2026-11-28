@@ -64,6 +64,9 @@ pub(crate) async fn find_episode_batch_fallback(
     if episode <= 0 || !published_packs::supports(detail) {
         return (None, Vec::new());
     }
+    let eligible_group = |candidate: &SearchResult, classified: &source::ClassificationResult| {
+        additional.is_none_or(|allows| allows(episode, candidate, classified))
+    };
     let (candidates, mut diagnostics) = collect_scored_batches_for_target_filtered(
         db,
         detail,
@@ -76,7 +79,7 @@ pub(crate) async fn find_episode_batch_fallback(
         } else {
             BatchSearchMode::EpisodeFallback
         },
-        None,
+        additional.map(|_| &eligible_group as CandidateFilter<'_>),
         lookups,
     )
     .await;

@@ -31,7 +31,11 @@ pub async fn save_automatic(
     db: &SqlitePool,
     proof: &BoundSourceProof,
 ) -> Result<SavedDecision, String> {
-    save_decision(db, proof, ProofOrigin::AutomaticUnique).await
+    let origin = match proof.origin()? {
+        ProofOrigin::AutomaticNamedPack => ProofOrigin::AutomaticNamedPack,
+        _ => ProofOrigin::AutomaticUnique,
+    };
+    save_decision(db, proof, origin).await
 }
 
 pub(crate) async fn save_entry_pack(

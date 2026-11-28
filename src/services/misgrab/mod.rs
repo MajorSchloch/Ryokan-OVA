@@ -111,6 +111,43 @@ pub async fn aliases_for_grab(
     })
 }
 
+/// Episode-title proofs identify the series even when its name is absent
+/// from the filenames. The client must report the hash-bound manifest.
+async fn named_pack_verdict(
+    db: &SqlitePool,
+    grab: &GrabbedTorrent,
+    filenames: &[String],
+) -> Option<Verdict> {
+    use crate::services::source_numbering::ProofOrigin;
+    let mapping = match grabbed_torrents::get_release_mapping(db, grab.id).await {
+        Ok(mapping) => mapping?,
+        Err(_) => {
+            return Some(Verdict::Unverifiable {
+                reason: "the saved release decision could not be verified",
+            });
+        }
+    };
+    let proof = mapping.bound_source()?;
+    if proof.origin() != Ok(ProofOrigin::AutomaticNamedPack) {
+        return None;
+    }
+    let owner = series::get_by_id(db, grab.series_id).await.ok().flatten();
+    if !grab.hash.eq_ignore_ascii_case(&proof.info_hash)
+        || owner.is_none_or(|row| row.anilist_id != proof.target_anilist_id)
+        || proof.episodes() != grab.episode_numbers
+        || proof.selected_indices(filenames).is_err()
+    {
+        return Some(Verdict::Unverifiable {
+            reason: "the download differs from its saved episode-title proof",
+        });
+    }
+    Some(Verdict::Verified {
+        matched_file: proof.selected_files[0].name.clone(),
+        matched_alias: "the saved provider episode titles".into(),
+        notes: Vec::new(),
+    })
+}
+
 /// Judge the file list and stamp the verdict once. A hash the user
 /// restored is stamped `whitelisted` without being judged. Logs a
 /// warning the first time a misgrab is recorded.
@@ -134,7 +171,9 @@ pub async fn assess_and_stamp(
     // segment) over every file times every alias; a large pack with
     // a wide sibling set is milliseconds of work that must not sit on
     // a Tokio worker.
-    let verdict = {
+    let verdict = if let Some(verdict) = named_pack_verdict(db, grab, filenames).await {
+        verdict
+    } else {
         let own = aliases.own.clone();
         let siblings = aliases.siblings.clone();
         let files = filenames.to_vec();
